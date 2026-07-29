@@ -28,8 +28,8 @@
 </div>
 
 <p align="center">
-  <a href="./docs/assets/secflow-macos-dashboard.png">
-    <img src="./docs/assets/secflow-macos-dashboard.png" alt="SecFlow macOS 原生总览界面" />
+  <a href="./docs/assets/secflow-macos-agent-result.jpg">
+    <img src="./docs/assets/secflow-macos-agent-result.jpg" alt="SecFlow macOS 原生安全智能体工作台" />
   </a>
 </p>
 
@@ -58,25 +58,25 @@ SecFlow Knowledge Security Assistant 是从 SecFlow AI 平台中独立出来的 
 
 ## 🖥️ macOS 产品界面
 
-所有图片均来自实际运行的 macOS 原生 SwiftUI 客户端，不是 Web 控制台或设计稿。
+所有图片均于 2026 年 7 月 29 日从实际运行的 macOS 原生 SwiftUI 客户端截取，不是 Web 控制台或设计稿。当前主窗口采用智能体优先结构：侧栏悬停展开，代码扫描、组件查询、知识图谱、SBOM 和报告交付均由聊天中的 LangGraph 子图承接，不再以独立报告中心占用主导航。
 
-### 漏洞知识图谱
+### 实时 Agent 执行过程
 
-按漏洞编号查询关联组件、弱点类型、公告、影响范围、缓释措施与修复版本。
+问题提交后实时展示意图识别、长期记忆、漏洞情报查询等高层步骤，并提供 Skeleton、耗时、停止分析与运行状态反馈。
 
 <p align="center">
-  <a href="./docs/assets/secflow-macos-knowledge-graph.png">
-    <img src="./docs/assets/secflow-macos-knowledge-graph.png" alt="SecFlow macOS 原生漏洞知识图谱界面" />
+  <a href="./docs/assets/secflow-macos-agent-running.jpg">
+    <img src="./docs/assets/secflow-macos-agent-running.jpg" alt="SecFlow macOS 智能体实时执行过程" />
   </a>
 </p>
 
-### 分析报告中心
+### 结构化安全分析结果
 
-集中管理依赖漏洞与代码漏洞结果，并提供 Markdown、HTML、PDF 等交付格式。
+完成后在同一对话流中展示模型、工具数量、耗时、知识命中、可折叠执行步骤、Thinking 高层任务、漏洞卡片与来源；报告和 Excel 下载在对应子图的 interrupt 确认后执行。
 
 <p align="center">
-  <a href="./docs/assets/secflow-macos-reports.png">
-    <img src="./docs/assets/secflow-macos-reports.png" alt="SecFlow macOS 原生报告中心界面" />
+  <a href="./docs/assets/secflow-macos-agent-result.jpg">
+    <img src="./docs/assets/secflow-macos-agent-result.jpg" alt="SecFlow macOS 智能体结构化漏洞分析结果" />
   </a>
 </p>
 
