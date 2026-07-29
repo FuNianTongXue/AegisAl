@@ -10,12 +10,30 @@ from unittest.mock import patch
 from app.intelligence import _VulnerabilityCatalog
 from app.memory import LongTermMemoryService
 from app.storage import StateStore, default_state
+from app.task_store import AgentTaskStore
 
 
 TEST_MASTER_KEY = "unit-test-secflow-local-storage-key"
 
 
 class SecureStorageTests(unittest.TestCase):
+    def test_stores_recover_when_ciphertext_uses_an_unavailable_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_store = StateStore(root / "state.json")
+            memory_store = LongTermMemoryService(root / "memory.json")
+            task_store = AgentTaskStore(root / "tasks.json")
+
+            with patch.dict(os.environ, {"SECFLOW_STORAGE_MASTER_KEY": "retired-key"}):
+                state_store.write(default_state())
+                memory_store.add_exchange("user-a", "question", {"answer": "answer"})
+                task_store.create({"id": "task-a", "user_id": "user-a"})
+
+            with patch.dict(os.environ, {"SECFLOW_STORAGE_MASTER_KEY": "replacement-key"}):
+                self.assertEqual(state_store.read()["records"][0]["id"], "CVE-2021-44228")
+                self.assertEqual(memory_store.get_history("user-a"), [])
+                self.assertEqual(task_store.list("user-a"), [])
+
     def test_state_store_encrypts_file_and_decrypts_internally(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

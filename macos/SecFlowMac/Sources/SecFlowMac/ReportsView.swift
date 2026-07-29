@@ -6,6 +6,8 @@ struct ReportsView: View {
     @State private var isSelecting = false
     @State private var selectedReportIDs: Set<String> = []
     @State private var isShowingDeleteConfirmation = false
+    @State private var pendingDownloadInterrupt: ReportInterruptEnvelope?
+    @State private var pendingDownloadFormat: ReportDownloadFormat?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -48,6 +50,22 @@ struct ReportsView: View {
         } message: {
             Text(model.uiText("报告文件和对应记录会被永久删除，此操作无法撤销。"))
         }
+        .alert(
+            pendingDownloadInterrupt?.question ?? model.uiText("确认下载报告？"),
+            isPresented: Binding(
+                get: { pendingDownloadInterrupt != nil },
+                set: { if !$0 { pendingDownloadInterrupt = nil } }
+            )
+        ) {
+            Button(model.uiText("取消"), role: .cancel) {
+                resumePendingDownload(confirm: false)
+            }
+            Button(model.uiText("确认下载")) {
+                resumePendingDownload(confirm: true)
+            }
+        } message: {
+            Text(pendingDownloadInterrupt?.detail ?? model.uiText("确认后才会准备本次下载制品。"))
+        }
     }
 
     private var reportList: some View {
@@ -55,7 +73,7 @@ struct ReportsView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Text(model.uiText("分析报告"))
-                        .font(.headline)
+                        .font(AppTypography.headline)
                     Spacer()
                     if isSelecting {
                         Button(selectedReportIDs.count == model.reports.count ? model.uiText("取消全选") : model.uiText("全选")) {
@@ -83,6 +101,14 @@ struct ReportsView: View {
                         .disabled(selectedReportIDs.isEmpty || model.busyActions.contains("delete-reports"))
                         .help(model.uiText("删除选中的报告"))
                     } else {
+                        Button {
+                            requestAllReportsDownload()
+                        } label: {
+                            Image(systemName: "arrow.down.square.stack")
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(model.reports.isEmpty || model.busyActions.contains("report-action-start"))
+                        .help(model.uiText("下载所有报告"))
                         Button(model.uiText("选择")) {
                             isSelecting = true
                             selectedReportIDs.removeAll()
@@ -131,20 +157,26 @@ struct ReportsView: View {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(report.title)
-                                .font(.title3.weight(.semibold))
+                                .font(AppTypography.title3.weight(.semibold))
                                 .foregroundStyle(AppPalette.text)
                             Text("\(report.fileName) · \(report.createdAt)")
-                                .font(.caption)
+                                .font(AppTypography.caption)
                                 .foregroundStyle(AppPalette.textMuted)
                         }
                         Spacer()
                         Menu {
                             ForEach(report.downloadFormats) { format in
                                 Button {
-                                    download(report, format: format)
+                                    requestDownload(report, format: format)
                                 } label: {
                                     Label(format.downloadLabel(using: model), systemImage: format.systemImage)
                                 }
+                            }
+                            Divider()
+                            Button {
+                                requestDownload(report, allFormats: true)
+                            } label: {
+                                Label(model.uiText("下载全部格式"), systemImage: "archivebox")
                             }
                         } label: {
                             Label(model.uiText("下载报告"), systemImage: "arrow.down.doc")
@@ -170,7 +202,12 @@ struct ReportsView: View {
 
                     Divider()
 
-                    MarkdownReportBody(content: report.content)
+                    MarkdownReportBody(
+                        content: report.content,
+                        mcpAudit: report.metadata?.reportMcp,
+                        mcpAudits: report.metadata?.reportMcps ?? [],
+                        reportCharts: report.metadata?.reportCharts
+                    )
                         .id(report.id)
                 }
             }
@@ -187,13 +224,56 @@ struct ReportsView: View {
         NSPasteboard.general.setString(value, forType: .string)
     }
 
-    private func download(_ report: AnalysisReportDetail, format: ReportDownloadFormat) {
+    private func requestDownload(
+        _ report: AnalysisReportDetail,
+        format: ReportDownloadFormat? = nil,
+        allFormats: Bool = false
+    ) {
+        Task { @MainActor in
+            let formats = allFormats ? ReportDownloadFormat.allCases : [format ?? .pdf]
+            guard let result = await model.startReportDownload(
+                reportIDs: [report.id],
+                formats: formats,
+                allFormats: allFormats
+            ), let interrupt = result.interrupt else { return }
+            pendingDownloadFormat = allFormats ? nil : format
+            pendingDownloadInterrupt = interrupt
+        }
+    }
+
+    private func requestAllReportsDownload() {
+        Task { @MainActor in
+            guard let result = await model.startReportDownload(
+                reportIDs: model.reports.map(\.id),
+                formats: ReportDownloadFormat.allCases,
+                allReports: true
+            ), let interrupt = result.interrupt else { return }
+            pendingDownloadFormat = nil
+            pendingDownloadInterrupt = interrupt
+        }
+    }
+
+    private func resumePendingDownload(confirm: Bool) {
+        guard let interrupt = pendingDownloadInterrupt else { return }
+        let format = pendingDownloadFormat
+        pendingDownloadInterrupt = nil
+        pendingDownloadFormat = nil
+        Task { @MainActor in
+            guard let answer = await model.resumeReportInterrupt(interrupt, confirm: confirm, format: format),
+                  confirm,
+                  let artifact = answer.artifacts.first
+            else { return }
+            saveArtifact(artifact)
+        }
+    }
+
+    private func saveArtifact(_ artifact: AssistantArtifact) {
         let panel = NSSavePanel()
-        panel.title = model.uiText("下载%@分析报告", format.label)
-        panel.nameFieldStringValue = report.downloadFileName(for: format)
+        panel.title = model.uiText("下载分析报告")
+        panel.nameFieldStringValue = artifact.fileName
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        Task { await model.downloadReport(report, to: destination, format: format) }
+        Task { await model.downloadAssistantArtifact(artifact, to: destination) }
     }
 
     private func toggleSelection(_ reportID: String) {
@@ -226,6 +306,7 @@ private extension ReportDownloadFormat {
         switch self {
         case .markdown: "doc.text"
         case .html: "globe"
+        case .word: "doc.text.fill"
         case .pdf: "doc.richtext"
         }
     }
@@ -235,6 +316,7 @@ private extension ReportDownloadFormat {
         switch self {
         case .markdown: model.uiText("下载 Markdown")
         case .html: model.uiText("下载 HTML")
+        case .word: model.uiText("下载 Word")
         case .pdf: model.uiText("下载 PDF")
         }
     }
@@ -255,11 +337,11 @@ private struct ReportRow: View {
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(report.title)
-                        .font(.callout.weight(.semibold))
+                        .font(AppTypography.callout.weight(.semibold))
                         .foregroundStyle(AppPalette.text)
                         .lineLimit(2)
                     Text(report.createdAt)
-                        .font(.caption2.monospacedDigit())
+                        .font(AppTypography.caption2.monospacedDigit())
                         .foregroundStyle(AppPalette.textSubtle)
                 }
                 Spacer()
@@ -461,17 +543,37 @@ enum ReportMarkdownBlock: Equatable {
 struct MarkdownReportBody: View {
     @EnvironmentObject private var model: AppModel
     let content: String
+    let mcpAudit: ReportMCPAudit?
+    let mcpAudits: [ReportMCPAudit]
+    let reportCharts: ScanReportCharts?
     @State private var expandedSectionIDs: Set<String> = []
     @State private var expandedEntryIDs: Set<String> = []
 
-    init(content: String) {
+    init(
+        content: String,
+        mcpAudit: ReportMCPAudit? = nil,
+        mcpAudits: [ReportMCPAudit] = [],
+        reportCharts: ScanReportCharts? = nil
+    ) {
         self.content = content
+        self.mcpAudit = mcpAudit
+        self.mcpAudits = mcpAudits
+        self.reportCharts = reportCharts
     }
 
     var body: some View {
         let document = ReportMarkdownDocument(markdown: content, language: model.appLanguage)
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
+                let visibleAudits = mcpAudits.isEmpty ? mcpAudit.map { [$0] } ?? [] : mcpAudits
+                ForEach(Array(visibleAudits.enumerated()), id: \.offset) { _, audit in
+                    ReportMCPAuditCard(audit: audit)
+                }
+
+                if let reportCharts, reportCharts.chartData.hasContent {
+                    DependencyChartsView(chartData: reportCharts.chartData, presentation: .scanReport)
+                }
+
                 if !document.overview.isEmpty {
                     ReportOverviewCard(title: document.title, content: document.overview)
                 }
@@ -488,6 +590,85 @@ struct MarkdownReportBody: View {
             .padding(.bottom, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            guard expandedSectionIDs.isEmpty, expandedEntryIDs.isEmpty else { return }
+            for section in document.sections where isCodeEvidenceSection(section.title) {
+                expandedSectionIDs.insert(section.id)
+                if let firstEntry = section.entries.first {
+                    expandedEntryIDs.insert("\(section.id)-\(firstEntry.id)")
+                }
+            }
+        }
+    }
+
+    private func isCodeEvidenceSection(_ title: String) -> Bool {
+        title.contains("代码风险")
+            || title.contains("代码漏洞")
+            || title.localizedCaseInsensitiveContains("code finding")
+            || title.contains("コード脆弱性")
+            || title.contains("코드 취약점")
+    }
+}
+
+private struct ReportMCPAuditCard: View {
+    @EnvironmentObject private var model: AppModel
+    let audit: ReportMCPAudit
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: audit.isCompleted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(AppTypography.title3)
+                .foregroundStyle(audit.isCompleted ? AppPalette.success : AppPalette.warning)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(model.uiText("MCP 报告工具"))
+                        .font(AppTypography.headline)
+                        .foregroundStyle(AppPalette.text)
+                    StatusBadge(
+                        text: model.uiText(audit.isCompleted ? "已调用" : "调用失败"),
+                        tone: audit.isCompleted ? .good : .warning
+                    )
+                }
+                Text("\(audit.server) / \(audit.tool)")
+                    .font(AppTypography.callout.monospaced())
+                    .foregroundStyle(AppPalette.textMuted)
+                    .textSelection(.enabled)
+                Text(auditSummary)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppPalette.textSubtle)
+                if let digest = audit.outputSha256, !digest.isEmpty {
+                    Text("SHA-256 \(digest)")
+                        .font(AppTypography.caption2.monospaced())
+                        .foregroundStyle(AppPalette.textSubtle)
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                }
+                if let error = audit.error, !error.isEmpty {
+                    Text(error)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppPalette.warning)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppPalette.cardMuted.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke((audit.isCompleted ? AppPalette.success : AppPalette.warning).opacity(0.32))
+        }
+    }
+
+    private var auditSummary: String {
+        if let size = audit.artifactSize, let mediaType = audit.mediaType, !mediaType.isEmpty {
+            return "\(mediaType) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)) · \(audit.invokedAt)"
+        }
+        return model.uiText("处理事实 %d 条 · %@", audit.factCount ?? 0, audit.invokedAt)
     }
 }
 
@@ -633,18 +814,18 @@ private struct ReportCardTitle: View {
                     .fill(accent.opacity(0.12))
                     .frame(width: 32, height: 32)
                 Image(systemName: icon)
-                    .font(.caption.weight(.semibold))
+                    .font(AppTypography.caption.weight(.semibold))
                     .foregroundStyle(accent)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                     .fixedSize(horizontal: false, vertical: true)
                 if isExpanded != true, !preview.isEmpty {
                     Text(preview)
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.textMuted)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -654,7 +835,7 @@ private struct ReportCardTitle: View {
             Spacer(minLength: 8)
             if let accessory {
                 Text(accessory)
-                    .font(.caption2.weight(.semibold))
+                    .font(AppTypography.caption2.weight(.semibold))
                     .foregroundStyle(accent)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
@@ -663,7 +844,7 @@ private struct ReportCardTitle: View {
             }
             if let isExpanded {
                 Image(systemName: "chevron.down")
-                    .font(.caption.weight(.bold))
+                    .font(AppTypography.caption.weight(.bold))
                     .foregroundStyle(AppPalette.textSubtle)
                     .rotationEffect(.degrees(isExpanded ? 180 : 0))
                     .padding(.top, 7)
@@ -710,7 +891,7 @@ private struct ReportMarkdownQuote: View {
                 .fill(AppPalette.primary)
                 .frame(width: 3)
             Text((try? AttributedString(markdown: value)) ?? AttributedString(value))
-                .font(.callout)
+                .font(AppTypography.callout)
                 .foregroundStyle(AppPalette.textMuted)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -800,22 +981,22 @@ private struct ReportMarkdownLine: View {
             Link(destination: url) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "arrow.up.right.square")
-                        .font(.caption)
+                        .font(AppTypography.caption)
                     Text(value)
-                        .font(.callout)
+                        .font(AppTypography.callout)
                         .lineLimit(3)
                 }
                 .foregroundStyle(AppPalette.primaryStrong)
             }
         } else if let markdown = try? AttributedString(markdown: value) {
             Text(markdown)
-                .font(.callout)
+                .font(AppTypography.callout)
                 .foregroundStyle(AppPalette.text)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(value)
-                .font(.callout)
+                .font(AppTypography.callout)
                 .foregroundStyle(AppPalette.text)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -832,7 +1013,7 @@ private struct ReportCodeBlock: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(language.isEmpty ? model.uiText("代码") : language.uppercased())
-                    .font(.caption2.weight(.semibold))
+                    .font(AppTypography.caption2.weight(.semibold))
                     .foregroundStyle(AppPalette.onBrandMuted)
                 Spacer()
                 Button {
@@ -840,7 +1021,7 @@ private struct ReportCodeBlock: View {
                     NSPasteboard.general.setString(content, forType: .string)
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.onBrand)
                 }
                 .buttonStyle(.plain)
@@ -849,7 +1030,7 @@ private struct ReportCodeBlock: View {
 
             ScrollView(.horizontal) {
                 Text(content)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(AppTypography.caption.monospaced())
                     .foregroundStyle(AppPalette.onBrand)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: true, vertical: true)

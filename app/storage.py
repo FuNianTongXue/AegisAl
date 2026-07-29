@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
+
 from app.secure_storage import decrypt_json_from_text, encrypt_json_to_text
 
 
@@ -76,15 +78,19 @@ def default_state() -> dict[str, Any]:
             },
         ],
         "llm": {
-            "provider": "openai",
-            "model": "gpt-4o",
-            "endpoint": "https://api.openai.com/v1",
+            "provider": "custom",
+            "catalog_provider": "sub2api",
+            "model": "gpt-5.6-sol",
+            "endpoint": "https://carpool.composiastack.com",
             "api_key": "",
             "enabled": False,
             "max_tokens": 1800,
             "temperature": 0.25,
             "top_p": 0.9,
             "timeout_ms": 60000,
+            "wire_api": "responses",
+            "reasoning_effort": "xhigh",
+            "disable_response_storage": True,
             "updated_at": "",
         },
         "information": {
@@ -118,6 +124,13 @@ def default_state() -> dict[str, Any]:
             },
             "legal": {},
         },
+        "billing": {
+            "subscriptions": {},
+            "orders": {},
+            "idempotency_keys": {},
+            "payment_events": {},
+            "usage": {},
+        },
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
@@ -142,7 +155,7 @@ class StateStore:
                 if not raw.lstrip().startswith('{"__secflow_encrypted__"'):
                     self.write(state)
                 return state
-            except (json.JSONDecodeError, OSError, ValueError):
+            except (InvalidTag, json.JSONDecodeError, OSError, ValueError):
                 state = default_state()
                 self.write(state)
                 return state

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import html
+import io
 import json
 import os
 import re
+import zipfile
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -16,9 +18,13 @@ from app.storage import DATA_DIR, now_iso
 
 
 REPORT_INDEX_PURPOSE = "secflow-report-index"
+REPORT_ARTIFACT_INDEX_PURPOSE = "secflow-report-artifact-index"
 _ENGINE_NAME_PATTERN = re.compile(r"CodeQL|Semgrep", flags=re.IGNORECASE)
 _REPORT_STYLE_MARKER = "<!-- secflow-report-style:v2 -->"
-_REPORT_FORMATS = {"md", "html", "pdf"}
+_REPORT_FORMATS = {"md", "html", "pdf", "docx"}
+_SCAN_RESULT_JSON_SCHEMA = "secflow.scan-results/v1"
+_REPORT_DOCUMENT_JSON_SCHEMA = "secflow.report-document/v1"
+_REPORT_DOCUMENT_SCHEMA_VERSION = 4
 _REPORT_FILE_PREVIEW_LIMIT = 8
 _REPORT_DEPENDENCY_PREVIEW_LIMIT = 10
 _REPORT_RECORD_LIMIT = 30
@@ -27,7 +33,89 @@ _REPORT_MEDIA_TYPES = {
     "md": "text/markdown; charset=utf-8",
     "html": "text/html; charset=utf-8",
     "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+_REPORT_WEB_FONT_FAMILY = (
+    '"SF Pro Text", "PingFang SC", "Apple Color Emoji", '
+    '-apple-system, BlinkMacSystemFont, "Microsoft YaHei", "Segoe UI", sans-serif'
+)
+_CHINA_STANDARD_TIME = timezone(timedelta(hours=8), name="UTC+08:00")
+_DEPRECATED_REPORT_SECTIONS = {
+    "扫描文件与规则",
+    "掃描檔案與規則",
+    "Scan files and rules",
+    "Scanned files and rules",
+}
+
+
+class ReportDownloadArtifactStore:
+    def __init__(self, root: Path | None = None, *, retain: int = 100) -> None:
+        self.root = root or (DATA_DIR / "report_artifacts")
+        self.index_path = self.root / "index.json"
+        self.retain = max(10, min(int(retain), 500))
+        self._lock = RLock()
+
+    def save(self, content: bytes, *, file_name: str, media_type: str, user_id: str) -> dict[str, Any]:
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_id = f"report-artifact-{digest[:24]}"
+        safe_name = Path(str(file_name or "SecFlow-report.bin")).name
+        suffix = Path(safe_name).suffix.lower() or ".bin"
+        path = self.root / f"{artifact_id}{suffix}"
+        generated_at = now_iso()
+        item = {
+            "id": artifact_id,
+            "kind": "report",
+            "file_name": safe_name,
+            "media_type": media_type,
+            "download_path": f"/api/assistant/artifacts/{artifact_id}",
+            "sha256": digest,
+            "size": len(content),
+            "generated_at": generated_at,
+            "user_id": str(user_id or "default"),
+            "storage_name": path.name,
+        }
+        with self._lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_bytes(content)
+            temporary.chmod(0o600)
+            os.replace(temporary, path)
+            index = [entry for entry in self._read_index() if entry.get("id") != artifact_id]
+            index.insert(0, item)
+            stale = index[self.retain :]
+            self._write_index(index[: self.retain])
+            for entry in stale:
+                stale_path = self.root / Path(str(entry.get("storage_name") or "")).name
+                if stale_path.parent.resolve() == self.root.resolve():
+                    stale_path.unlink(missing_ok=True)
+        return {key: value for key, value in item.items() if key not in {"user_id", "storage_name"}}
+
+    def resolve(self, artifact_id: str) -> tuple[Path, str, str]:
+        clean_id = str(artifact_id or "").strip()
+        if not re.fullmatch(r"report-artifact-[a-f0-9]{24}", clean_id):
+            raise KeyError(artifact_id)
+        with self._lock:
+            item = next((entry for entry in self._read_index() if entry.get("id") == clean_id), None)
+            if not item:
+                raise KeyError(artifact_id)
+            path = self.root / Path(str(item.get("storage_name") or "")).name
+            if not path.is_file() or path.parent.resolve() != self.root.resolve():
+                raise KeyError(artifact_id)
+        return path, Path(str(item.get("file_name") or path.name)).name, str(item.get("media_type") or "application/octet-stream")
+
+    def _read_index(self) -> list[dict[str, Any]]:
+        if not self.index_path.is_file():
+            return []
+        try:
+            decoded = decrypt_json_from_text(self.index_path.read_text(encoding="utf-8"), REPORT_ARTIFACT_INDEX_PURPOSE)
+            return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _write_index(self, index: list[dict[str, Any]]) -> None:
+        temporary = self.index_path.with_suffix(".tmp")
+        temporary.write_text(encrypt_json_to_text(index, REPORT_ARTIFACT_INDEX_PURPOSE), encoding="utf-8")
+        os.replace(temporary, self.index_path)
 
 
 def _normalize_report_language(value: Any) -> str:
@@ -51,6 +139,21 @@ def _normalize_report_language(value: Any) -> str:
     if text in {"ru", "ru-ru", "russian", "русский"}:
         return "ru"
     return "zh-Hans"
+
+
+def _report_china_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return "-"
+    if re.search(r"(?:UTC\+08:00|\+08:00)$", text):
+        return text
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(_CHINA_STANDARD_TIME).strftime("%Y-%m-%d %H:%M:%S UTC+08:00")
+    except (TypeError, ValueError):
+        return text
 
 
 _REPORT_TEXT: dict[str, dict[str, str]] = {
@@ -336,7 +439,7 @@ def build_report_metrics(
         finding_count = len(findings)
     severity = _structured_severity_distribution(records, findings)
     return {
-        "generated_at": generated_at or now_iso(),
+        "generated_at": _report_china_time(generated_at or now_iso()),
         "language": _normalize_report_language(language),
         "attachments": len(files),
         "dependencies": len(dependencies),
@@ -388,6 +491,28 @@ def _normalize_report_severity(value: Any) -> str:
         "低": "LOW",
     }
     return aliases.get(normalized, "")
+
+
+def _report_severity_zh(value: Any) -> str:
+    return {
+        "CRITICAL": "严重",
+        "HIGH": "高危",
+        "MEDIUM": "中危",
+        "LOW": "低危",
+    }.get(_normalize_report_severity(value), "未知")
+
+
+def _report_finding_remediation(finding: dict[str, Any]) -> str:
+    for key in ("remediation", "recommendation", "fix", "fix_recommendation"):
+        value = _report_plain_text(finding.get(key) or "")
+        if value and value != "-":
+            return value
+    if finding.get("fixed_snippet"):
+        return "按下方修复代码替换风险调用，并补充覆盖输入边界、异常路径和业务流程的安全回归测试。"
+    return (
+        "根据风险说明收敛对应危险调用或不安全配置，优先采用项目已验证的安全 API 或配置；"
+        "补充覆盖该风险位置的单元测试、集成测试和安全回归，并复核 Source→Sink 路径已被阻断。"
+    )
 
 
 def _has_uploaded_code(files: list[dict[str, Any]], static_analysis: dict[str, Any] | None = None) -> bool:
@@ -496,11 +621,73 @@ class ReportStore:
             content = self._sanitize_report_file(path)
         return {**_public_report_summary(metadata), "content": content}
 
+    def get_report_json(self, report_id: str) -> dict[str, Any]:
+        clean_id = _safe_report_id(report_id)
+        with self._lock:
+            metadata = next((item for item in self._read_index() if item.get("id") == clean_id), None)
+            if not metadata:
+                raise KeyError(report_id)
+            metadata = self._ensure_report_artifacts(metadata)
+            source_path = self.root / Path(str(metadata.get("source_json_file") or "")).name
+            if not source_path.is_file() or source_path.parent.resolve() != self.root.resolve():
+                raise KeyError(report_id)
+            document = _load_report_json_document(source_path)
+        return document
+
     def resolve_download(self, report_id: str, report_format: str | None = None) -> tuple[Path, str] | tuple[Path, str, str]:
         if report_format is None:
             path, file_name, _ = self._resolve_download(report_id, "md")
             return path, file_name
         return self._resolve_download(report_id, report_format)
+
+    def prepare_download_artifact(
+        self,
+        report_ids: list[str],
+        formats: list[str],
+        *,
+        user_id: str = "default",
+    ) -> dict[str, Any]:
+        clean_ids = list(dict.fromkeys(_safe_report_id(value) for value in report_ids if str(value).strip()))
+        clean_formats = list(dict.fromkeys(_normalize_report_format(value) for value in formats if str(value).strip()))
+        if not clean_ids:
+            raise ValueError("At least one report is required")
+        if not clean_formats:
+            raise ValueError("At least one report format is required")
+        catalog = {str(item.get("id") or ""): item for item in self.list_reports()}
+        for report_id in clean_ids:
+            report = catalog.get(report_id)
+            if not report:
+                raise KeyError(report_id)
+            metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+            if str(metadata.get("user_id") or "default") != str(user_id or "default"):
+                raise KeyError(report_id)
+
+        resolved: list[tuple[str, str, Path, str, str]] = []
+        for report_id in clean_ids:
+            for report_format in clean_formats:
+                path, file_name, media_type = self._resolve_download(report_id, report_format)
+                resolved.append((report_id, report_format, path, file_name, media_type))
+        if len(resolved) == 1:
+            _, _, path, file_name, media_type = resolved[0]
+            return report_artifact_store.save(
+                path.read_bytes(),
+                file_name=file_name,
+                media_type=media_type,
+                user_id=user_id,
+            )
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
+            for report_id, _, path, file_name, _ in resolved:
+                arcname = f"{report_id}/{Path(file_name).name}" if len(clean_ids) > 1 else Path(file_name).name
+                bundle.writestr(arcname, path.read_bytes())
+        label = "all-reports" if len(clean_ids) > 1 else clean_ids[0]
+        return report_artifact_store.save(
+            archive.getvalue(),
+            file_name=f"SecFlow-{label}-bundle.zip",
+            media_type="application/zip",
+            user_id=user_id,
+        )
 
     def _resolve_download(self, report_id: str, report_format: str) -> tuple[Path, str, str]:
         clean_format = _normalize_report_format(report_format)
@@ -569,6 +756,8 @@ class ReportStore:
         finding_count: int,
         metadata: dict[str, Any] | None = None,
         input_fingerprint: str = "",
+        report_source: dict[str, Any] | None = None,
+        rendered_artifacts: dict[str, bytes | str] | None = None,
     ) -> dict[str, Any]:
         content = _sanitize_report_content(content)
         created_at = now_iso()
@@ -577,11 +766,13 @@ class ReportStore:
         report_id = _safe_report_id(report_id)
         base_name = _report_file_base_name(title, metadata or {}, created_at)
         file_names = _report_file_names(base_name)
+        source_json_file = f"{_safe_report_file_stem(base_name)}.json"
         summary = {
             "id": report_id,
             "title": title.strip() or "依赖漏洞与代码漏洞分析报告",
             "file_name": file_names["md"],
             "file_names": file_names,
+            "source_json_file": source_json_file,
             "available_formats": sorted(_REPORT_FORMATS),
             "created_at": created_at,
             "mode": mode,
@@ -611,6 +802,7 @@ class ReportStore:
                             "title": summary["title"],
                             "file_name": file_names["md"],
                             "file_names": file_names,
+                            "source_json_file": source_json_file,
                             "available_formats": sorted(_REPORT_FORMATS),
                             "mode": mode,
                             "vulnerability_count": int(vulnerability_count),
@@ -619,33 +811,118 @@ class ReportStore:
                             "updated_at": created_at,
                         }
                     )
-                    self._write_report_artifacts(existing, content)
+                    self._write_report_artifacts(
+                        existing,
+                        content,
+                        report_source=report_source,
+                        rendered_artifacts=rendered_artifacts,
+                    )
                     self._write_index(index)
                     return _public_report_summary(existing)
-            self._write_report_artifacts(summary, content)
+            self._write_report_artifacts(
+                summary,
+                content,
+                report_source=report_source,
+                rendered_artifacts=rendered_artifacts,
+            )
             index = [item for item in index if item.get("id") != report_id]
             index.insert(0, summary)
             self._write_index(index[:100])
         return _public_report_summary(summary)
 
-    def _write_report_artifacts(self, metadata: dict[str, Any], markdown: str) -> None:
+    def save_json_report(
+        self,
+        title: str,
+        content: str,
+        *,
+        report_source: dict[str, Any],
+        mode: str,
+        vulnerability_count: int,
+        finding_count: int,
+        metadata: dict[str, Any] | None = None,
+        input_fingerprint: str = "",
+        rendered_artifacts: dict[str, bytes | str] | None = None,
+    ) -> dict[str, Any]:
+        validated_source = validate_scan_result_json(report_source)
+        return self.save_markdown(
+            title,
+            content,
+            mode=mode,
+            vulnerability_count=vulnerability_count,
+            finding_count=finding_count,
+            metadata=metadata,
+            input_fingerprint=input_fingerprint,
+            report_source=validated_source,
+            rendered_artifacts=rendered_artifacts,
+        )
+
+    def _write_report_artifacts(
+        self,
+        metadata: dict[str, Any],
+        markdown: str,
+        *,
+        report_source: dict[str, Any] | None = None,
+        rendered_artifacts: dict[str, bytes | str] | None = None,
+    ) -> None:
         metadata["file_names"] = _coerce_report_file_names(metadata)
         metadata["file_name"] = metadata["file_names"]["md"]
+        metadata["source_json_file"] = Path(
+            str(metadata.get("source_json_file") or f"{Path(metadata['file_name']).stem}.json")
+        ).name
+        metadata["render_pipeline"] = [
+            "scan_results_to_json",
+            "report_chart_mcp_json",
+            "report_mermaid_mcp_json",
+            "report_markdown_mcp_json",
+            "report_word_mcp_docx",
+            "report_pdf_mcp_pdf",
+            "html_renderer_json",
+        ]
         available_formats = {"md"}
         artifact_errors: dict[str, str] = {}
+        render_metadata = _report_render_metadata(metadata)
+        report_document = _build_report_json_document(markdown, render_metadata, report_source=report_source)
+        report_json_bytes = _canonical_report_json_bytes(report_document, pretty=True)
+        metadata["report_json_sha256"] = hashlib.sha256(report_json_bytes).hexdigest()
+        source_json_path = self.root / metadata["source_json_file"]
+        source_json_path.write_bytes(report_json_bytes)
+        source_json_path.chmod(0o600)
+        markdown = str((report_document.get("report") or {}).get("markdown") or markdown)
+        if rendered_artifacts and isinstance(rendered_artifacts.get("md"), str):
+            markdown = _sanitize_report_content(str(rendered_artifacts["md"]))
+            report_document = _build_report_json_document(markdown, render_metadata, report_source=report_source)
+            report_json_bytes = _canonical_report_json_bytes(report_document, pretty=True)
+            metadata["report_json_sha256"] = hashlib.sha256(report_json_bytes).hexdigest()
+            source_json_path.write_bytes(report_json_bytes)
+            source_json_path.chmod(0o600)
         (self.root / metadata["file_names"]["md"]).write_text(markdown, encoding="utf-8")
         try:
-            (self.root / metadata["file_names"]["html"]).write_text(_build_html_report(markdown, metadata), encoding="utf-8")
+            (self.root / metadata["file_names"]["html"]).write_text(
+                _build_html_report(markdown, render_metadata, document=report_document.get("report")), encoding="utf-8"
+            )
             available_formats.add("html")
         except Exception as exc:  # noqa: BLE001
             artifact_errors["html"] = str(exc)
             (self.root / metadata["file_names"]["html"]).unlink(missing_ok=True)
-        try:
-            _write_pdf_report(self.root / metadata["file_names"]["pdf"], markdown, metadata)
-            available_formats.add("pdf")
-        except Exception as exc:  # noqa: BLE001
-            artifact_errors["pdf"] = str(exc)
-            (self.root / metadata["file_names"]["pdf"]).unlink(missing_ok=True)
+        binary_artifacts = dict(rendered_artifacts or {})
+        if not binary_artifacts:
+            binary_artifacts, fallback_errors = _render_binary_report_artifacts_with_mcps(
+                report_document,
+                metadata=metadata,
+            )
+            artifact_errors.update(fallback_errors)
+        for report_format, signature in (("docx", b"PK"), ("pdf", b"%PDF")):
+            path = self.root / metadata["file_names"][report_format]
+            payload = binary_artifacts.get(report_format)
+            try:
+                if not isinstance(payload, bytes) or not payload.startswith(signature):
+                    raise ValueError(f"{report_format.upper()} MCP artifact is missing or invalid")
+                path.write_bytes(payload)
+                path.chmod(0o600)
+                available_formats.add(report_format)
+            except Exception as exc:  # noqa: BLE001
+                artifact_errors.setdefault(report_format, str(exc))
+                path.unlink(missing_ok=True)
         metadata["available_formats"] = sorted(available_formats)
         if artifact_errors:
             metadata["_artifact_errors"] = artifact_errors
@@ -660,24 +937,67 @@ class ReportStore:
         markdown = self._sanitize_report_file(md_path)
         metadata["file_names"] = _coerce_report_file_names(metadata)
         metadata["file_name"] = metadata["file_names"]["md"]
+        metadata["source_json_file"] = Path(
+            str(metadata.get("source_json_file") or f"{Path(metadata['file_name']).stem}.json")
+        ).name
+        metadata["render_pipeline"] = [
+            "scan_results_to_json",
+            "report_chart_mcp_json",
+            "report_mermaid_mcp_json",
+            "report_markdown_mcp_json",
+            "report_word_mcp_docx",
+            "report_pdf_mcp_pdf",
+            "html_renderer_json",
+        ]
         available_formats = {"md"}
         artifact_errors: dict[str, str] = {}
         html_path = self.root / metadata["file_names"]["html"]
         pdf_path = self.root / metadata["file_names"]["pdf"]
+        docx_path = self.root / metadata["file_names"]["docx"]
+        render_metadata = _report_render_metadata(metadata)
+        source_json_path = self.root / metadata["source_json_file"]
+        if source_json_path.is_file():
+            report_document = _load_report_json_document(source_json_path)
+        else:
+            report_document = _build_report_json_document(markdown, render_metadata)
+            source_json_path.write_bytes(_canonical_report_json_bytes(report_document, pretty=True))
+            source_json_path.chmod(0o600)
+        metadata["report_json_sha256"] = hashlib.sha256(source_json_path.read_bytes()).hexdigest()
         try:
             if not html_path.is_file():
-                html_path.write_text(_build_html_report(markdown, metadata), encoding="utf-8")
+                html_path.write_text(
+                    _build_html_report(markdown, render_metadata, document=report_document.get("report")),
+                    encoding="utf-8",
+                )
             available_formats.add("html")
         except Exception as exc:  # noqa: BLE001
             artifact_errors["html"] = str(exc)
             html_path.unlink(missing_ok=True)
-        try:
-            if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
-                _write_pdf_report(pdf_path, markdown, metadata)
-            available_formats.add("pdf")
-        except Exception as exc:  # noqa: BLE001
-            artifact_errors["pdf"] = str(exc)
-            pdf_path.unlink(missing_ok=True)
+        missing_binary = not pdf_path.is_file() or not docx_path.is_file()
+        generated: dict[str, bytes] = {}
+        if missing_binary:
+            generated, generated_errors = _render_binary_report_artifacts_with_mcps(
+                report_document,
+                metadata=metadata,
+            )
+            artifact_errors.update(generated_errors)
+        for report_format, path, signature in (
+            ("docx", docx_path, b"PK"),
+            ("pdf", pdf_path, b"%PDF"),
+        ):
+            try:
+                if not path.is_file() or path.stat().st_size == 0:
+                    payload = generated.get(report_format)
+                    if not isinstance(payload, bytes) or not payload.startswith(signature):
+                        raise ValueError(f"{report_format.upper()} MCP artifact is unavailable")
+                    path.write_bytes(payload)
+                    path.chmod(0o600)
+                if not path.read_bytes()[:4].startswith(signature):
+                    raise ValueError(f"{report_format.upper()} report signature is invalid")
+                available_formats.add(report_format)
+            except Exception as exc:  # noqa: BLE001
+                artifact_errors[report_format] = str(exc)
+                path.unlink(missing_ok=True)
         metadata["available_formats"] = sorted(available_formats)
         if artifact_errors:
             metadata["_artifact_errors"] = artifact_errors
@@ -710,6 +1030,8 @@ class ReportStore:
             names.extend(Path(str(value)).name for value in file_names.values() if value)
         if metadata.get("file_name"):
             names.append(Path(str(metadata.get("file_name"))).name)
+        if metadata.get("source_json_file"):
+            names.append(Path(str(metadata.get("source_json_file"))).name)
         return list(dict.fromkeys(name for name in names if name))
 
     def _read_index(self) -> list[dict[str, Any]]:
@@ -908,6 +1230,47 @@ def _append_truncation_notice(lines: list[str], *, omitted: int, language: str, 
         lines.extend(["", f"> {omitted} additional items are omitted from the body; metrics still use the complete scan result.", ""])
 
 
+def _report_mcp_audit_lines(mcp_audit: dict[str, Any] | None, language: str) -> list[str]:
+    audit = mcp_audit if isinstance(mcp_audit, dict) else {}
+    if not audit:
+        return []
+    normalized = _normalize_report_language(language)
+    server = _single_line_report_value(audit.get("server") or "SecFlow Report Chart MCP")
+    tool = _report_inline_code(audit.get("tool") or "build_scan_report_charts")
+    status = str(audit.get("status") or "unknown").strip().lower()
+    fact_count = int(audit.get("fact_count") or 0)
+    invoked_at = _single_line_report_value(audit.get("invoked_at") or "-")
+    digest = _report_inline_code(audit.get("output_sha256") or "-")
+    if normalized in {"zh-Hans", "zh-Hant"}:
+        status_label = "已完成" if status == "completed" else "失败"
+        return [
+            f"- 报告 MCP：{server} / `{tool}`",
+            f"- MCP 调用状态：{status_label}（事实 {fact_count} 条，调用时间 {invoked_at}）",
+            f"- MCP 输出 SHA-256：`{digest}`",
+        ]
+    if normalized == "ja":
+        return [
+            f"- Report MCP: {server} / `{tool}`",
+            f"- MCP status: {'完了' if status == 'completed' else '失敗'} ({fact_count} facts, {invoked_at})",
+            f"- MCP output SHA-256: `{digest}`",
+        ]
+    if normalized == "ko":
+        return [
+            f"- Report MCP: {server} / `{tool}`",
+            f"- MCP status: {'완료' if status == 'completed' else '실패'} ({fact_count} facts, {invoked_at})",
+            f"- MCP output SHA-256: `{digest}`",
+        ]
+    return [
+        f"- Report MCP: {server} / `{tool}`",
+        f"- MCP status: {'completed' if status == 'completed' else 'failed'} ({fact_count} facts, {invoked_at})",
+        f"- MCP output SHA-256: `{digest}`",
+    ]
+
+
+def _append_report_mcp_audit(lines: list[str], mcp_audit: dict[str, Any] | None, language: str) -> None:
+    lines.extend(_report_mcp_audit_lines(mcp_audit, language))
+
+
 def build_dependency_markdown_report(
     *,
     question: str,
@@ -917,6 +1280,8 @@ def build_dependency_markdown_report(
     summary: str,
     fields: dict[str, Any] | None = None,
     language: str = "zh-Hans",
+    mcp_audit: dict[str, Any] | None = None,
+    report_code_blocks: list[dict[str, Any]] | None = None,
 ) -> str:
     language = _normalize_report_language(language)
     if language not in {"zh-Hans", "zh-Hant"}:
@@ -928,6 +1293,8 @@ def build_dependency_markdown_report(
             summary=summary,
             fields=fields,
             language=language,
+            mcp_audit=mcp_audit,
+            report_code_blocks=report_code_blocks,
         )
     files = dependency_scan.get("files") or []
     dependencies = dependency_scan.get("dependencies") or []
@@ -939,7 +1306,7 @@ def build_dependency_markdown_report(
     lines: list[str] = [
         "# 依赖漏洞与代码漏洞分析报告",
         "",
-        f"- 生成时间：{now_iso()}",
+        f"- 生成时间：{_report_china_time(now_iso())}",
         f"- 用户问题：{question.strip() or '附件安全分析'}",
         f"- 附件数量：{len(files)}",
     ]
@@ -948,6 +1315,7 @@ def build_dependency_markdown_report(
         lines.append(f"- 依赖漏洞：{len(records)} 条")
     if has_code_scope:
         lines.append(f"- 代码漏洞：{finding_count} 条")
+    _append_report_mcp_audit(lines, mcp_audit, language)
     lines.append("")
 
     section_index = 1
@@ -985,7 +1353,13 @@ def build_dependency_markdown_report(
         section_index = _append_section_heading(lines, section_index, "代码漏洞（文件、行号与修复代码）")
         if findings:
             for index, finding in enumerate(findings[:_REPORT_FINDING_LIMIT], start=1):
-                lines.extend(_finding_markdown(index, finding))
+                lines.extend(
+                    _finding_markdown(
+                        index,
+                        finding,
+                        code_block=_report_code_block_for_finding(report_code_blocks, finding, index - 1),
+                    )
+                )
             _append_truncation_notice(
                 lines,
                 omitted=max(finding_count, len(findings)) - _REPORT_FINDING_LIMIT,
@@ -1010,8 +1384,488 @@ def build_dependency_markdown_report(
         fields=fields,
         language=language,
     )
-    lines.extend([" ".join(method_steps), "", f"> {_report_limitation(language)}", ""])
+    lines.extend([*(f"{index}. {step}" for index, step in enumerate(method_steps, start=1)), "", f"> {_report_limitation(language)}", ""])
     return "\n".join(lines)
+
+
+def build_agent_task_markdown_report(
+    task: dict[str, Any],
+    *,
+    mcp_audit: dict[str, Any] | None = None,
+    report_code_blocks: list[dict[str, Any]] | None = None,
+) -> str:
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    dependencies = [item for item in (result.get("dependencies") or []) if isinstance(item, dict)]
+    language_results = result.get("language_results") if isinstance(result.get("language_results"), dict) else {}
+    findings: list[tuple[str, dict[str, Any]]] = []
+    review_findings: list[tuple[str, dict[str, Any]]] = []
+    severity = Counter()
+    for language in result.get("languages") or task.get("languages") or []:
+        language_result = language_results.get(language) if isinstance(language_results.get(language), dict) else {}
+        for finding in language_result.get("findings") or []:
+            if isinstance(finding, dict):
+                findings.append((str(language), finding))
+                severity[str(finding.get("severity") or "UNKNOWN").upper()] += 1
+        for finding in language_result.get("review_findings") or []:
+            if isinstance(finding, dict):
+                review_findings.append((str(language), finding))
+
+    project = _report_plain_text(task.get("workspace_name") or "项目")
+    objective = _report_plain_text(task.get("objective") or "项目代码安全扫描")
+    workspace = _report_plain_text(task.get("workspace_path") or "-")
+    scope_type = "单个文件" if task.get("workspace_type") == "file" else "目录"
+    summary = _report_plain_text(result.get("summary") or "扫描已完成。")
+    language_labels = "、".join(_agent_report_language_label(item) for item in result.get("languages") or []) or "未识别"
+    lines = [
+        f"# {project} 代码安全漏洞扫描报告",
+        "",
+        f"- 生成时间：{_report_china_time(now_iso())}",
+        f"- 扫描目标：{objective}",
+        f"- 工作区：{workspace}",
+        f"- 扫描范围：{scope_type}",
+        f"- 项目语言：{language_labels}",
+        f"- 源文件：{int(result.get('total_files') or 0)} 个",
+        f"- 依赖组件：{int(result.get('dependency_count') or len(dependencies))} 个",
+        f"- 代码风险：{int(result.get('total_findings') or len(findings))} 条",
+        f"- 复核候选：{int(result.get('total_review_findings') or len(review_findings))} 条",
+        *_report_mcp_audit_lines(mcp_audit, "zh-Hans"),
+        "",
+        "## 1. 执行摘要",
+        "",
+        summary,
+        "",
+        "## 2. 扫描范围",
+        "",
+        f"- 项目名称：{project}",
+        f"- 工作区路径：`{_report_inline_code(task.get('workspace_path') or '-')}`",
+        f"- 范围类型：{scope_type}",
+        f"- 扫描目标：{objective}",
+        f"- 语言分派：{language_labels}",
+        "",
+        "## 3. 风险等级统计",
+        "",
+        "| 严重等级 | 数量 |",
+        "| --- | ---: |",
+    ]
+    for level in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"):
+        lines.append(f"| {_report_severity_zh(level)} | {severity[level]} |")
+
+    lines.extend(["", "## 4. 语言与语法分析结果", ""])
+    if language_results:
+        lines.extend(
+            [
+                "| 语言 | 文件 | 风险 | 解析成功 | 解析错误 | AST 节点 | CFG 节点/边 | DFG 边 | 规则文件 |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for language in result.get("languages") or language_results.keys():
+            item = language_results.get(language) if isinstance(language_results.get(language), dict) else {}
+            syntax = item.get("syntax_summary") if isinstance(item.get("syntax_summary"), dict) else {}
+            rules = "<br>".join(_escape_markdown_table_cell(value) for value in item.get("rule_files") or []) or "-"
+            lines.append(
+                "| {language} | {files} | {findings} | {parsed} | {errors} | {ast} | {cfg_nodes}/{cfg_edges} | {dfg} | {rules} |".format(
+                    language=_escape_markdown_table_cell(_agent_report_language_label(language)),
+                    files=int(item.get("file_count") or 0),
+                    findings=int(item.get("finding_count") or 0),
+                    parsed=int(syntax.get("parsed_files") or 0),
+                    errors=int(syntax.get("parse_error_files") or 0),
+                    ast=int(syntax.get("ast_node_count") or 0),
+                    cfg_nodes=int(syntax.get("cfg_node_count") or 0),
+                    cfg_edges=int(syntax.get("cfg_edge_count") or 0),
+                    dfg=int(syntax.get("dfg_edge_count") or 0),
+                    rules=rules,
+                )
+            )
+    else:
+        lines.append("未识别到可执行专属规则扫描的语言。")
+
+    lines.extend(["", "## 5. 依赖组件完整清单", ""])
+    if dependencies:
+        lines.extend(
+            [
+                "| # | 生态 | 组件 | 版本 | 来源文件 | 声明类型 | 声明 | 置信度 |",
+                "| ---: | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for index, dependency in enumerate(dependencies, start=1):
+            lines.append(
+                "| {index} | {ecosystem} | {name} | {version} | {source} | {source_type} | {declaration} | {confidence} |".format(
+                    index=index,
+                    ecosystem=_escape_markdown_table_cell(dependency.get("ecosystem") or "-"),
+                    name=_escape_markdown_table_cell(dependency.get("name") or "-"),
+                    version=_escape_markdown_table_cell(dependency.get("version") or "未指定"),
+                    source=_escape_markdown_table_cell(dependency.get("source_file") or "-"),
+                    source_type=_escape_markdown_table_cell(dependency.get("source_type") or "-"),
+                    declaration=_escape_markdown_table_cell(dependency.get("declaration") or "-"),
+                    confidence=_escape_markdown_table_cell(dependency.get("confidence") or "-"),
+                )
+            )
+    else:
+        lines.append("本次扫描未识别到依赖组件。")
+
+    lines.extend(["", "## 6. 代码风险详情", ""])
+    if findings or review_findings:
+        for index, (language, finding) in enumerate(findings, start=1):
+            lines.extend(
+                _agent_finding_markdown(
+                    task,
+                    index_label=f"6.{index}",
+                    language=language,
+                    finding=finding,
+                    disposition="confirmed",
+                    code_block=_report_code_block_for_finding(report_code_blocks, finding, index - 1),
+                )
+            )
+        for index, (language, finding) in enumerate(review_findings, start=1):
+            lines.extend(
+                _agent_finding_markdown(
+                    task,
+                    index_label=f"6.R{index}",
+                    language=language,
+                    finding=finding,
+                    disposition="review",
+                    code_block=_report_code_block_for_finding(
+                        report_code_blocks,
+                        finding,
+                        len(findings) + index - 1,
+                    ),
+                )
+            )
+    else:
+        lines.append("本次规则扫描与 AST/CFG/DFG 分析未返回代码风险。")
+
+    adaptation = result.get("adaptation") if isinstance(result.get("adaptation"), dict) else {}
+    skill = adaptation.get("skill") if isinstance(adaptation.get("skill"), dict) else {}
+    baseline_metrics = adaptation.get("baseline_metrics") if isinstance(adaptation.get("baseline_metrics"), dict) else {}
+    current_metrics = adaptation.get("current_metrics") if isinstance(adaptation.get("current_metrics"), dict) else {}
+    lines.extend(
+        [
+            "## 7. 项目自适应与回归审计",
+            "",
+            f"- 自适应状态：`{_report_inline_code(adaptation.get('status') or 'not_recorded')}`",
+            f"- 模型分析轮数：{int(adaptation.get('attempts') or 0)}",
+            f"- Overlay 重扫轮数：{int(adaptation.get('iterations') or 0)}",
+            f"- Skill：`{_report_inline_code(skill.get('name') or '-')}`",
+            f"- Skill SHA-256：`{_report_inline_code(skill.get('sha256') or '-')}`",
+            f"- Prompt 版本：`{_report_inline_code(skill.get('prompt_version') or '-')}`",
+            f"- 终止原因：`{_report_inline_code(adaptation.get('termination_reason') or '-')}`",
+            "",
+        ]
+    )
+    if baseline_metrics or current_metrics:
+        lines.extend(["| 指标 | 冻结基线 | 当前结果 |", "| --- | ---: | ---: |"])
+        for key, label in (
+            ("findings", "主告警"),
+            ("review_findings", "复核候选"),
+            ("parse_error_files", "解析错误文件"),
+            ("cfg_edges", "CFG 边"),
+            ("dfg_edges", "DFG 边"),
+        ):
+            lines.append(
+                f"| {label} | {int(baseline_metrics.get(key) or 0)} | {int(current_metrics.get(key) or 0)} |"
+            )
+        lines.append("")
+    overlays = [item for item in adaptation.get("overlays") or [] if isinstance(item, dict)]
+    if overlays:
+        lines.extend(["| 轮次 | Overlay SHA-256 | 置信度 | 范围 |", "| ---: | --- | ---: | --- |"])
+        for index, overlay in enumerate(overlays, start=1):
+            lines.append(
+                "| {index} | `{fingerprint}` | {confidence:.2f} | `{scope}` |".format(
+                    index=index,
+                    fingerprint=_report_inline_code(overlay.get("fingerprint") or "-"),
+                    confidence=float(overlay.get("confidence") or 0.0),
+                    scope=_report_inline_code(overlay.get("scope") or "-"),
+                )
+            )
+        lines.append("")
+    else:
+        lines.extend(["未应用项目 Overlay；冻结规则扫描结果保持原样。", ""])
+
+    lines.extend(["## 8. 执行记录", ""])
+    events = [item for item in (task.get("events") or []) if isinstance(item, dict)]
+    if events:
+        lines.extend(["| 序号 | 时间 | 节点 | 状态 | 说明 |", "| ---: | --- | --- | --- | --- |"])
+        for event in events:
+            lines.append(
+                "| {sequence} | {time} | {node} | {status} | {message} |".format(
+                    sequence=int(event.get("sequence") or 0),
+                    time=_escape_markdown_table_cell(event.get("time") or "-"),
+                    node=_escape_markdown_table_cell(event.get("node") or "-"),
+                    status=_escape_markdown_table_cell(event.get("status") or "-"),
+                    message=_escape_markdown_table_cell(event.get("message") or "-"),
+                )
+            )
+    else:
+        lines.append("暂无执行记录。")
+
+    lines.extend(
+        [
+            "",
+            "## 9. 方法与限制",
+            "",
+            "本报告基于本次工作区内实际纳入的源文件、项目清单、冻结语言规则以及 AST/CFG/DFG/污点分析结果生成。项目 Overlay 只作用于当前任务，不修改全局规则，也不作为 500 项目冻结评测或资格指标的输入。没有独立真值或运行轨迹时，模型候选不能证明真实漏报或误报；未纳入扫描的文件、动态运行路径、部署配置和未明确版本的依赖仍需结合人工复核、动态测试与供应链数据进一步确认。",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _agent_finding_markdown(
+    task: dict[str, Any],
+    *,
+    index_label: str,
+    language: str,
+    finding: dict[str, Any],
+    disposition: str,
+    code_block: dict[str, Any] | None = None,
+) -> list[str]:
+    sink = finding.get("sink") if isinstance(finding.get("sink"), dict) else {}
+    source = finding.get("source") if isinstance(finding.get("source"), dict) else {}
+    file_name = str(finding.get("file_name") or finding.get("file") or sink.get("file") or "未知文件")
+    risk_line = _positive_report_line(finding.get("line") or finding.get("risk_line") or sink.get("line"))
+    location = f"{_report_inline_code(file_name)}:{risk_line}" if risk_line else _report_inline_code(file_name)
+    title = _report_plain_text(finding.get("title") or "代码风险")
+    disposition_label = "已确认主告警" if disposition == "confirmed" else "复核候选（不计入已确认漏洞）"
+    title_prefix = "" if disposition == "confirmed" else "[复核候选] "
+    lines = [
+        f"### {index_label} {title_prefix}{title}",
+        "",
+        f"- 判定状态：{disposition_label}",
+        f"- 严重等级：{_report_severity_zh(finding.get('severity'))}",
+        f"- 项目语言：{_agent_report_language_label(language)}",
+        f"- 规则编号：`{_report_inline_code(finding.get('rule_id') or '-')}`",
+        f"- 风险位置：`{location}`",
+        f"- 风险说明：{_report_plain_text(finding.get('description') or '未提供说明。')}",
+        f"- 修复方案：{_report_finding_remediation(finding)}",
+    ]
+    if finding.get("confidence"):
+        lines.append(f"- 置信度：`{_report_inline_code(finding.get('confidence'))}`")
+    if finding.get("project_overlay_action"):
+        lines.append(f"- Overlay 动作：`{_report_inline_code(finding.get('project_overlay_action'))}`")
+    if source:
+        lines.append(f"- 污点源：`{_agent_evidence_location(source, file_name)}`")
+    if sink:
+        lines.append(f"- 污点汇：`{_agent_evidence_location(sink, file_name)}`")
+
+    snippet, line_start, line_end, snippet_source = _agent_finding_snippet(task, finding, file_name, risk_line)
+    structured_snippet = _report_code_block_markdown(code_block)
+    if structured_snippet:
+        snippet = structured_snippet
+        line_start = _positive_report_line(code_block.get("line_start")) or line_start
+        line_end = _positive_report_line(code_block.get("line_end")) or line_end
+        snippet_source = _report_plain_text(code_block.get("source") or snippet_source)
+    code_language = _code_fence_language(file_name)
+    if snippet:
+        if line_start and line_end:
+            line_range = str(line_start) if line_start == line_end else f"{line_start}-{line_end}"
+            snippet_label = f"证据代码片段（第 {line_range} 行，风险点为第 {risk_line or line_start} 行；来源：{snippet_source}）："
+        else:
+            snippet_label = f"证据代码片段（来源：{snippet_source}）："
+        lines.extend(["", snippet_label, f"```{code_language}", snippet, "```"])
+    else:
+        lines.extend(["", "> 未能从扫描证据或受限工作区读取对应代码片段；该发现需要人工复核源码位置。"])
+
+    fixed_snippet = _safe_report_code(finding.get("fixed_snippet"))
+    if fixed_snippet:
+        lines.extend(["", "可核验修复代码：", f"```{code_language}", fixed_snippet, "```"])
+
+    taint_path = finding.get("taint_path") or finding.get("dataflow") or finding.get("path")
+    if taint_path:
+        lines.extend(["", "Source → Sink 污点路径："])
+        if isinstance(taint_path, list):
+            for step in taint_path[:20]:
+                if isinstance(step, dict):
+                    kind = _report_plain_text(step.get("kind") or step.get("type") or "step")
+                    step_location = _agent_evidence_location(step, file_name)
+                    label = _report_plain_text(step.get("label") or step.get("description") or "")
+                    lines.append(f"- {kind}：`{step_location}`" + (f"｜{label}" if label != "-" else ""))
+                else:
+                    lines.append(f"- {_report_plain_text(step)}")
+        elif isinstance(taint_path, dict):
+            lines.append(f"- `{_report_inline_code(json.dumps(taint_path, ensure_ascii=False, sort_keys=True))}`")
+        else:
+            lines.append(f"- {_report_plain_text(taint_path)}")
+    lines.append("")
+    return lines
+
+
+def _agent_finding_snippet(
+    task: dict[str, Any],
+    finding: dict[str, Any],
+    file_name: str,
+    risk_line: int | None,
+) -> tuple[str, int | None, int | None, str]:
+    sink = finding.get("sink") if isinstance(finding.get("sink"), dict) else {}
+    explicit = (
+        finding.get("vulnerable_snippet")
+        or finding.get("code_snippet")
+        or finding.get("snippet")
+        or sink.get("snippet")
+        or finding.get("evidence")
+    )
+    if isinstance(explicit, (dict, list)):
+        explicit = json.dumps(explicit, ensure_ascii=False, indent=2, sort_keys=True)
+    explicit_text = _safe_report_code(explicit)
+    if explicit_text:
+        line_start = _positive_report_line(finding.get("line_start")) or risk_line
+        line_end = _positive_report_line(finding.get("line_end")) or line_start
+        return explicit_text, line_start, line_end, "扫描引擎证据"
+
+    source_context = _read_agent_source_context(task, file_name, risk_line)
+    if source_context is not None:
+        snippet, line_start, line_end = source_context
+        return snippet, line_start, line_end, "工作区源码上下文"
+    return "", None, None, ""
+
+
+def _report_code_block_for_finding(
+    code_blocks: list[dict[str, Any]] | None,
+    finding: dict[str, Any],
+    fallback_index: int,
+) -> dict[str, Any] | None:
+    blocks = [item for item in code_blocks or [] if isinstance(item, dict)]
+    if not blocks:
+        return None
+    finding_id = str(finding.get("id") or finding.get("rule_id") or "").strip()
+    if finding_id:
+        exact = [item for item in blocks if str(item.get("finding_id") or "").strip() == finding_id]
+        if len(exact) == 1:
+            return exact[0]
+    sink = finding.get("sink") if isinstance(finding.get("sink"), dict) else {}
+    file_name = str(finding.get("file_name") or finding.get("file") or sink.get("file") or "").strip()
+    risk_line = _positive_report_line(finding.get("line") or finding.get("risk_line") or sink.get("line"))
+    location_matches = [
+        item
+        for item in blocks
+        if str(item.get("file_name") or "").strip() == file_name
+        and _positive_report_line(item.get("risk_line")) == risk_line
+    ]
+    if len(location_matches) == 1:
+        return location_matches[0]
+    return blocks[fallback_index] if 0 <= fallback_index < len(blocks) else None
+
+
+def _report_code_block_markdown(code_block: dict[str, Any] | None) -> str:
+    if not isinstance(code_block, dict):
+        return ""
+    parsed: list[tuple[int, str]] = []
+    for item in code_block.get("lines") or []:
+        if not isinstance(item, dict):
+            return ""
+        number = _positive_report_line(item.get("number"))
+        if not number:
+            return ""
+        parsed.append((number, str(item.get("text") or "")))
+    if not parsed:
+        return ""
+    width = max(len(str(number)) for number, _ in parsed)
+    return "\n".join(f"{number:>{width}} | {text}" for number, text in parsed)
+
+
+def _read_agent_source_context(
+    task: dict[str, Any],
+    file_name: str,
+    risk_line: int | None,
+    *,
+    context_lines: int = 3,
+) -> tuple[str, int, int] | None:
+    if not risk_line:
+        return None
+    workspace_value = str(task.get("workspace_path") or "").strip()
+    if not workspace_value:
+        return None
+    workspace = Path(workspace_value).expanduser()
+    try:
+        workspace_resolved = workspace.resolve(strict=True)
+    except OSError:
+        return None
+
+    candidates: list[Path] = []
+    finding_path = Path(file_name).expanduser()
+    if finding_path.is_absolute():
+        candidates.append(finding_path)
+    elif workspace_resolved.is_file():
+        candidates.append(workspace_resolved)
+    else:
+        candidates.append(workspace_resolved / finding_path)
+        parts = finding_path.parts
+        if workspace_resolved.name in parts:
+            root_index = parts.index(workspace_resolved.name)
+            candidates.append(workspace_resolved.joinpath(*parts[root_index + 1 :]))
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        language_results = result.get("language_results") if isinstance(result.get("language_results"), dict) else {}
+        for language_result in language_results.values():
+            if not isinstance(language_result, dict):
+                continue
+            for scanned_file in language_result.get("files") or []:
+                scanned = str(scanned_file or "")
+                if scanned == file_name or Path(scanned).name == finding_path.name:
+                    candidates.append(workspace_resolved / scanned)
+
+    allowed_root = workspace_resolved.parent if workspace_resolved.is_file() else workspace_resolved
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_file() or not resolved.is_relative_to(allowed_root):
+                continue
+            if workspace_resolved.is_file() and resolved != workspace_resolved:
+                continue
+            data = resolved.read_bytes()
+        except OSError:
+            continue
+        if not data or len(data) > 2_000_000 or b"\x00" in data[:8_192]:
+            continue
+        source_lines = data.decode("utf-8", errors="replace").splitlines()
+        if risk_line > len(source_lines):
+            continue
+        line_start = max(1, risk_line - max(0, context_lines))
+        line_end = min(len(source_lines), risk_line + max(0, context_lines))
+        width = len(str(line_end))
+        rendered = "\n".join(
+            f"{line_number:>{width}} | {source_lines[line_number - 1]}"
+            for line_number in range(line_start, line_end + 1)
+        )
+        return _safe_report_code(rendered), line_start, line_end
+    return None
+
+
+def _positive_report_line(value: Any) -> int | None:
+    try:
+        line = int(value)
+    except (TypeError, ValueError):
+        return None
+    return line if line > 0 else None
+
+
+def _agent_evidence_location(evidence: dict[str, Any], default_file: str) -> str:
+    file_name = _report_inline_code(evidence.get("file") or evidence.get("file_name") or default_file)
+    line = _positive_report_line(evidence.get("line") or evidence.get("risk_line"))
+    return f"{file_name}:{line}" if line else file_name
+
+
+def _safe_report_code(value: Any) -> str:
+    return str(value or "").strip().replace("```", "` ` `")
+
+
+def _agent_report_language_label(value: Any) -> str:
+    return {
+        "java": "Java",
+        "python": "Python",
+        "go": "Go",
+        "c": "C",
+        "cpp": "C++",
+        "csharp": "C#",
+        "rust": "Rust",
+        "solidity": "Solidity",
+    }.get(str(value).lower(), str(value).upper())
+
+
+def _report_plain_text(value: Any) -> str:
+    return re.sub(r"[\r\n]+", " ", str(value or "")).strip().replace("|", "\\|") or "-"
+
+
+def _report_inline_code(value: Any) -> str:
+    return re.sub(r"[\r\n`]+", " ", str(value or "")).strip() or "-"
 
 
 def _build_localized_dependency_markdown_report(
@@ -1023,6 +1877,8 @@ def _build_localized_dependency_markdown_report(
     summary: str,
     fields: dict[str, Any] | None,
     language: str,
+    mcp_audit: dict[str, Any] | None,
+    report_code_blocks: list[dict[str, Any]] | None,
 ) -> str:
     files = dependency_scan.get("files") or []
     dependencies = dependency_scan.get("dependencies") or []
@@ -1034,7 +1890,7 @@ def _build_localized_dependency_markdown_report(
     lines: list[str] = [
         f"# {_rt(language, 'title')}",
         "",
-        f"- {_rt(language, 'generated_at')}: {now_iso()}",
+        f"- {_rt(language, 'generated_at')}: {_report_china_time(now_iso())}",
         f"- {_rt(language, 'question')}: {question.strip() or _rt(language, 'attachment_analysis')}",
         f"- {_rt(language, 'attachments')}: {len(files)}",
     ]
@@ -1043,6 +1899,7 @@ def _build_localized_dependency_markdown_report(
         lines.append(f"- {_rt(language, 'dependency_vulnerabilities')}: {len(records)}")
     if has_code_scope:
         lines.append(f"- {_rt(language, 'code_findings')}: {finding_count}")
+    _append_report_mcp_audit(lines, mcp_audit, language)
     lines.append("")
 
     section_index = 1
@@ -1078,7 +1935,14 @@ def _build_localized_dependency_markdown_report(
         section_index = _append_section_heading(lines, section_index, _rt(language, "code_section"))
         if findings:
             for index, finding in enumerate(findings[:_REPORT_FINDING_LIMIT], start=1):
-                lines.extend(_finding_markdown(index, finding, language=language))
+                lines.extend(
+                    _finding_markdown(
+                        index,
+                        finding,
+                        language=language,
+                        code_block=_report_code_block_for_finding(report_code_blocks, finding, index - 1),
+                    )
+                )
             _append_truncation_notice(
                 lines,
                 omitted=max(finding_count, len(findings)) - _REPORT_FINDING_LIMIT,
@@ -1103,7 +1967,7 @@ def _build_localized_dependency_markdown_report(
         fields=fields,
         language=language,
     )
-    lines.extend([" ".join(method_steps), "", f"> {_report_limitation(language)}", ""])
+    lines.extend([*(f"{index}. {step}" for index, step in enumerate(method_steps, start=1)), "", f"> {_report_limitation(language)}", ""])
     return "\n".join(lines)
 
 
@@ -1150,7 +2014,13 @@ def _record_markdown(index: int, record: dict[str, Any], language: str = "zh-Han
     return lines
 
 
-def _finding_markdown(index: int, finding: dict[str, Any], language: str = "zh-Hans") -> list[str]:
+def _finding_markdown(
+    index: int,
+    finding: dict[str, Any],
+    language: str = "zh-Hans",
+    *,
+    code_block: dict[str, Any] | None = None,
+) -> list[str]:
     sink = finding.get("sink") or {}
     source = finding.get("source") or {}
     file_name = str(finding.get("file") or sink.get("file") or "未知文件")
@@ -1159,6 +2029,12 @@ def _finding_markdown(index: int, finding: dict[str, Any], language: str = "zh-H
     line_end = int(finding.get("line_end") or risk_line)
     line_range = str(line_start) if line_start == line_end else f"{line_start}-{line_end}"
     vulnerable_snippet = str(finding.get("vulnerable_snippet") or sink.get("snippet") or finding.get("evidence") or "").strip()
+    structured_snippet = _report_code_block_markdown(code_block)
+    if structured_snippet:
+        vulnerable_snippet = structured_snippet
+        line_start = _positive_report_line(code_block.get("line_start")) or line_start
+        line_end = _positive_report_line(code_block.get("line_end")) or line_end
+        line_range = str(line_start) if line_start == line_end else f"{line_start}-{line_end}"
     fixed_snippet = str(finding.get("fixed_snippet") or "").strip()
     if _normalize_report_language(language) != "zh-Hans":
         lines = [
@@ -1170,7 +2046,7 @@ def _finding_markdown(index: int, finding: dict[str, Any], language: str = "zh-H
             f"- {_rt(language, 'risk_location')}: {file_name}:{risk_line}",
             f"- {_rt(language, 'code_range')}: {_rt(language, 'line') % line_range}",
             f"- {_rt(language, 'confidence')}: {finding.get('confidence') or 'medium'}",
-            f"- {_rt(language, 'remediation')}: {finding.get('remediation') or _rt(language, 'default_remediation')}",
+            f"- {_rt(language, 'remediation')}: {_report_finding_remediation(finding)}",
             f"- CFG: {finding.get('cfg') or _rt(language, 'not_specified')}",
             f"- DFG: {finding.get('dfg') or _rt(language, 'not_specified')}",
         ]
@@ -1219,7 +2095,7 @@ def _finding_markdown(index: int, finding: dict[str, Any], language: str = "zh-H
         f"- 风险位置：{file_name}:{risk_line}",
         f"- 代码范围：第 {line_range} 行",
         f"- 置信度：{finding.get('confidence') or 'medium'}",
-        f"- 修复建议：{finding.get('remediation') or '校验外部输入并收敛危险调用。'}",
+        f"- 修复方案：{_report_finding_remediation(finding)}",
         f"- CFG：{finding.get('cfg') or '未明确'}",
         f"- DFG：{finding.get('dfg') or '未明确'}",
     ]
@@ -1337,8 +2213,15 @@ def _public_report_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in summary.items() if not str(key).startswith("_")}
 
 
+def _report_render_metadata(summary: dict[str, Any]) -> dict[str, Any]:
+    nested = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
+    return {**summary, **nested, "metadata": nested}
+
+
 def _sanitize_report_content(content: str) -> str:
     sanitized = _strip_markdown_appendix(content)
+    sanitized = _remove_deprecated_report_content(sanitized)
+    sanitized = _localize_report_generation_time(sanitized)
     replacements = {
         "select_codeql_scenarios": "select_static_scenarios",
         "run_codeql_tool": "run_static_analysis",
@@ -1349,6 +2232,48 @@ def _sanitize_report_content(content: str) -> str:
     sanitized = re.sub(r"(?m)^- 引擎：[^\n]*\n?", "", sanitized)
     sanitized = _ENGINE_NAME_PATTERN.sub("静态代码路径分析", sanitized)
     return _apply_download_markdown_style(sanitized)
+
+
+def _remove_deprecated_report_content(content: str) -> str:
+    result: list[str] = []
+    skip_section = False
+    section_number = 0
+    heading_pattern = re.compile(r"^(##\s+)(?:(\d+)[.)、]?\s*)?(.+?)\s*$")
+    mode_pattern = re.compile(
+        r"^\s*-\s*(?:扫描模式|掃描模式|Scan mode|Mode|スキャンモード|스캔 모드)\s*[：:].*$",
+        flags=re.IGNORECASE,
+    )
+    for line in str(content or "").splitlines():
+        heading = heading_pattern.match(line)
+        if heading:
+            title = heading.group(3).strip()
+            skip_section = title in _DEPRECATED_REPORT_SECTIONS
+            if skip_section:
+                continue
+            section_number += 1
+            if heading.group(2):
+                line = f"## {section_number}. {title}"
+        if skip_section or mode_pattern.match(line):
+            continue
+        result.append(line)
+    return "\n".join(result).strip() + ("\n" if str(content or "").endswith("\n") else "")
+
+
+def _localize_report_generation_time(content: str) -> str:
+    labels = r"生成时间|產生時間|Generated at|生成時間|생성 시간"
+    bullet_pattern = re.compile(rf"^(\s*-\s*(?:{labels})\s*[：:]\s*)(.+?)\s*$", flags=re.IGNORECASE)
+    table_pattern = re.compile(rf"^(\s*\|\s*(?:{labels})\s*\|\s*)([^|]+?)(\s*\|\s*)$", flags=re.IGNORECASE)
+    result: list[str] = []
+    for line in str(content or "").splitlines():
+        bullet = bullet_pattern.match(line)
+        if bullet:
+            line = f"{bullet.group(1)}{_report_china_time(bullet.group(2))}"
+        else:
+            table = table_pattern.match(line)
+            if table:
+                line = f"{table.group(1)}{_report_china_time(table.group(2))}{table.group(3)}"
+        result.append(line)
+    return "\n".join(result) + ("\n" if str(content or "").endswith("\n") else "")
 
 
 def _apply_download_markdown_style(content: str) -> str:
@@ -1512,6 +2437,9 @@ def _report_file_base_name(title: str, metadata: dict[str, Any], created_at: str
 
 def _infer_report_project_name(metadata: dict[str, Any]) -> str:
     candidates: list[str] = []
+    project_name = str(metadata.get("project_name") or "").strip()
+    if project_name:
+        candidates.append(project_name)
     for item in metadata.get("files") or []:
         if not isinstance(item, dict):
             continue
@@ -1563,8 +2491,6 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "dependency": "依赖漏洞",
             "code": "代码发现",
             "generated": "生成时间",
-            "format": "格式",
-            "mode": "模式",
             "score": "风险评分",
             "toc": "目录",
             "charts": "漏洞分布图表",
@@ -1583,8 +2509,6 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "dependency": "相依套件漏洞",
             "code": "程式碼發現",
             "generated": "產生時間",
-            "format": "格式",
-            "mode": "模式",
             "score": "風險評分",
             "toc": "目錄",
             "charts": "漏洞分布圖表",
@@ -1603,8 +2527,6 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "dependency": "Dependency vulnerabilities",
             "code": "Code findings",
             "generated": "Generated at",
-            "format": "Formats",
-            "mode": "Mode",
             "score": "Risk score",
             "toc": "Contents",
             "charts": "Risk distribution",
@@ -1623,8 +2545,6 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "dependency": "依存関係脆弱性",
             "code": "コード検出",
             "generated": "生成時間",
-            "format": "形式",
-            "mode": "モード",
             "score": "リスクスコア",
             "toc": "目次",
             "charts": "リスク分布",
@@ -1643,8 +2563,6 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "dependency": "의존성 취약점",
             "code": "코드 발견",
             "generated": "생성 시간",
-            "format": "형식",
-            "mode": "모드",
             "score": "위험 점수",
             "toc": "목차",
             "charts": "위험 분포",
@@ -1659,14 +2577,31 @@ def _report_export_labels(language: str) -> dict[str, str]:
     return labels.get(normalized, labels["en"])
 
 
-def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
-    document = _parse_report_document(markdown, metadata)
+def _report_severity_labels(language: str) -> dict[str, str]:
+    normalized = _normalize_report_language(language)
+    values = {
+        "zh-Hans": {"CRITICAL": "严重", "HIGH": "高危", "MEDIUM": "中危", "LOW": "低危"},
+        "zh-Hant": {"CRITICAL": "嚴重", "HIGH": "高危", "MEDIUM": "中危", "LOW": "低危"},
+        "ja": {"CRITICAL": "重大", "HIGH": "高", "MEDIUM": "中", "LOW": "低"},
+        "ko": {"CRITICAL": "심각", "HIGH": "높음", "MEDIUM": "중간", "LOW": "낮음"},
+        "en": {"CRITICAL": "Critical", "HIGH": "High", "MEDIUM": "Medium", "LOW": "Low"},
+    }
+    return values.get(normalized, values["en"])
+
+
+def _build_html_report(
+    markdown: str,
+    metadata: dict[str, Any],
+    *,
+    document: dict[str, Any] | None = None,
+) -> str:
+    document = _validated_render_document(document) if document is not None else _parse_report_document(markdown, metadata)
     metrics = document["metrics"]
     language = _normalize_report_language(
         metadata.get("language") or (metadata.get("report_metrics") or {}).get("language")
     )
     labels = _report_export_labels(language)
-    severity = _severity_distribution(markdown, metadata)
+    severity = _render_document_severity(document, markdown, metadata)
     toc_items = "\n".join(
         f'<a href="#section-{index + 1}"><span>{index + 1}</span>{html.escape(section["title"])}</a>'
         for index, section in enumerate(document["sections"])
@@ -1689,21 +2624,17 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
         """
         for index, section in enumerate(document["sections"])
     )
-    severity_names = {
-        "CRITICAL": "CRITICAL",
-        "HIGH": "HIGH",
-        "MEDIUM": "MEDIUM",
-        "LOW": "LOW",
-    }
+    severity_names = _report_severity_labels(language)
+    severity_total = sum(int(value) for value in severity.values())
     severity_rows = "\n".join(
-        f"<li><b>{html.escape(severity_names[key])}</b><span>{count}</span></li>"
+        f"<li><b>{html.escape(severity_names[key])}</b><span>{count} · {_severity_percentage(count, severity_total)}</span></li>"
         for key, count in severity.items()
         if count
-    ) or f"<li><b>{html.escape(labels['no_severity'])}</b><span>0</span></li>"
+    ) or f"<li><b>{html.escape(labels['no_severity'])}</b><span>0 · 0.0%</span></li>"
     bars = _severity_bars(severity)
     degree_stops = _severity_degree_stops(severity)
     score = _risk_score(metrics, severity)
-    generated = html.escape(str(metrics.get("generated_at") or metadata.get("created_at") or "-"))
+    generated = html.escape(_report_china_time(metrics.get("generated_at") or metadata.get("created_at") or "-"))
     project_name = html.escape(document["project_name"])
     title = html.escape(document["title"])
     return f"""<!doctype html>
@@ -1733,7 +2664,7 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
       margin: 0;
       background: var(--page);
       color: var(--text);
-      font: 14px/1.68 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+      font: 14px/1.68 {_REPORT_WEB_FONT_FAMILY};
     }}
     .shell {{ width: min(920px, calc(100vw - 48px)); margin: 28px auto 48px; }}
     .hero {{
@@ -1749,7 +2680,7 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
     }}
     .hero:after {{ content: ""; position: absolute; inset: auto -60px -90px auto; width: 260px; height: 260px; border-radius: 50%; border: 1px solid rgba(255,255,255,.22); }}
     .brand {{ display: inline-flex; gap: 8px; align-items: center; padding: 5px 10px; border-radius: 8px; background: rgba(255,255,255,.16); font-size: 12px; font-weight: 700; }}
-    h1 {{ margin: 18px 0 8px; max-width: 650px; font-size: 30px; line-height: 1.18; letter-spacing: -.02em; }}
+    h1 {{ margin: 18px 0 8px; max-width: 650px; font-size: 30px; line-height: 1.18; letter-spacing: 0; overflow-wrap: anywhere; }}
     .subtitle {{ max-width: 660px; color: rgba(255,255,255,.82); margin: 0; }}
     .hero-meta {{ display: flex; flex-wrap: wrap; gap: 16px; margin-top: 18px; color: rgba(255,255,255,.78); font-size: 12px; }}
     .score {{ position: absolute; right: 34px; top: 52px; width: 86px; height: 86px; border-radius: 50%; display: grid; place-items: center; text-align: center; background: rgba(255,255,255,.13); border: 1px solid rgba(255,255,255,.3); }}
@@ -1789,9 +2720,9 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
     .bars {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; height: 170px; align-items: end; padding-top: 16px; }}
     .bar {{ text-align: center; color: var(--muted); font-size: 11px; }}
     .bar i {{ display: block; width: 28px; min-height: 4px; margin: 0 auto 8px; border-radius: 5px 5px 2px 2px; background: linear-gradient(180deg, #ff4d4f, #ff9f43); }}
-    table {{ width: 100%; border-collapse: collapse; margin: 12px 0 18px; overflow: hidden; border-radius: 8px; font-size: 12px; }}
+    table {{ width: 100%; table-layout: fixed; border-collapse: collapse; margin: 12px 0 18px; overflow: hidden; border-radius: 8px; font-size: 12px; }}
     th {{ background: #f1f4f8; color: #29364a; font-weight: 700; text-align: left; }}
-    th, td {{ border-bottom: 1px solid var(--line); padding: 10px 12px; vertical-align: top; }}
+    th, td {{ border-bottom: 1px solid var(--line); padding: 10px 12px; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }}
     tr:last-child td {{ border-bottom: 0; }}
     h2, h3, h4 {{ color: #162033; line-height: 1.35; }}
     h3 {{ margin: 22px 0 10px; font-size: 17px; }}
@@ -1799,10 +2730,15 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
     ul {{ margin: 8px 0 14px; padding-left: 20px; }}
     li {{ margin: 4px 0; }}
     blockquote {{ margin: 12px 0; padding: 12px 14px; border-left: 4px solid #10a4bd; background: #eefaff; color: #365066; border-radius: 8px; }}
-    pre {{ margin: 12px 0 18px; padding: 16px; overflow: auto; border-radius: 8px; background: var(--ink); color: #dfe7ff; font: 12px/1.55 "SFMono-Regular", Consolas, monospace; }}
+    pre {{ max-width: 100%; margin: 12px 0 18px; padding: 16px; overflow-x: hidden; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; border-radius: 8px; background: var(--ink); color: #dfe7ff; font: 12px/1.55 "SFMono-Regular", Consolas, monospace; }}
+    pre.numbered-code {{ padding: 10px 0; white-space: normal; }}
+    .code-row {{ display: grid; grid-template-columns: max-content minmax(0, 1fr); min-width: 0; }}
+    .code-row.risk {{ background: rgba(255, 174, 34, .16); }}
+    .code-line-number {{ min-width: 5.5em; padding: 2px 12px 2px 10px; color: #8ea0c5; text-align: right; user-select: none; border-right: 1px solid rgba(255,255,255,.12); }}
+    .code-source {{ min-width: 0; padding: 2px 14px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }}
     pre.vulnerable {{ border-top: 4px solid #ffccc7; }}
     pre.fixed {{ border-top: 4px solid #b7ebc6; }}
-    code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
+    code {{ max-width: 100%; font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; word-break: break-word; }}
     .footer {{ margin-top: 28px; color: var(--muted); font-size: 12px; text-align: center; }}
     @media print {{
       body {{ background: #fff; }}
@@ -1810,6 +2746,16 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
       .toc {{ display: none; }}
       .layout {{ display: block; }}
       .report-card, .metric, .hero {{ box-shadow: none; break-inside: avoid; }}
+    }}
+    @media (max-width: 760px) {{
+      .shell {{ width: min(100% - 24px, 920px); margin-top: 12px; }}
+      .layout {{ display: block; }}
+      .toc {{ display: none; }}
+      .report-card {{ padding: 18px 16px; }}
+      .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .chart-grid {{ grid-template-columns: 1fr; }}
+      .code-line-number {{ min-width: 4.5em; padding-left: 6px; padding-right: 8px; }}
+      .code-source {{ padding-left: 10px; padding-right: 8px; }}
     }}
   </style>
 </head>
@@ -1821,8 +2767,6 @@ def _build_html_report(markdown: str, metadata: dict[str, Any]) -> str:
       <p class="subtitle">{title}</p>
       <div class="hero-meta">
         <span>{html.escape(labels["generated"])}: {generated}</span>
-        <span>{html.escape(labels["format"])}: HTML / PDF / Markdown</span>
-        <span>{html.escape(labels["mode"])}: {html.escape(str(metadata.get("mode") or "dependency_vulnerability_report"))}</span>
       </div>
       <div class="score"><b>{score}</b><span>{html.escape(labels["score"])}</span></div>
     </header>
@@ -1877,6 +2821,48 @@ def _parse_report_document(markdown: str, metadata: dict[str, Any]) -> dict[str,
         sections.append({"title": "扫描报告", "content": markdown})
     project_name = _infer_report_project_name(metadata) or _project_from_title_or_file(title, metadata)
     return {"title": title, "project_name": project_name, "metrics": metrics, "sections": sections}
+
+
+def _validated_render_document(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Report JSON is missing the render document")
+    sections = value.get("sections")
+    metrics = value.get("metrics")
+    if not isinstance(sections, list) or not sections or not isinstance(metrics, dict):
+        raise ValueError("Report JSON render document is incomplete")
+    normalized_sections = []
+    for section in sections:
+        if not isinstance(section, dict):
+            raise ValueError("Report JSON contains an invalid section")
+        title = str(section.get("title") or "").strip()
+        if not title:
+            raise ValueError("Report JSON section title is empty")
+        if title in _DEPRECATED_REPORT_SECTIONS:
+            continue
+        content = re.sub(
+            r"(?mi)^\s*-\s*(?:扫描模式|掃描模式|Scan mode|Mode|スキャンモード|스캔 모드)\s*[：:].*\n?",
+            "",
+            str(section.get("content") or ""),
+        ).strip()
+        normalized_sections.append({"title": title, "content": content})
+    if not normalized_sections:
+        raise ValueError("Report JSON render document has no visible sections")
+    return {
+        **value,
+        "title": str(value.get("title") or "SecFlow 安全报告"),
+        "project_name": str(value.get("project_name") or "SecFlow"),
+        "metrics": {str(key): item for key, item in metrics.items()},
+        "sections": normalized_sections,
+    }
+
+
+def _render_document_severity(
+    document: dict[str, Any], markdown: str, metadata: dict[str, Any]
+) -> dict[str, int]:
+    structured = document.get("severity") if isinstance(document.get("severity"), dict) else {}
+    if structured:
+        return {key: _non_negative_int(structured.get(key)) for key in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+    return _severity_distribution(markdown, metadata)
 
 
 def _project_from_title_or_file(title: str, metadata: dict[str, Any]) -> str:
@@ -1983,6 +2969,16 @@ def _non_negative_int(value: Any, fallback: int = 0) -> int:
 
 
 def _severity_distribution(markdown: str, metadata: dict[str, Any] | None = None) -> dict[str, int]:
+    report_charts = (metadata or {}).get("report_charts") if isinstance((metadata or {}).get("report_charts"), dict) else {}
+    severity_ring = report_charts.get("severity_ring") if isinstance(report_charts.get("severity_ring"), list) else []
+    if severity_ring:
+        chart_values = {
+            str(item.get("severity") or item.get("id") or "").strip().upper(): _non_negative_int(item.get("value"))
+            for item in severity_ring
+            if isinstance(item, dict)
+        }
+        if any(chart_values.values()):
+            return {key: chart_values.get(key, 0) for key in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
     structured = (metadata or {}).get("report_metrics") if isinstance((metadata or {}).get("report_metrics"), dict) else {}
     structured_severity = structured.get("severity") if isinstance(structured.get("severity"), dict) else {}
     if structured_severity:
@@ -2027,6 +3023,15 @@ def _severity_degree_stops(severity: dict[str, int]) -> dict[str, int]:
     return {"danger": danger, "warning": warning, "amber": min(360, amber)}
 
 
+def _severity_percentage(value: Any, total: Any) -> str:
+    try:
+        count = max(0, int(value))
+        denominator = max(0, int(total))
+    except (TypeError, ValueError):
+        return "0.0%"
+    return f"{(count / denominator * 100) if denominator else 0.0:.1f}%"
+
+
 def _severity_bars(severity: dict[str, int]) -> str:
     labels = [("CRITICAL", "严重"), ("HIGH", "高危"), ("MEDIUM", "中危"), ("LOW", "低危")]
     max_value = max([severity.get(key, 0) for key, _ in labels] + [1])
@@ -2053,6 +3058,7 @@ def _markdown_fragment_to_html(markdown: str) -> str:
     in_code = False
     code_lines: list[str] = []
     code_class = ""
+    code_risk_line: int | None = None
     table_lines: list[str] = []
     previous_text = ""
 
@@ -2073,11 +3079,11 @@ def _markdown_fragment_to_html(markdown: str) -> str:
         stripped = line.strip()
         if stripped.startswith("```"):
             if in_code:
-                escaped_code = html.escape("\n".join(code_lines))
-                result.append(f'<pre class="{code_class}"><code>{escaped_code}</code></pre>')
+                result.append(_html_code_block(code_lines, code_class, code_risk_line))
                 in_code = False
                 code_lines = []
                 code_class = ""
+                code_risk_line = None
             else:
                 close_list()
                 flush_table()
@@ -2088,6 +3094,7 @@ def _markdown_fragment_to_html(markdown: str) -> str:
                     code_class = "vulnerable"
                 elif "修复" in previous_text or "fixed" in lower_previous:
                     code_class = "fixed"
+                code_risk_line = _code_label_risk_line(previous_text)
             continue
         if in_code:
             code_lines.append(line)
@@ -2132,8 +3139,38 @@ def _markdown_fragment_to_html(markdown: str) -> str:
     close_list()
     flush_table()
     if in_code:
-        result.append(f'<pre class="{code_class}"><code>{html.escape(chr(10).join(code_lines))}</code></pre>')
+        result.append(_html_code_block(code_lines, code_class, code_risk_line))
     return "\n".join(result)
+
+
+def _html_code_block(code_lines: list[str], code_class: str, risk_line: int | None) -> str:
+    numbered = _parse_numbered_code_lines(code_lines)
+    if numbered is None:
+        return f'<pre class="{code_class}"><code>{html.escape(chr(10).join(code_lines))}</code></pre>'
+    classes = " ".join(value for value in (code_class, "numbered-code") if value)
+    rows = []
+    for number, source in numbered:
+        row_class = "code-row risk" if number == risk_line else "code-row"
+        rows.append(
+            f'<span class="{row_class}"><span class="code-line-number" aria-hidden="true">{number}</span>'
+            f'<span class="code-source">{html.escape(source) or "&#8203;"}</span></span>'
+        )
+    return f'<pre class="{classes}"><code>{"".join(rows)}</code></pre>'
+
+
+def _code_label_risk_line(value: str) -> int | None:
+    match = re.search(r"(?:风险点为第|risk\s+line|危険行|위험\s*줄)\s*(\d+)", str(value), flags=re.IGNORECASE)
+    return _positive_report_line(match.group(1)) if match else None
+
+
+def _parse_numbered_code_lines(lines: list[str]) -> list[tuple[int, str]] | None:
+    parsed: list[tuple[int, str]] = []
+    for line in lines:
+        match = re.match(r"^\s*(\d+)\s+\|(?:\s(.*)|$)", line)
+        if not match:
+            return None
+        parsed.append((int(match.group(1)), match.group(2) or ""))
+    return parsed or None
 
 
 def _markdown_table_to_html(lines: list[str]) -> str:
@@ -2167,7 +3204,13 @@ def _inline_markdown(value: str) -> str:
     return escaped
 
 
-def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> None:
+def _write_pdf_report(
+    path: Path,
+    markdown: str,
+    metadata: dict[str, Any],
+    *,
+    document: dict[str, Any] | None = None,
+) -> None:
     try:
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_CENTER
@@ -2187,9 +3230,10 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
     )
     labels = _report_export_labels(language)
     font_name = _register_reportlab_cjk_font(pdfmetrics, TTFont, UnicodeCIDFont, language)
-    document = _parse_report_document(markdown, metadata)
+    latin_font_name = _register_reportlab_latin_font(pdfmetrics, TTFont)
+    document = _validated_render_document(document) if document is not None else _parse_report_document(markdown, metadata)
     metrics = document["metrics"]
-    severity = _severity_distribution(markdown, metadata)
+    severity = _render_document_severity(document, markdown, metadata)
     styles = getSampleStyleSheet()
     base = ParagraphStyle(
         "SecFlowBase",
@@ -2202,7 +3246,16 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
     )
     title_style = ParagraphStyle("SecFlowTitle", parent=base, fontSize=20, leading=25, textColor=colors.white, alignment=TA_CENTER, spaceAfter=8)
     subtitle_style = ParagraphStyle("SecFlowSubtitle", parent=base, fontSize=9, leading=13, textColor=colors.HexColor("#d8eef8"), alignment=TA_CENTER)
-    section_style = ParagraphStyle("SecFlowSection", parent=base, fontSize=14, leading=18, textColor=colors.HexColor("#11233b"), spaceBefore=16, spaceAfter=8)
+    section_style = ParagraphStyle(
+        "SecFlowSection",
+        parent=base,
+        fontSize=14,
+        leading=18,
+        textColor=colors.HexColor("#11233b"),
+        spaceBefore=16,
+        spaceAfter=8,
+        keepWithNext=1,
+    )
     code_style = ParagraphStyle(
         "SecFlowCode",
         parent=base,
@@ -2220,7 +3273,10 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
 
     story: list[Any] = []
     hero = Table(
-        [[Paragraph(html.escape(document["project_name"]), title_style)], [Paragraph(html.escape(document["title"]), subtitle_style)]],
+        [
+            [Paragraph(_pdf_plain_text(document["project_name"], latin_font_name), title_style)],
+            [Paragraph(_pdf_plain_text(document["title"], latin_font_name), subtitle_style)],
+        ],
         colWidths=[170 * mm],
         style=[
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#075e7e")),
@@ -2233,10 +3289,10 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
     story.append(Spacer(1, 8))
     metric_rows = [
         [
-            _pdf_metric(labels["critical_high"], metrics["high_risk"], "#ff4d4f", Paragraph, base),
-            _pdf_metric(labels["medium"], metrics["medium_risk"], "#ffae22", Paragraph, base),
-            _pdf_metric(labels["dependency"], metrics["dependency_vulnerabilities"], "#f4b400", Paragraph, base),
-            _pdf_metric(labels["code"], metrics["code_findings"], "#168aad", Paragraph, base),
+            _pdf_metric(labels["critical_high"], metrics["high_risk"], "#ff4d4f", Paragraph, base, latin_font_name),
+            _pdf_metric(labels["medium"], metrics["medium_risk"], "#ffae22", Paragraph, base, latin_font_name),
+            _pdf_metric(labels["dependency"], metrics["dependency_vulnerabilities"], "#f4b400", Paragraph, base, latin_font_name),
+            _pdf_metric(labels["code"], metrics["code_findings"], "#168aad", Paragraph, base, latin_font_name),
         ]
     ]
     metric_table = Table(metric_rows, colWidths=[42.5 * mm] * 4)
@@ -2255,19 +3311,44 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
     story.append(metric_table)
     story.append(Spacer(1, 8))
     if any(severity.values()):
-        story.append(Paragraph(html.escape(labels["severity"]), small))
-        story.append(_pdf_severity_chart(severity, Drawing, Rect, String, colors))
+        story.append(Paragraph(_pdf_plain_text(labels["severity"], latin_font_name), small))
+        story.append(
+            _pdf_severity_chart(
+                severity,
+                Drawing,
+                Rect,
+                String,
+                colors,
+                font_name,
+                latin_font_name,
+                language,
+            )
+        )
         story.append(Spacer(1, 6))
     story.append(
         Paragraph(
-            f"{html.escape(labels['generated'])}: {html.escape(str(metrics.get('generated_at') or metadata.get('created_at') or '-'))}",
+            _pdf_plain_text(
+                f"{labels['generated']}: {_report_china_time(metrics.get('generated_at') or metadata.get('created_at') or '-')}",
+                latin_font_name,
+            ),
             small,
         )
     )
     story.append(Spacer(1, 10))
     for index, section in enumerate(document["sections"], start=1):
-        story.append(Paragraph(f"{index}. {html.escape(section['title'])}", section_style))
-        story.extend(_markdown_to_pdf_flowables(section["content"], base, code_style, Table, TableStyle, Paragraph, colors))
+        story.append(Paragraph(_pdf_plain_text(f"{index}. {section['title']}", latin_font_name), section_style))
+        story.extend(
+            _markdown_to_pdf_flowables(
+                section["content"],
+                base,
+                code_style,
+                Table,
+                TableStyle,
+                Paragraph,
+                colors,
+                latin_font_name,
+            )
+        )
     doc = SimpleDocTemplate(
         str(path),
         pagesize=A4,
@@ -2285,6 +3366,7 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
             canvas,
             doc_template,
             font_name=font_name,
+            latin_font_name=latin_font_name,
             project_name=project_name,
             page_label=labels["page"],
             page_size=A4,
@@ -2298,7 +3380,7 @@ def _write_pdf_report(path: Path, markdown: str, metadata: dict[str, Any]) -> No
 def _register_reportlab_cjk_font(
     pdfmetrics: Any, TTFont: Any, UnicodeCIDFont: Any, language: str = "zh-Hans"
 ) -> str:
-    candidates = [
+    candidates = list(_macos_pingfang_candidates()) + [
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
@@ -2310,7 +3392,8 @@ def _register_reportlab_cjk_font(
     for candidate in candidates:
         try:
             if Path(candidate).is_file():
-                pdfmetrics.registerFont(TTFont("SecFlowCJK", candidate))
+                options = {"subfontIndex": 0} if str(candidate).lower().endswith(".ttc") else {}
+                pdfmetrics.registerFont(TTFont("SecFlowCJK", candidate, **options))
                 return "SecFlowCJK"
         except Exception:  # noqa: BLE001
             continue
@@ -2323,11 +3406,39 @@ def _register_reportlab_cjk_font(
     return cid_font
 
 
+def _macos_pingfang_candidates() -> tuple[str, ...]:
+    candidates = [
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/System/Library/Fonts/LanguageSupport/PingFang.ttc"),
+    ]
+    asset_root = Path("/System/Library/AssetsV2/com_apple_MobileAsset_Font8")
+    if asset_root.is_dir():
+        candidates.extend(sorted(asset_root.glob("*.asset/AssetData/PingFang.ttc")))
+    return tuple(str(path) for path in candidates)
+
+
+def _register_reportlab_latin_font(pdfmetrics: Any, TTFont: Any) -> str:
+    candidates = [
+        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            if Path(candidate).is_file():
+                pdfmetrics.registerFont(TTFont("SecFlowLatin", candidate))
+                return "SecFlowLatin"
+        except Exception:  # noqa: BLE001
+            continue
+    return "Helvetica"
+
+
 def _draw_pdf_page_chrome(
     canvas: Any,
     document: Any,
     *,
     font_name: str,
+    latin_font_name: str,
     project_name: str,
     page_label: str,
     page_size: tuple[float, float],
@@ -2340,15 +3451,25 @@ def _draw_pdf_page_chrome(
     canvas.setLineWidth(0.5)
     canvas.line(document.leftMargin, 12 * mm, width - document.rightMargin, 12 * mm)
     canvas.setFillColor(colors.HexColor("#728096"))
-    canvas.setFont(font_name, 7.5)
     if document.page > 1:
+        canvas.setFont(latin_font_name, 7.5)
         canvas.line(document.leftMargin, height - 12 * mm, width - document.rightMargin, height - 12 * mm)
         canvas.drawString(document.leftMargin, height - 9.5 * mm, str(project_name)[:90])
+    canvas.setFont(latin_font_name if str(page_label).isascii() else font_name, 7.5)
     canvas.drawRightString(width - document.rightMargin, 8.5 * mm, page_label % document.page)
     canvas.restoreState()
 
 
-def _pdf_severity_chart(severity: dict[str, int], Drawing: Any, Rect: Any, String: Any, colors: Any) -> Any:
+def _pdf_severity_chart(
+    severity: dict[str, int],
+    Drawing: Any,
+    Rect: Any,
+    String: Any,
+    colors: Any,
+    font_name: str,
+    latin_font_name: str,
+    language: str,
+) -> Any:
     drawing = Drawing(480, 82)
     entries = [
         ("CRITICAL", "#d9363e"),
@@ -2356,34 +3477,91 @@ def _pdf_severity_chart(severity: dict[str, int], Drawing: Any, Rect: Any, Strin
         ("MEDIUM", "#e5a000"),
         ("LOW", "#2d9d78"),
     ]
+    labels = _report_severity_labels(language)
+    total = sum(int(severity.get(key) or 0) for key, _ in entries)
     max_value = max([int(severity.get(key) or 0) for key, _ in entries] + [1])
     for index, (key, color) in enumerate(entries):
         x = 16 + index * 116
         value = int(severity.get(key) or 0)
         height = max(4, int((value / max_value) * 44))
         drawing.add(Rect(x, 20, 54, height, fillColor=colors.HexColor(color), strokeColor=None, rx=3, ry=3))
-        drawing.add(String(x + 27, 8, key, textAnchor="middle", fontSize=7.5, fillColor=colors.HexColor("#617089")))
-        drawing.add(String(x + 27, 24 + height, str(value), textAnchor="middle", fontSize=8, fillColor=colors.HexColor("#26364d")))
+        drawing.add(
+            String(
+                x + 27,
+                8,
+                labels[key],
+                textAnchor="middle",
+                fontName=font_name,
+                fontSize=7.5,
+                fillColor=colors.HexColor("#617089"),
+            )
+        )
+        drawing.add(
+            String(
+                x + 27,
+                24 + height,
+                f"{value} · {_severity_percentage(value, total)}",
+                textAnchor="middle",
+                fontName=latin_font_name,
+                fontSize=8,
+                fillColor=colors.HexColor("#26364d"),
+            )
+        )
     return drawing
 
 
-def _pdf_metric(label: str, value: Any, color: str, Paragraph: Any, base: Any) -> Any:
+def _pdf_metric(
+    label: str, value: Any, color: str, Paragraph: Any, base: Any, latin_font_name: str
+) -> Any:
     return Paragraph(
-        f'<font color="{color}" size="18"><b>{html.escape(str(value))}</b></font><br/><font color="#617089" size="8">{html.escape(label)}</font>',
+        f'<font color="{color}" size="18"><b>{_pdf_plain_text(value, latin_font_name)}</b></font>'
+        f'<br/><font color="#617089" size="8">{_pdf_plain_text(label, latin_font_name)}</font>',
         base,
     )
 
 
-def _pdf_inline_markdown(value: Any) -> str:
+def _pdf_plain_text(value: Any, latin_font_name: str) -> str:
+    return _pdf_apply_latin_font(html.escape(str("" if value is None else value)), latin_font_name)
+
+
+def _pdf_apply_latin_font(markup: str, latin_font_name: str) -> str:
+    if not latin_font_name:
+        return markup
+    parts = re.split(r"(<[^>]+>)", markup)
+    rendered: list[str] = []
+    for part in parts:
+        if not part or part.startswith("<"):
+            rendered.append(part)
+            continue
+        rendered.append(
+            re.sub(
+                r"([\x20-\x7e]+)",
+                lambda match: f'<font name="{latin_font_name}">{match.group(1)}</font>',
+                part,
+            )
+        )
+    return "".join(rendered)
+
+
+def _pdf_inline_markdown(value: Any, latin_font_name: str = "") -> str:
     escaped = html.escape(str(value or ""))
     escaped = re.sub(r"/([^/\s]+\.[A-Za-z0-9]+):(\d+)", r"/<br/>\1:&nbsp;\2", escaped)
     escaped = re.sub(r":(\d+)", r":&nbsp;\1", escaped)
     escaped = re.sub(r"`([^`]+)`", r'<font color="#087b9d">\1</font>', escaped)
     escaped = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escaped)
-    return escaped
+    return _pdf_apply_latin_font(escaped, latin_font_name)
 
 
-def _markdown_to_pdf_flowables(markdown: str, base: Any, code_style: Any, Table: Any, TableStyle: Any, Paragraph: Any, colors: Any) -> list[Any]:
+def _markdown_to_pdf_flowables(
+    markdown: str,
+    base: Any,
+    code_style: Any,
+    Table: Any,
+    TableStyle: Any,
+    Paragraph: Any,
+    colors: Any,
+    latin_font_name: str = "",
+) -> list[Any]:
     flowables: list[Any] = []
     lines = markdown.splitlines()
     in_code = False
@@ -2392,10 +3570,58 @@ def _markdown_to_pdf_flowables(markdown: str, base: Any, code_style: Any, Table:
 
     def flush_code() -> None:
         nonlocal code_lines
+        numbered = _parse_numbered_code_lines(code_lines)
+        if numbered is not None:
+            code_cell_style = code_style.clone(
+                "SecFlowCodeCell",
+                backColor=None,
+                borderPadding=0,
+                spaceBefore=0,
+                spaceAfter=0,
+            )
+            number_style = code_cell_style.clone("SecFlowCodeNumber", textColor=colors.HexColor("#8ea0c5"))
+            for offset in range(0, len(numbered), 32):
+                rows = []
+                for number, raw_line in numbered[offset : offset + 32]:
+                    expanded = raw_line.expandtabs(4)
+                    leading_spaces = len(expanded) - len(expanded.lstrip(" "))
+                    source_markup = "&#160;" * leading_spaces + html.escape(expanded[leading_spaces:])
+                    rows.append(
+                        [
+                            Paragraph(str(number), number_style),
+                            Paragraph(_pdf_apply_latin_font(source_markup or "&#8203;", latin_font_name), code_cell_style),
+                        ]
+                    )
+                table = Table(rows, colWidths=[38, 442])
+                table.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#111936")),
+                            ("LINEAFTER", (0, 0), (0, -1), 0.35, colors.HexColor("#33405f")),
+                            ("ALIGN", (0, 0), (0, -1), "RIGHT"),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (0, -1), 5),
+                            ("RIGHTPADDING", (0, 0), (0, -1), 7),
+                            ("LEFTPADDING", (1, 0), (1, -1), 8),
+                            ("RIGHTPADDING", (1, 0), (1, -1), 7),
+                            ("TOPPADDING", (0, 0), (-1, -1), 2),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                        ]
+                    )
+                )
+                flowables.append(table)
+            code_lines = []
+            return
         chunks = [code_lines[index : index + 32] for index in range(0, len(code_lines), 32)] or [[]]
         for chunk in chunks:
-            text = "\n".join(chunk)
-            flowables.append(Paragraph(html.escape(text).replace("\n", "<br/>"), code_style))
+            rendered_lines = []
+            for raw_line in chunk:
+                expanded = raw_line.expandtabs(4)
+                leading_spaces = len(expanded) - len(expanded.lstrip(" "))
+                rendered_lines.append("&#160;" * leading_spaces + html.escape(expanded[leading_spaces:]))
+            flowables.append(
+                Paragraph(_pdf_apply_latin_font("<br/>".join(rendered_lines), latin_font_name), code_style)
+            )
         code_lines = []
 
     def flush_table() -> None:
@@ -2406,10 +3632,17 @@ def _markdown_to_pdf_flowables(markdown: str, base: Any, code_style: Any, Table:
         for raw in table_lines:
             cells = _split_markdown_table_row(raw)
             if cells and not all(set(cell) <= {"-", ":", " "} for cell in cells):
-                rows.append([Paragraph(_pdf_inline_markdown(cell), base) for cell in cells])
+                rows.append([Paragraph(_pdf_inline_markdown(cell, latin_font_name), base) for cell in cells])
         if rows:
             column_count = max(len(row) for row in rows)
-            column_widths = [135, 345] if column_count == 2 else [480 / column_count] * column_count
+            if column_count == 2:
+                column_widths = [135, 345]
+            elif column_count == 8:
+                column_widths = [30, 42, 68, 52, 72, 70, 96, 50]
+            elif column_count == 9:
+                column_widths = [48, 34, 34, 48, 46, 55, 62, 42, 111]
+            else:
+                column_widths = [480 / column_count] * column_count
             table = Table(rows, colWidths=column_widths, repeatRows=1)
             table.setStyle(
                 TableStyle(
@@ -2445,19 +3678,404 @@ def _markdown_to_pdf_flowables(markdown: str, base: Any, code_style: Any, Table:
         if not stripped or stripped == _REPORT_STYLE_MARKER or stripped.startswith("<!-- secflow-report-style:"):
             continue
         if stripped.startswith("### "):
-            flowables.append(Paragraph(f"<b>{_pdf_inline_markdown(stripped[4:])}</b>", base))
+            flowables.append(Paragraph(f"<b>{_pdf_inline_markdown(stripped[4:], latin_font_name)}</b>", base))
         elif stripped.startswith("- "):
-            flowables.append(Paragraph(f"• {_pdf_inline_markdown(stripped[2:])}", base))
+            flowables.append(Paragraph(f"• {_pdf_inline_markdown(stripped[2:], latin_font_name)}", base))
         elif stripped.startswith("> "):
-            flowables.append(Paragraph(f'<font color="#52677f">{_pdf_inline_markdown(stripped[2:])}</font>', base))
+            flowables.append(
+                Paragraph(
+                    f'<font color="#52677f">{_pdf_inline_markdown(stripped[2:], latin_font_name)}</font>',
+                    base,
+                )
+            )
         elif stripped == "---":
             continue
         else:
-            flowables.append(Paragraph(_pdf_inline_markdown(stripped), base))
+            flowables.append(Paragraph(_pdf_inline_markdown(stripped, latin_font_name), base))
     flush_table()
     if in_code:
         flush_code()
     return flowables
 
 
+def build_scan_result_json(
+    scan_data: dict[str, Any],
+    *,
+    source_kind: str,
+    language: str = "zh-Hans",
+    completed_at: str | None = None,
+) -> dict[str, Any]:
+    clean_source_kind = str(source_kind or "assistant_scan").strip() or "assistant_scan"
+    if clean_source_kind == "agent_task":
+        payload = _materialize_agent_scan_json(scan_data)
+    else:
+        payload = _materialize_assistant_scan_json(scan_data)
+    facts = _scan_result_facts(payload, clean_source_kind)
+    document = {
+        "$schema": _SCAN_RESULT_JSON_SCHEMA,
+        "schema_version": 1,
+        "source_kind": clean_source_kind,
+        "language": _normalize_report_language(language),
+        "completed_at": str(completed_at or now_iso()),
+        "payload": payload,
+        "facts": facts,
+        "counts": {
+            "dependencies": len(facts["dependencies"]),
+            "dependency_vulnerabilities": len(facts["dependency_vulnerabilities"]),
+            "code_findings": len(facts["code_findings"]),
+        },
+    }
+    document["audit"] = {
+        "normalizer": "secflow-scan-results-json",
+        "payload_sha256": _scan_result_payload_sha256(document),
+        "json_roundtrip_verified": True,
+    }
+    return validate_scan_result_json(document)
+
+
+def validate_scan_result_json(value: dict[str, Any]) -> dict[str, Any]:
+    document = _json_report_value(value)
+    if document.get("$schema") != _SCAN_RESULT_JSON_SCHEMA or int(document.get("schema_version") or 0) != 1:
+        raise ValueError("Unsupported SecFlow scan-result JSON schema")
+    if not isinstance(document.get("payload"), dict) or not isinstance(document.get("facts"), dict):
+        raise ValueError("SecFlow scan-result JSON is missing payload or facts")
+    facts = document["facts"]
+    for key in ("dependencies", "dependency_vulnerabilities", "code_findings"):
+        if not isinstance(facts.get(key), list):
+            raise ValueError(f"SecFlow scan-result JSON facts.{key} must be an array")
+    for finding in facts["code_findings"]:
+        if not isinstance(finding, dict):
+            raise ValueError("SecFlow scan-result JSON code finding must be an object")
+        _validate_snippet_lines(finding)
+        if not finding.get("snippet_lines"):
+            raise ValueError("SecFlow scan-result JSON code finding is missing a verifiable evidence snippet")
+        if not str(finding.get("remediation") or "").strip():
+            raise ValueError("SecFlow scan-result JSON code finding is missing a remediation plan")
+    audit = document.get("audit") if isinstance(document.get("audit"), dict) else {}
+    expected = str(audit.get("payload_sha256") or "")
+    actual = _scan_result_payload_sha256(document)
+    if not expected or expected != actual:
+        raise ValueError("SecFlow scan-result JSON checksum verification failed")
+    return document
+
+
+def _materialize_agent_scan_json(scan_data: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_report_value(scan_data)
+    original_task = scan_data.get("task") if isinstance(scan_data.get("task"), dict) else scan_data
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else payload
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    language_results = result.get("language_results") if isinstance(result.get("language_results"), dict) else {}
+    for language_result in language_results.values():
+        if not isinstance(language_result, dict):
+            continue
+        for key in ("findings", "review_findings"):
+            findings = language_result.get(key) if isinstance(language_result.get(key), list) else []
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                sink = finding.get("sink") if isinstance(finding.get("sink"), dict) else {}
+                file_name = str(finding.get("file_name") or finding.get("file") or sink.get("file") or "")
+                risk_line = _positive_report_line(finding.get("line") or finding.get("risk_line") or sink.get("line"))
+                snippet, line_start, line_end, snippet_source = _agent_finding_snippet(
+                    original_task,
+                    finding,
+                    file_name,
+                    risk_line,
+                )
+                if snippet:
+                    _set_structured_snippet(finding, snippet, line_start, risk_line)
+                    finding["snippet_source"] = snippet_source
+                finding["remediation"] = _report_finding_remediation(finding)
+    return payload
+
+
+def _materialize_assistant_scan_json(scan_data: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_report_value(scan_data)
+    static_analysis = payload.get("static_analysis") if isinstance(payload.get("static_analysis"), dict) else {}
+    findings = static_analysis.get("findings") if isinstance(static_analysis.get("findings"), list) else []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        sink = finding.get("sink") if isinstance(finding.get("sink"), dict) else {}
+        snippet = (
+            finding.get("vulnerable_snippet")
+            or finding.get("code_snippet")
+            or finding.get("snippet")
+            or sink.get("snippet")
+            or finding.get("evidence")
+        )
+        if snippet:
+            risk_line = _positive_report_line(finding.get("risk_line") or finding.get("line") or sink.get("line"))
+            line_start = _positive_report_line(finding.get("line_start")) or risk_line
+            _set_structured_snippet(finding, _safe_report_code(snippet), line_start, risk_line)
+        finding["remediation"] = _report_finding_remediation(finding)
+    return payload
+
+
+def _set_structured_snippet(
+    finding: dict[str, Any],
+    snippet: str,
+    line_start: int | None,
+    risk_line: int | None,
+) -> None:
+    records = _structured_snippet_lines(snippet, line_start, risk_line)
+    if not records:
+        return
+    finding["snippet_lines"] = records
+    finding["vulnerable_snippet"] = _safe_report_code(snippet)
+    finding["line_start"] = records[0]["number"]
+    finding["line_end"] = records[-1]["number"]
+
+
+def _structured_snippet_lines(
+    snippet: str,
+    line_start: int | None,
+    risk_line: int | None,
+) -> list[dict[str, Any]]:
+    raw_lines = _safe_report_code(snippet).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not raw_lines or raw_lines == [""]:
+        return []
+    prefixed = _parse_numbered_code_lines(raw_lines)
+    if prefixed is not None:
+        return [
+            {"number": number, "text": text, "is_risk": number == risk_line}
+            for number, text in prefixed
+        ]
+    first_number = line_start or risk_line or 1
+    return [
+        {"number": first_number + offset, "text": text, "is_risk": first_number + offset == risk_line}
+        for offset, text in enumerate(raw_lines)
+    ]
+
+
+def _validate_snippet_lines(finding: dict[str, Any]) -> None:
+    lines = finding.get("snippet_lines")
+    if lines is None:
+        return
+    if not isinstance(lines, list) or not lines:
+        raise ValueError("SecFlow scan-result JSON snippet_lines must be a non-empty array")
+    numbers: list[int] = []
+    for item in lines:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            raise ValueError("SecFlow scan-result JSON snippet line must contain text")
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SecFlow scan-result JSON snippet line number is invalid") from exc
+        if number <= 0:
+            raise ValueError("SecFlow scan-result JSON snippet line number is invalid")
+        numbers.append(number)
+    if any(current != previous + 1 for previous, current in zip(numbers, numbers[1:])):
+        raise ValueError("SecFlow scan-result JSON snippet line numbers are not contiguous")
+    if _positive_report_line(finding.get("line_start")) != numbers[0]:
+        raise ValueError("SecFlow scan-result JSON snippet line_start does not match snippet_lines")
+    if _positive_report_line(finding.get("line_end")) != numbers[-1]:
+        raise ValueError("SecFlow scan-result JSON snippet line_end does not match snippet_lines")
+
+
+def _scan_result_facts(payload: dict[str, Any], source_kind: str) -> dict[str, list[dict[str, Any]]]:
+    if source_kind == "agent_task":
+        task = payload.get("task") if isinstance(payload.get("task"), dict) else payload
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        dependencies = [item for item in result.get("dependencies") or [] if isinstance(item, dict)]
+        dependency_vulnerabilities = [
+            item for item in result.get("dependency_vulnerabilities") or [] if isinstance(item, dict)
+        ]
+        code_findings: list[dict[str, Any]] = []
+        language_results = result.get("language_results") if isinstance(result.get("language_results"), dict) else {}
+        for language, language_result in language_results.items():
+            if not isinstance(language_result, dict):
+                continue
+            for disposition, key in (("confirmed", "findings"), ("review", "review_findings")):
+                for finding in language_result.get(key) or []:
+                    if isinstance(finding, dict):
+                        code_findings.append({**finding, "language": str(language), "disposition": disposition})
+        return {
+            "dependencies": dependencies,
+            "dependency_vulnerabilities": dependency_vulnerabilities,
+            "code_findings": code_findings,
+        }
+    dependency_scan = payload.get("dependency_scan") if isinstance(payload.get("dependency_scan"), dict) else {}
+    static_analysis = payload.get("static_analysis") if isinstance(payload.get("static_analysis"), dict) else {}
+    return {
+        "dependencies": [item for item in dependency_scan.get("dependencies") or [] if isinstance(item, dict)],
+        "dependency_vulnerabilities": [item for item in payload.get("records") or [] if isinstance(item, dict)],
+        "code_findings": [item for item in static_analysis.get("findings") or [] if isinstance(item, dict)],
+    }
+
+
+def _scan_result_payload_sha256(document: dict[str, Any]) -> str:
+    signed = {
+        key: document.get(key)
+        for key in ("$schema", "schema_version", "source_kind", "language", "completed_at", "payload", "facts", "counts")
+    }
+    return hashlib.sha256(_canonical_report_json_bytes(signed)).hexdigest()
+
+
+def _build_report_json_document(
+    markdown: str,
+    metadata: dict[str, Any],
+    *,
+    report_source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    source = validate_scan_result_json(report_source) if report_source is not None else build_scan_result_json(
+        {}, source_kind="legacy_report", language=str(metadata.get("language") or "zh-Hans")
+    )
+    clean_markdown = _sanitize_report_content(str(markdown or ""))
+    render_document = _parse_report_document(clean_markdown, metadata)
+    render_document["markdown"] = clean_markdown
+    render_document["severity"] = _severity_distribution(clean_markdown, metadata)
+    document = {
+        "$schema": _REPORT_DOCUMENT_JSON_SCHEMA,
+        "schema_version": _REPORT_DOCUMENT_SCHEMA_VERSION,
+        "generated_at": str(metadata.get("created_at") or now_iso()),
+        "source": source,
+        "report": render_document,
+        "charts": _json_report_value(metadata.get("report_charts") or {}),
+        "metadata": _json_report_value(metadata),
+        "audit": {
+            "source_payload_sha256": str((source.get("audit") or {}).get("payload_sha256") or ""),
+            "input_format": "application/json",
+            "processors": [
+                "secflow-report-json",
+                "secflow-report-mermaid-mcp",
+                "secflow-report-markdown-mcp",
+                "secflow-html-renderer",
+                "secflow-report-word-mcp",
+                "secflow-report-pdf-mcp",
+            ],
+        },
+    }
+    return _json_report_value(document)
+
+
+def build_report_document_json(
+    markdown: str,
+    metadata: dict[str, Any],
+    *,
+    report_source: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the canonical JSON contract consumed by format-specific report MCPs."""
+
+    return _build_report_json_document(markdown, metadata, report_source=report_source)
+
+
+def validate_report_document_json(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate an in-memory report document without trusting renderer input."""
+
+    document = _json_report_value(value)
+    if document.get("$schema") != _REPORT_DOCUMENT_JSON_SCHEMA:
+        raise ValueError("Unsupported SecFlow report JSON schema")
+    if int(document.get("schema_version") or 0) < _REPORT_DOCUMENT_SCHEMA_VERSION:
+        raise ValueError("SecFlow report JSON schema version is outdated")
+    source = document.get("source") if isinstance(document.get("source"), dict) else {}
+    validate_scan_result_json(source)
+    document["report"] = _validated_render_document(document.get("report") or {})
+    if not str(document["report"].get("markdown") or "").strip():
+        raise ValueError("SecFlow report JSON is missing Markdown content")
+    expected_hash = str((source.get("audit") or {}).get("payload_sha256") or "")
+    recorded_hash = str((document.get("audit") or {}).get("source_payload_sha256") or "")
+    if expected_hash and recorded_hash and expected_hash != recorded_hash:
+        raise ValueError("SecFlow report source hash does not match its audit record")
+    return document
+
+
+def render_report_pdf_file(path: Path, report_document: dict[str, Any]) -> None:
+    """Render a validated report document for the dedicated PDF MCP."""
+
+    document = validate_report_document_json(report_document)
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    report = document["report"]
+    _write_pdf_report(
+        path,
+        str(report.get("markdown") or ""),
+        metadata,
+        document=report,
+    )
+
+
+def _render_binary_report_artifacts_with_mcps(
+    report_document: dict[str, Any],
+    *,
+    metadata: dict[str, Any],
+) -> tuple[dict[str, bytes], dict[str, str]]:
+    import base64
+
+    from app.mcp.report_pdf import invoke_report_pdf_mcp
+    from app.mcp.report_word import invoke_report_word_mcp
+
+    artifacts: dict[str, bytes] = {}
+    errors: dict[str, str] = {}
+    audits = metadata.get("report_mcps") if isinstance(metadata.get("report_mcps"), list) else []
+    for report_format, server, tool, invoke in (
+        ("docx", "SecFlow Word MCP", "render_word_report", invoke_report_word_mcp),
+        ("pdf", "SecFlow PDF MCP", "render_pdf_report", invoke_report_pdf_mcp),
+    ):
+        invoked_at = now_iso()
+        try:
+            result = invoke({"report_document": report_document})
+            payload = base64.b64decode(str(result.get("artifact_base64") or ""), validate=True)
+            expected_digest = str(result.get("output_sha256") or "")
+            actual_digest = hashlib.sha256(payload).hexdigest()
+            if not expected_digest or expected_digest != actual_digest:
+                raise ValueError(f"{server} output hash verification failed")
+            artifacts[report_format] = payload
+            audits.append(
+                {
+                    "server": server,
+                    "tool": tool,
+                    "transport": "in-process",
+                    "status": "completed",
+                    "invoked_at": invoked_at,
+                    "input_sha256": str(result.get("input_sha256") or ""),
+                    "output_sha256": actual_digest,
+                    "media_type": str(result.get("media_type") or _REPORT_MEDIA_TYPES[report_format]),
+                    "artifact_size": len(payload),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors[report_format] = str(exc)
+            audits.append(
+                {
+                    "server": server,
+                    "tool": tool,
+                    "transport": "in-process",
+                    "status": "failed",
+                    "invoked_at": invoked_at,
+                    "error": str(exc),
+                }
+            )
+    metadata["report_mcps"] = audits
+    return artifacts, errors
+
+
+def _load_report_json_document(path: Path) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("SecFlow report JSON cannot be read") from exc
+    if not isinstance(document, dict):
+        raise ValueError("SecFlow report JSON root must be an object")
+    return validate_report_document_json(document)
+
+
+def _canonical_report_json_bytes(value: Any, *, pretty: bool = False) -> bytes:
+    safe_value = _json_report_value(value)
+    return json.dumps(
+        safe_value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2 if pretty else None,
+        separators=None if pretty else (",", ":"),
+    ).encode("utf-8")
+
+
+def _json_report_value(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Report input cannot be converted to JSON") from exc
+
+
+report_artifact_store = ReportDownloadArtifactStore()
 report_store = ReportStore()

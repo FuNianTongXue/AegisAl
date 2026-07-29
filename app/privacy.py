@@ -96,7 +96,12 @@ def public_answer_payload(answer: dict[str, Any]) -> dict[str, Any]:
     payload.pop("sources", None)
 
     mode = str(payload.get("mode") or "")
-    if mode in {"vulnerability_lookup", "vulnerability_year_lookup", "dependency_vulnerability_report"}:
+    if mode in {
+        "vulnerability_lookup",
+        "vulnerability_year_lookup",
+        "dependency_vulnerability_report",
+        "component_vulnerability_query",
+    }:
         # Structured cards contain every customer-facing vulnerability fact. Raw
         # records stay server-side because they can disclose collection topology.
         payload.pop("records", None)
@@ -128,6 +133,10 @@ def _sanitize(value: Any, path: tuple[str, ...] = ()) -> Any:
     if isinstance(value, list):
         return [_sanitize(item, (*path, "[]")) for item in value]
     if isinstance(value, str):
+        if path[-3:] == ("evidence_sources", "[]", "id"):
+            return value if value in {"nvd", "github_advisory", "osv"} else "unknown"
+        if path[-6:] == ("component_detail", "vulnerabilities", "[]", "reference_links", "[]", "title"):
+            return value
         if path[-2:] == ("vulnerability_card", "参考链接"):
             return _public_reference_links_text(value)
         return sanitize_public_text(value)

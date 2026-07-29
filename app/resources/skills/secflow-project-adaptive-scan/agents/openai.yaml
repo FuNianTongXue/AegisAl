@@ -1,0 +1,4 @@
+interface:
+  display_name: "SecFlow 项目自适应扫描"
+  short_description: "基于可验证证据生成项目级污点分析安全 Overlay"
+  default_prompt: "Use $secflow-project-adaptive-scan to understand and scan my uploaded project, adapt only its evidence-backed Overlay, and preserve frozen evaluation baselines."

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-from semgrep.console_scripts.entrypoint import main
+import sys
+
+
+if sys.platform == "win32":
+    from semgrep.console_scripts.pysemgrep import main
+else:
+    from semgrep.console_scripts.entrypoint import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

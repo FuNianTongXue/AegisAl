@@ -10,6 +10,8 @@ from app.dependencies import MAX_ASK_ATTACHMENTS, is_allowed_attachment_name
 
 CollectorId = Literal["cve", "github_advisory"]
 SupportedLanguage = Literal["zh-Hans", "zh-Hant", "en", "ko", "ja", "es", "fr", "de", "it", "ru"]
+SubscriptionPaymentMethod = Literal["alipay", "wechat", "unionpay"]
+SubscriptionPaymentEventType = Literal["payment.succeeded", "payment.failed", "refund.succeeded"]
 
 
 class ApiResponse(BaseModel):
@@ -53,11 +55,118 @@ class AskAttachment(BaseModel):
         return clean_value
 
 
+class AgentTaskCreateRequest(BaseModel):
+    objective: str = Field(min_length=1, max_length=4000)
+    workspace_path: str = Field(min_length=1, max_length=4096)
+    user_id: str = Field(default="default", min_length=1, max_length=120)
+
+    @field_validator("objective", "workspace_path", "user_id")
+    @classmethod
+    def normalize_agent_task_fields(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("任务目标、工作区和用户标识不能为空")
+        return clean
+
+
+class AssistantWorkspaceActionRequest(BaseModel):
+    objective: str = Field(min_length=1, max_length=4000)
+    workspace_path: str = Field(min_length=1, max_length=4096)
+    user_id: str = Field(default="default", min_length=1, max_length=120)
+    session_id: str = Field(default="default", min_length=1, max_length=120)
+    response_language: str = Field(default="zh-Hans", max_length=24)
+
+    @field_validator("objective", "workspace_path", "user_id", "session_id")
+    @classmethod
+    def normalize_workspace_action_fields(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("工作区动作目标、项目路径和用户上下文不能为空")
+        return clean
+
+
+class AssistantTaskActionRequest(BaseModel):
+    objective: str = Field(min_length=1, max_length=4000)
+    user_id: str = Field(default="default", min_length=1, max_length=120)
+    session_id: str = Field(default="default", min_length=1, max_length=120)
+    response_language: str = Field(default="zh-Hans", max_length=24)
+
+    @field_validator("objective", "user_id", "session_id")
+    @classmethod
+    def normalize_task_action_fields(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("任务动作目标和用户上下文不能为空")
+        return clean
+
+
+class AgentTaskReportDecisionRequest(BaseModel):
+    generate: bool
+
+
+class ReportActionRequest(BaseModel):
+    action: Literal["generate", "download_report", "download_report_all_formats", "download_all"]
+    report_ids: list[str] = Field(default_factory=list, max_length=100)
+    formats: list[Literal["md", "html", "docx", "pdf"]] = Field(default_factory=list, max_length=4)
+    user_id: str = Field(default="default", min_length=1, max_length=120)
+    session_id: str = Field(default="default", min_length=1, max_length=120)
+    response_language: str = Field(default="zh-Hans", max_length=24)
+
+
+class ReportActionResumeRequest(BaseModel):
+    thread_id: str = Field(min_length=8, max_length=160)
+    interrupt_id: str = Field(default="", max_length=160)
+    decision: Literal["confirm", "cancel"]
+    format: Literal["md", "html", "docx", "pdf"] | None = None
+    user_id: str = Field(default="default", min_length=1, max_length=120)
+    session_id: str = Field(default="default", min_length=1, max_length=120)
+
+
+class AssistantInterruptResumeRequest(ReportActionResumeRequest):
+    """Resume any assistant-owned LangGraph interrupt without coupling the client to one subgraph."""
+
+
+class AgentTaskReportDownloadDecisionRequest(BaseModel):
+    confirm: bool
+    format: Literal["md", "html", "docx", "pdf"] = "pdf"
+
+
+class AgentTaskArchiveRequest(BaseModel):
+    archived: bool
+
+
+class AssistantConversationArchiveRequest(BaseModel):
+    archived: bool
+
+
 class IntelligenceQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     limit: int = Field(default=10, ge=1, le=50)
     response_language: str | None = Field(default=None, max_length=24)
     sources: list[Literal["nvd", "github_advisory", "osv"]] | None = None
+
+
+class ComponentVulnerabilityRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=240)
+    version: str = Field(min_length=1, max_length=120)
+    ecosystem: str | None = Field(default=None, max_length=80)
+    include_realtime: bool = True
+
+    @field_validator("name", "version", "ecosystem")
+    @classmethod
+    def normalize_component_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return " ".join(value.split())
+
+
+class VulnerabilityComponentExportRequest(BaseModel):
+    identifier: str = Field(min_length=1, max_length=40)
+
+    @field_validator("identifier")
+    @classmethod
+    def normalize_identifier(cls, value: str) -> str:
+        return " ".join(value.split()).upper()
 
 
 class DashboardRefreshRequest(BaseModel):
@@ -67,6 +176,21 @@ class DashboardRefreshRequest(BaseModel):
 
 class InformationSourceUpdate(BaseModel):
     enabled: bool
+
+
+class InformationSourcesUpdate(BaseModel):
+    source_ids: list[str] = Field(min_length=1, max_length=600)
+    enabled: bool
+
+    @field_validator("source_ids")
+    @classmethod
+    def validate_source_ids(cls, values: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+        if not cleaned:
+            raise ValueError("至少选择一个资讯来源")
+        if any(len(value) > 120 for value in cleaned):
+            raise ValueError("资讯来源编号长度无效")
+        return cleaned
 
 
 class UserProfileSettingsUpdate(BaseModel):
@@ -117,6 +241,48 @@ class LegalDocumentUpdate(BaseModel):
     sections: list[LegalDocumentSectionUpdate] | None = Field(default=None, min_length=1, max_length=30)
 
 
+class SubscriptionCheckoutRequest(BaseModel):
+    user_id: str = Field(default="local-user", min_length=1, max_length=120)
+    plan_id: str = Field(min_length=1, max_length=80)
+    payment_method: SubscriptionPaymentMethod
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+    @field_validator("user_id", "plan_id", "idempotency_key")
+    @classmethod
+    def normalize_subscription_checkout_fields(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("订阅参数不能为空")
+        return clean
+
+
+class SubscriptionCancelRequest(BaseModel):
+    user_id: str = Field(default="local-user", min_length=1, max_length=120)
+    reason: str | None = Field(default=None, max_length=300)
+
+    @field_validator("user_id", "reason")
+    @classmethod
+    def normalize_subscription_cancel_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
+
+
+class SubscriptionPaymentEvent(BaseModel):
+    event_id: str = Field(min_length=1, max_length=160)
+    event_type: SubscriptionPaymentEventType
+    order_id: str = Field(min_length=1, max_length=160)
+    provider_transaction_id: str | None = Field(default=None, max_length=200)
+    occurred_at: str | None = Field(default=None, max_length=80)
+
+    @field_validator("event_id", "order_id", "provider_transaction_id", "occurred_at")
+    @classmethod
+    def normalize_subscription_event_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
+
+
 class ReportDeleteRequest(BaseModel):
     report_ids: list[str] = Field(min_length=1, max_length=100)
 
@@ -133,6 +299,7 @@ class ReportDeleteRequest(BaseModel):
 
 class LLMConfigRequest(BaseModel):
     provider: Literal["openai", "claude", "deepseek", "custom"]
+    catalog_provider: str | None = Field(default=None, min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=120)
     endpoint: str | None = Field(default=None, max_length=300)
     api_key: str | None = Field(default=None, max_length=300)
@@ -141,12 +308,14 @@ class LLMConfigRequest(BaseModel):
     temperature: float = Field(default=0.25, ge=0, le=2)
     top_p: float = Field(default=0.9, ge=0, le=1)
     timeout_ms: int = Field(default=60000, ge=1000, le=180000)
-    reasoning_effort: str | None = Field(default=None, max_length=40)
+    wire_api: Literal["chat", "responses"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     disable_response_storage: bool | None = None
 
 
 class LLMModelsRequest(BaseModel):
     provider: Literal["openai", "claude", "deepseek", "custom"]
+    catalog_provider: str | None = Field(default=None, min_length=1, max_length=80)
     endpoint: str | None = Field(default=None, max_length=300)
     api_key: str | None = Field(default=None, max_length=300)
     timeout_ms: int = Field(default=30000, ge=1000, le=180000)

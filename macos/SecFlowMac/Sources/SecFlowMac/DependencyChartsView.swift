@@ -1,23 +1,38 @@
 import SwiftUI
 import WebKit
 
+enum DependencyChartPresentation {
+    case dependency
+    case componentVulnerability
+    case scanReport
+}
+
 struct DependencyChartsView: View {
     @EnvironmentObject private var model: AppModel
     let chartData: DependencyChartData
+    let presentation: DependencyChartPresentation
+
+    init(chartData: DependencyChartData, presentation: DependencyChartPresentation = .dependency) {
+        self.chartData = chartData
+        self.presentation = presentation
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "chart.xyaxis.line")
                     .foregroundStyle(AppPalette.primary)
-                Text(model.uiText("依赖关系图表"))
-                    .font(.headline)
+                Text(model.uiText(headerTitle))
+                    .font(AppTypography.headline)
                     .foregroundStyle(AppPalette.text)
                 Spacer()
             }
 
             if let sankey = chartData.sankey, !sankey.nodes.isEmpty, !sankey.links.isEmpty {
-                ChartPanel(title: model.uiText("依赖桑基图"), subtitle: model.uiText("构建文件 / 代码文件 → 依赖 → CVE → 修复版本")) {
+                ChartPanel(
+                    title: model.uiText(sankeyTitle),
+                    subtitle: model.uiText(sankeySubtitle)
+                ) {
                     D3SankeyChartView(data: sankey)
                         .frame(height: 320)
                 }
@@ -31,7 +46,7 @@ struct DependencyChartsView: View {
                     }
                 }
                 if !chartData.riskBars.isEmpty {
-                    ChartPanel(title: model.uiText("依赖风险柱状图"), subtitle: model.uiText("命中漏洞最多的依赖")) {
+                    ChartPanel(title: model.uiText(riskBarsTitle), subtitle: model.uiText(riskBarsSubtitle)) {
                         RiskBarChart(metrics: chartData.riskBars)
                             .frame(height: 210)
                     }
@@ -47,6 +62,38 @@ struct DependencyChartsView: View {
         }
         .padding(.top, 6)
     }
+
+    private var headerTitle: String {
+        switch presentation {
+        case .dependency: "依赖关系图表"
+        case .componentVulnerability: "组件漏洞图表"
+        case .scanReport: "MCP 扫描报告图表"
+        }
+    }
+
+    private var sankeyTitle: String {
+        switch presentation {
+        case .dependency: "依赖桑基图"
+        case .componentVulnerability: "组件漏洞桑基图"
+        case .scanReport: "扫描证据关系图"
+        }
+    }
+
+    private var sankeySubtitle: String {
+        switch presentation {
+        case .dependency: "构建文件 / 代码文件 → 依赖 → CVE → 修复版本"
+        case .componentVulnerability: "组件 → 漏洞 → 修复版本"
+        case .scanReport: "源文件 / 组件 → 已确认扫描发现"
+        }
+    }
+
+    private var riskBarsTitle: String {
+        presentation == .scanReport ? "风险类型分布" : "依赖风险柱状图"
+    }
+
+    private var riskBarsSubtitle: String {
+        presentation == .scanReport ? "按扫描场景统计已确认发现" : "命中漏洞最多的依赖"
+    }
 }
 
 private struct ChartPanel<Content: View>: View {
@@ -58,10 +105,10 @@ private struct ChartPanel<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
             }
             content
@@ -76,35 +123,89 @@ private struct ChartPanel<Content: View>: View {
     }
 }
 
-private struct D3SankeyChartView: NSViewRepresentable {
+struct D3SankeyChartView: NSViewRepresentable {
     let data: SankeyChartData
+    let selectedNodeID: String?
+    let onSelect: ((String) -> Void)?
+
+    init(
+        data: SankeyChartData,
+        selectedNodeID: String? = nil,
+        onSelect: ((String) -> Void)? = nil
+    ) {
+        self.data = data
+        self.selectedNodeID = selectedNodeID
+        self.onSelect = onSelect
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(context.coordinator, name: "secflowSankeyNode")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
-        webView.loadHTMLString(html, baseURL: resourceBaseURL)
+        context.coordinator.lastHTML = renderedHTML
+        webView.loadHTMLString(renderedHTML, baseURL: nil)
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        webView.loadHTMLString(html, baseURL: resourceBaseURL)
+        context.coordinator.parent = self
+        guard context.coordinator.lastHTML != renderedHTML else { return }
+        context.coordinator.lastHTML = renderedHTML
+        webView.loadHTMLString(renderedHTML, baseURL: nil)
     }
 
-    private var resourceBaseURL: URL? {
-        if let appResourceURL = Bundle.main.resourceURL {
-            let bundledURL = appResourceURL
-                .appendingPathComponent("SecFlowMac_SecFlowMac.bundle", isDirectory: true)
-                .appendingPathComponent("Resources", isDirectory: true)
-            if FileManager.default.fileExists(atPath: bundledURL.appendingPathComponent("Web/d3.min.js").path) {
-                return bundledURL
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        nsView.configuration.userContentController.removeScriptMessageHandler(forName: "secflowSankeyNode")
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler {
+        var parent: D3SankeyChartView
+        var lastHTML = ""
+
+        init(parent: D3SankeyChartView) {
+            self.parent = parent
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "secflowSankeyNode", let nodeID = message.body as? String else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.onSelect?(nodeID)
             }
         }
-        return Bundle.module.resourceURL
     }
 
-    private var html: String {
+    static let bundledRuntime: String = {
+        ["d3.min.js", "d3-sankey.min.js"]
+            .compactMap(loadBundledScript)
+            .joined(separator: "\n")
+    }()
+
+    private static func loadBundledScript(_ fileName: String) -> String? {
+        let resourceRoots = [Bundle.module.resourceURL, Bundle.main.resourceURL].compactMap { $0 }
+        var candidates: [URL] = []
+        for root in resourceRoots {
+            candidates.append(root.appendingPathComponent("Resources/Web/\(fileName)"))
+            candidates.append(root.appendingPathComponent("Web/\(fileName)"))
+            candidates.append(
+                root.appendingPathComponent("SecFlowMac_SecFlowMac.bundle/Resources/Web/\(fileName)")
+            )
+        }
+        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+            if let source = try? String(contentsOf: url, encoding: .utf8), !source.isEmpty {
+                return source
+            }
+        }
+        return nil
+    }
+
+    var renderedHTML: String {
         let payload = (try? JSONEncoder().encode(data).base64EncodedString()) ?? "eyJub2RlcyI6W10sImxpbmtzIjpbXX0="
+        let selectedPayload = Data((selectedNodeID ?? "").utf8).base64EncodedString()
         return """
         <!doctype html>
         <html>
@@ -112,24 +213,25 @@ private struct D3SankeyChartView: NSViewRepresentable {
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width,initial-scale=1" />
           <style>
-            html, body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; }
+            html, body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent; font-family:\(AppTypography.webFontFamily); }
             #chart { width:100vw; height:100vh; }
             .fallback { height:100vh; display:flex; align-items:center; justify-content:center; color:#5F6874; font-size:13px; }
             .node text { fill:#0F193A; font-size:12px; font-weight:600; paint-order:stroke; stroke:rgba(255,255,255,.72); stroke-width:3px; stroke-linejoin:round; }
             .link { fill:none; mix-blend-mode:multiply; }
             .link:hover { opacity:.92 !important; }
           </style>
-          <script src="Web/d3.min.js"></script>
-          <script src="Web/d3-sankey.min.js"></script>
+          <script>\(Self.bundledRuntime)</script>
         </head>
         <body>
           <div id="chart"></div>
           <script>
             const payload = "\(payload)";
             const raw = JSON.parse(new TextDecoder("utf-8").decode(Uint8Array.from(atob(payload), c => c.charCodeAt(0))));
+            const selectedNodeID = new TextDecoder("utf-8").decode(Uint8Array.from(atob("\(selectedPayload)"), c => c.charCodeAt(0)));
             const colors = {
               file: "#0F193A", pom: "#0F193A", gradle: "#0F193A", gradle_version_catalog: "#0F193A", gradle_properties: "#0F193A", code: "#334155",
               dependency: "#2CAFD2", vulnerability: "#EF3F3C", fix: "#1EC45B",
+              component: "#2CAFD2", weakness: "#EDBD00", advisory: "#64748B",
               CRITICAL: "#EF3F3C", HIGH: "#F69A00", MEDIUM: "#EDBD00", LOW: "#1EC45B", UNKNOWN: "#94A3B8", CODE: "#2CAFD2"
             };
             function draw() {
@@ -155,7 +257,9 @@ private struct D3SankeyChartView: NSViewRepresentable {
                 .nodeId(d => d.id)
                 .nodeWidth(15)
                 .nodePadding(14)
-                .nodeAlign(d3.sankeyJustify)
+                .nodeAlign((d, columns) => Number.isFinite(d.column)
+                  ? Math.max(0, Math.min(columns - 1, d.column))
+                  : d3.sankeyJustify(d, columns))
                 .extent([[12, 10], [width - 12, height - 18]]);
               const layout = sankey(graph);
               svg.append("g")
@@ -173,7 +277,13 @@ private struct D3SankeyChartView: NSViewRepresentable {
                 .selectAll("g")
                 .data(layout.nodes)
                 .join("g")
-                .attr("class", "node");
+                .attr("class", "node")
+                .style("cursor", "pointer")
+                .on("click", (event, d) => {
+                  if (window.webkit?.messageHandlers?.secflowSankeyNode) {
+                    window.webkit.messageHandlers.secflowSankeyNode.postMessage(d.id);
+                  }
+                });
               node.append("rect")
                 .attr("x", d => d.x0)
                 .attr("y", d => d.y0)
@@ -181,7 +291,11 @@ private struct D3SankeyChartView: NSViewRepresentable {
                 .attr("width", d => d.x1 - d.x0)
                 .attr("rx", 4)
                 .attr("fill", d => colors[d.severity] || colors[d.type] || "#2CAFD2")
-                .attr("fill-opacity", .92);
+                .attr("fill-opacity", .92)
+                .attr("stroke", d => d.id === selectedNodeID ? "#FFFFFF" : "rgba(15,25,58,.22)")
+                .attr("stroke-width", d => d.id === selectedNodeID ? 3 : 1);
+              node.append("title")
+                .text(d => `${d.label}\n${d.type}`);
               node.append("text")
                 .attr("x", d => d.x0 < width / 2 ? d.x1 + 7 : d.x0 - 7)
                 .attr("y", d => (d.y0 + d.y1) / 2)
@@ -215,10 +329,10 @@ private struct SeverityRingChart: View {
                 }
                 VStack(spacing: 1) {
                     Text("\(total)")
-                        .font(.title3.bold())
+                        .font(AppTypography.title3.bold())
                         .foregroundStyle(AppPalette.text)
                     Text(model.uiText("命中"))
-                        .font(.caption2)
+                        .font(AppTypography.caption2)
                         .foregroundStyle(AppPalette.textMuted)
                 }
             }
@@ -229,11 +343,11 @@ private struct SeverityRingChart: View {
                     HStack(spacing: 7) {
                         Circle().fill(color(for: metric.key ?? metric.id)).frame(width: 8, height: 8)
                         Text(severityLabel(metric.key ?? metric.id, language: model.appLanguage))
-                            .font(.caption.weight(.medium))
+                            .font(AppTypography.caption.weight(.medium))
                             .foregroundStyle(AppPalette.text)
                         Spacer()
                         Text("\(metric.value)")
-                            .font(.caption.monospacedDigit())
+                            .font(AppTypography.caption.monospacedDigit())
                             .foregroundStyle(AppPalette.textMuted)
                     }
                 }
@@ -259,7 +373,7 @@ private struct RiskBarChart: View {
             ForEach(metrics.prefix(8)) { metric in
                 HStack(spacing: 10) {
                     Text(metric.label ?? metric.id)
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.text)
                         .lineLimit(1)
                         .frame(width: 112, alignment: .leading)
@@ -273,7 +387,7 @@ private struct RiskBarChart: View {
                     }
                     .frame(height: 10)
                     Text("\(metric.value)")
-                        .font(.caption.monospacedDigit())
+                        .font(AppTypography.caption.monospacedDigit())
                         .foregroundStyle(AppPalette.textMuted)
                         .frame(width: 28, alignment: .trailing)
                 }
@@ -413,7 +527,7 @@ private struct DAGNodeCard: View {
                 .fill(color(for: node.severity ?? node.type))
                 .frame(width: 7, height: 7)
             Text(node.label)
-                .font(.caption2.weight(.semibold))
+                .font(AppTypography.caption2.weight(.semibold))
                 .foregroundStyle(AppPalette.text)
                 .lineLimit(1)
                 .truncationMode(.middle)

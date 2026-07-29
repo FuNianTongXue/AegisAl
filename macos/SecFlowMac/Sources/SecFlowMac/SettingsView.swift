@@ -5,6 +5,12 @@ import UniformTypeIdentifiers
 private let customModelSelection = "__secflow_custom_model__"
 private let maxProfileAvatarBytes = 2 * 1024 * 1024
 private let supportedProfileAvatarExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
+enum SettingsWindowMetrics {
+    static let defaultSize = CGSize(width: 980, height: 760)
+    static let minSize = CGSize(width: 940, height: 740)
+    static let sidebarWidth: CGFloat = 220
+}
+
 private let profileAvatarContentTypes: [UTType] = {
     var types: [UTType] = [.png, .jpeg]
     if let webp = UTType(filenameExtension: "webp") {
@@ -16,6 +22,8 @@ private let profileAvatarContentTypes: [UTType] = {
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+
+    private let loadsData: Bool
 
     @State private var selectedSection: SettingsSection = .profile
     @State private var activeDocument: SettingsDocument?
@@ -40,8 +48,13 @@ struct SettingsView: View {
     @State private var apiKey = ""
     @State private var isApiKeyVisible = false
     @State private var testResult: LLMTestResult?
-    @State private var catalogProviderID: String?
     @State private var didHydrateLLM = false
+
+    @State private var selectedSubscriptionPlanID = "professional_quarterly"
+    @State private var selectedPaymentMethod = "alipay"
+    @State private var subscriptionNotice: SettingsNotice?
+    @State private var isShowingSubscriptionRecords = false
+    @State private var isShowingCancelConfirmation = false
 
     @State private var selectedLanguage: AppLanguage = .zhHans
     @State private var darkMode = false
@@ -55,7 +68,6 @@ struct SettingsView: View {
         GridItem(.flexible(), spacing: 12),
         GridItem(.flexible(), spacing: 12),
         GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12),
     ]
 
     private var isTesting: Bool { model.busyActions.contains("llm-test") }
@@ -65,9 +77,17 @@ struct SettingsView: View {
     private var isUploadingAvatar: Bool { model.busyActions.contains("settings-avatar-upload") }
     private var isDeletingAvatar: Bool { model.busyActions.contains("settings-avatar-delete") }
     private var isSavingPreferences: Bool { model.busyActions.contains("settings-preferences-save") }
+    private var isLoadingSubscription: Bool { model.busyActions.contains("subscription-load") }
+    private var isCheckingOutSubscription: Bool { model.busyActions.contains("subscription-checkout") }
+    private var isCancelingSubscription: Bool { model.busyActions.contains("subscription-cancel") }
 
     private var selectedProvider: SettingsModelProvider {
         SettingsModelProvider.providers.first { $0.id == selectedProviderID } ?? SettingsModelProvider.providers[0]
+    }
+
+    init(initialSection: SettingsSection = .profile, loadsData: Bool = true) {
+        self.loadsData = loadsData
+        _selectedSection = State(initialValue: initialSection)
     }
 
     var body: some View {
@@ -76,17 +96,24 @@ struct SettingsView: View {
                 selectedSection: $selectedSection,
                 activeDocument: $activeDocument,
                 profileName: profileDisplayName,
-                role: profileRole
+                role: profileRole,
+                avatarImage: profileAvatarImage
             )
-            .frame(width: 236)
+            .frame(width: SettingsWindowMetrics.sidebarWidth)
 
-            Divider().overlay(AppPalette.border.opacity(0.55))
+            Divider().overlay(AppPalette.separator.opacity(0.42))
 
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 1040, minHeight: 740)
+        .frame(
+            minWidth: SettingsWindowMetrics.minSize.width,
+            minHeight: SettingsWindowMetrics.minSize.height
+        )
         .background(AppPalette.page)
+        .background {
+            SettingsWindowAppearanceConfigurator(darkMode: model.darkModeEnabled)
+        }
         .foregroundStyle(AppPalette.text)
         .fileImporter(
             isPresented: $isImportingAvatar,
@@ -94,8 +121,33 @@ struct SettingsView: View {
             allowsMultipleSelection: false,
             onCompletion: importProfileAvatar
         )
+        .sheet(isPresented: $isShowingSubscriptionRecords) {
+            SubscriptionRecordsSheet(
+                usage: model.subscriptionUsage,
+                orders: model.subscriptionOrders
+            )
+        }
+        .confirmationDialog(
+            "确认取消自动续费？",
+            isPresented: $isShowingCancelConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("取消自动续费", role: .destructive) {
+                Task { await cancelSubscription() }
+            }
+            Button("保留自动续费", role: .cancel) {}
+        } message: {
+            Text("取消后当前权益仍可使用至本周期结束，系统不会立即终止订阅。")
+        }
+        .onAppear {
+            guard !didHydratePreferences else { return }
+            darkMode = model.darkModeEnabled
+            fontSize = model.interfaceFontSize.rawValue
+        }
         .task {
-            await bootstrap()
+            if loadsData {
+                await bootstrap()
+            }
         }
         .onChange(of: model.profileSettings) { _, _ in
             hydrateProfile(force: true)
@@ -105,6 +157,14 @@ struct SettingsView: View {
         }
         .onChange(of: model.preferenceSettings) { _, _ in
             hydratePreferences(force: true)
+        }
+        .onChange(of: darkMode) { _, value in
+            preferenceNotice = nil
+            model.previewAppearance(darkMode: value, fontSize: fontSize)
+        }
+        .onChange(of: fontSize) { _, value in
+            preferenceNotice = nil
+            model.previewAppearance(darkMode: darkMode, fontSize: value)
         }
         .onChange(of: model.llmConfig) { _, _ in
             hydrateLLM(force: false)
@@ -121,11 +181,22 @@ struct SettingsView: View {
                 profilePage
             case .modelConfig:
                 modelConfigPage
+            case .subscription:
+                subscriptionPage
+            case .logs:
+                logsPage
             case .general:
                 generalSettingsPage
             case .about:
                 aboutPage
             }
+        }
+    }
+
+    private var logsPage: some View {
+        VStack(spacing: 0) {
+            SettingsTopBar(title: model.uiText("日志管理"))
+            RecordsView(showsHeader: false)
         }
     }
 
@@ -165,7 +236,7 @@ struct SettingsView: View {
                                             Task { await removeProfileAvatar() }
                                         }
                                         .buttonStyle(.plain)
-                                        .font(.caption.weight(.semibold))
+                                        .font(AppTypography.caption.weight(.semibold))
                                         .foregroundStyle(AppPalette.danger)
                                         .disabled(isDeletingAvatar)
                                     }
@@ -281,33 +352,79 @@ struct SettingsView: View {
                                 SettingsProviderBadge(provider: selectedProvider)
                                 Spacer()
                                 Button {
+                                    Task { await loadProviderModels() }
+                                } label: {
+                                    if isLoadingModels {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .frame(width: 18, height: 18)
+                                    } else {
+                                        Image(systemName: "arrow.clockwise")
+                                            .frame(width: 18, height: 18)
+                                    }
+                                }
+                                .buttonStyle(SettingsSecondaryButtonStyle(height: 38))
+                                .disabled(isLoadingModels)
+                                .help("从厂商官方 Models API 同步")
+
+                                Button {
                                     selectedModel = customModelSelection
                                     customModel = ""
                                 } label: {
-                                    Label("添加模型", systemImage: "plus")
+                                    Image(systemName: "plus")
+                                        .frame(width: 18, height: 18)
                                 }
                                 .buttonStyle(SettingsSecondaryButtonStyle(height: 38))
+                                .help("填写自定义模型 ID")
                             }
 
-                            VStack(spacing: 10) {
-                                ForEach(visibleModelOptions) { option in
-                                    SettingsModelRow(
-                                        option: option,
-                                        isSelected: option.model == selectedModel,
-                                        isEnabled: !option.model.localizedCaseInsensitiveContains("3.5")
-                                    ) {
-                                        selectedModel = option.model
-                                        customModel = ""
-                                        testResult = nil
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("模型")
+                                    .font(AppTypography.caption.weight(.semibold))
+                                    .foregroundStyle(AppPalette.textMuted)
+
+                                HStack(spacing: 10) {
+                                    Image(systemName: "cpu")
+                                        .foregroundStyle(AppPalette.textSubtle)
+                                        .frame(width: 18)
+
+                                    Picker("模型", selection: $selectedModel) {
+                                        ForEach(visibleModelOptions) { option in
+                                            Text("\(option.title) · \(option.model)")
+                                                .tag(option.model)
+                                        }
+                                        Divider()
+                                        Text("自定义模型 ID")
+                                            .tag(customModelSelection)
                                     }
+                                    .labelsHidden()
+                                    .pickerStyle(.menu)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
+                                .modifier(SettingsFieldChrome())
+
+                                if let option = selectedModelOption {
+                                    Text(option.subtitle)
+                                        .font(AppTypography.caption)
+                                        .foregroundStyle(AppPalette.textSubtle)
+                                }
+
+                                if let catalog = model.llmModelCatalog,
+                                   catalog.provider == selectedProviderID {
+                                    Text(catalog.source == "provider"
+                                         ? "已同步 \(catalog.models.count) 个可调用模型"
+                                         : "当前显示官网校准的内置模型目录")
+                                        .font(AppTypography.caption)
+                                        .foregroundStyle(catalog.source == "provider" ? AppPalette.success : AppPalette.textSubtle)
+                                }
+
                             }
 
                             if selectedModel == customModelSelection {
                                 SettingsInputField(
                                     title: "自定义模型 ID",
                                     text: $customModel,
-                                    placeholder: "例如：gpt-4o、qwen-plus、moonshot-v1-8k"
+                                    placeholder: "例如：gpt-5.6-terra、qwen3.7-plus、kimi-k3"
                                 )
                             }
                         }
@@ -318,15 +435,19 @@ struct SettingsView: View {
                             HStack {
                                 SettingsSectionTitle(icon: "link", title: "接口配置")
                                 Spacer()
+                                Link(destination: selectedProvider.docsURL) {
+                                    Label("API 文档", systemImage: "book.closed")
+                                        .font(AppTypography.caption.weight(.semibold))
+                                }
                                 Link(destination: selectedProvider.keyURL) {
                                     Text("获取 Key")
-                                        .font(.caption.weight(.semibold))
+                                        .font(AppTypography.caption.weight(.semibold))
                                 }
                             }
 
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("API Key")
-                                    .font(.caption.weight(.semibold))
+                                    .font(AppTypography.caption.weight(.semibold))
                                     .foregroundStyle(AppPalette.textMuted)
 
                                 HStack(spacing: 10) {
@@ -341,7 +462,7 @@ struct SettingsView: View {
                                         }
                                     }
                                     .textFieldStyle(.plain)
-                                    .font(.callout.monospaced())
+                                    .font(AppTypography.callout.monospaced())
 
                                     Button {
                                         isApiKeyVisible.toggle()
@@ -363,7 +484,7 @@ struct SettingsView: View {
                             )
 
                             Text("如果使用代理或第三方中转服务，请修改此地址。非原生支持厂商会按 OpenAI 兼容接口写入后端自定义模型配置。")
-                                .font(.caption)
+                                .font(AppTypography.caption)
                                 .foregroundStyle(AppPalette.textSubtle)
                         }
                     }
@@ -373,6 +494,125 @@ struct SettingsView: View {
                         subtitle: connectionSubtitle,
                         isHealthy: connectionHealthy
                     )
+                }
+                .padding(32)
+            }
+            .background(AppPalette.page)
+        }
+    }
+
+    private var subscriptionPage: some View {
+        VStack(spacing: 0) {
+            SettingsTopBar(title: "订阅管理") {
+                HStack(spacing: 10) {
+                    StatusBadge(
+                        text: subscriptionStatusText(model.currentSubscription?.status ?? "free"),
+                        tone: model.currentSubscription?.isActive == true ? .good : .neutral
+                    )
+                    Button {
+                        isShowingSubscriptionRecords = true
+                    } label: {
+                        Label("使用记录", systemImage: "clock.arrow.circlepath")
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle(height: 36))
+                }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if isLoadingSubscription, model.subscriptionCatalog == nil {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("正在加载订阅信息")
+                                .font(AppTypography.callout)
+                                .foregroundStyle(AppPalette.textMuted)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 90)
+                    } else if let catalog = model.subscriptionCatalog {
+                        SettingsPanel {
+                            SubscriptionCurrentPlanView(
+                                subscription: model.currentSubscription,
+                                plan: catalog.plans.first { $0.id == model.currentSubscription?.planId },
+                                isCanceling: isCancelingSubscription,
+                                cancelAction: { isShowingCancelConfirmation = true }
+                            )
+                        }
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(alignment: .center, spacing: 12) {
+                                SettingsSectionTitle(icon: "square.stack.3d.up", title: "选择方案")
+                                Spacer()
+                                Label("所有方案均包含完整专业版权益", systemImage: "checkmark.shield.fill")
+                                    .font(AppTypography.caption.weight(.semibold))
+                                    .foregroundStyle(AppPalette.textMuted)
+                            }
+                            LazyVGrid(
+                                columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 3),
+                                spacing: 14
+                            ) {
+                                ForEach(catalog.plans) { plan in
+                                    SubscriptionPlanCard(
+                                        plan: plan,
+                                        isSelected: selectedSubscriptionPlanID == plan.id,
+                                        isCurrent: model.currentSubscription?.isActive == true
+                                            && model.currentSubscription?.planId == plan.id,
+                                        action: {
+                                            selectedSubscriptionPlanID = plan.id
+                                            subscriptionNotice = nil
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        SettingsPanel {
+                            VStack(alignment: .leading, spacing: 18) {
+                                SettingsSectionTitle(icon: "creditcard", title: "支付方式")
+
+                                Picker("支付方式", selection: $selectedPaymentMethod) {
+                                    ForEach(catalog.paymentMethods) { method in
+                                        Label(method.name, systemImage: subscriptionPaymentIcon(method.id))
+                                            .tag(method.id)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .labelsHidden()
+
+                                HStack(spacing: 12) {
+                                    SettingsIconBox(icon: "lock.shield.fill")
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("安全支付保障")
+                                            .font(AppTypography.callout.weight(.semibold))
+                                        Text("金额由服务端套餐目录确认；支付成功后仅通过签名回调激活订阅。")
+                                            .font(AppTypography.caption)
+                                            .foregroundStyle(AppPalette.textMuted)
+                                    }
+                                    Spacer()
+                                    Button {
+                                        Task { await checkoutSubscription() }
+                                    } label: {
+                                        Label(
+                                            isCheckingOutSubscription ? "创建订单中" : "确认方案并继续支付",
+                                            systemImage: "creditcard.fill"
+                                        )
+                                    }
+                                    .buttonStyle(SettingsPrimaryButtonStyle())
+                                    .disabled(isCheckingOutSubscription || selectedSubscriptionPlanID.isEmpty)
+                                }
+
+                                if let subscriptionNotice {
+                                    SettingsNoticeView(notice: subscriptionNotice)
+                                }
+                            }
+                        }
+                    } else {
+                        ContentUnavailableView(
+                            "订阅信息暂不可用",
+                            systemImage: "wifi.exclamationmark",
+                            description: Text(model.errorMessage ?? "请稍后重新打开订阅管理。")
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 320)
+                    }
                 }
                 .padding(32)
             }
@@ -395,6 +635,29 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     SettingsPanel {
+                        VStack(alignment: .leading, spacing: 22) {
+                            SettingsSectionTitle(icon: "paintpalette", title: "外观设置")
+                            SettingsToggleRow(
+                                icon: "moon.fill",
+                                title: "深色模式",
+                                subtitle: darkMode ? "已开启深色显示" : "已切换为浅色显示",
+                                isOn: $darkMode
+                            )
+                            SettingsMenuRow(
+                                icon: "textformat.size",
+                                title: "字体大小",
+                                subtitle: "调整界面文字大小",
+                                selection: $fontSize,
+                                items: [
+                                    ("small", "小"),
+                                    ("default", "默认"),
+                                    ("large", "大"),
+                                ]
+                            )
+                        }
+                    }
+
+                    SettingsPanel {
                         VStack(alignment: .leading, spacing: 18) {
                             SettingsSectionTitle(icon: "translate", title: "语言设置")
                             VStack(spacing: 8) {
@@ -409,29 +672,6 @@ struct SettingsView: View {
                                     )
                                 }
                             }
-                        }
-                    }
-
-                    SettingsPanel {
-                        VStack(alignment: .leading, spacing: 22) {
-                            SettingsSectionTitle(icon: "paintpalette", title: "外观设置")
-                            SettingsToggleRow(
-                                icon: "moon.fill",
-                                title: "深色模式",
-                                subtitle: "跟随系统自动切换",
-                                isOn: $darkMode
-                            )
-                            SettingsMenuRow(
-                                icon: "textformat.size",
-                                title: "字体大小",
-                                subtitle: "调整界面文字大小",
-                                selection: $fontSize,
-                                items: [
-                                    ("small", "小"),
-                                    ("default", "默认"),
-                                    ("large", "大"),
-                                ]
-                            )
                         }
                     }
 
@@ -472,17 +712,17 @@ struct SettingsView: View {
                     VStack(spacing: 12) {
                         AppBrandLogo(size: 82)
                         Text(model.aboutSettings?.name ?? AppBrand.chineseName)
-                            .font(.title2.weight(.bold))
+                            .font(AppTypography.title2.weight(.bold))
                         Text(model.aboutSettings?.subtitle ?? AppBrand.subtitle)
-                            .font(.callout)
+                            .font(AppTypography.callout)
                             .foregroundStyle(AppPalette.textMuted)
                         HStack(spacing: 8) {
                             Text("版本 \(aboutVersionLabel)")
-                                .font(.callout.weight(.semibold))
+                                .font(AppTypography.callout.weight(.semibold))
                                 .foregroundStyle(AppPalette.primary)
                             if model.aboutSettings?.latest ?? true {
                                 Text("已是最新")
-                                    .font(.caption2.weight(.semibold))
+                                    .font(AppTypography.caption2.weight(.semibold))
                                     .foregroundStyle(AppPalette.success)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 3)
@@ -500,10 +740,10 @@ struct SettingsView: View {
                                 HStack(alignment: .top, spacing: 10) {
                                     Image(systemName: "checkmark.circle.fill")
                                         .foregroundStyle(AppPalette.success)
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .font(AppTypography.system(size: 14, weight: .semibold))
                                         .padding(.top, 2)
                                     Text(feature)
-                                        .font(.callout)
+                                        .font(AppTypography.callout)
                                         .foregroundStyle(AppPalette.textMuted)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -534,7 +774,7 @@ struct SettingsView: View {
                     }
 
                     Text(model.aboutSettings?.copyright ?? "© 2024 安全智脑 Security AI. All Rights Reserved.")
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.textSubtle)
                         .multilineTextAlignment(.center)
                         .padding(.bottom, 24)
@@ -600,8 +840,9 @@ struct SettingsView: View {
     }
 
     private var visibleModelOptions: [LLMModelOption] {
-        if catalogProviderID == selectedProviderID,
-           let catalog = model.llmModelCatalog,
+        var options = selectedProvider.models
+        if let catalog = model.llmModelCatalog,
+           catalog.provider == selectedProviderID,
            !catalog.models.isEmpty
         {
             let mapped = catalog.models.map {
@@ -611,9 +852,14 @@ struct SettingsView: View {
                     subtitle: $0.description ?? "厂商接口返回模型"
                 )
             }
-            return Array(Dictionary(grouping: mapped, by: \.model).compactMap { $0.value.first }.prefix(8))
+            options = mapped + options
         }
-        return selectedProvider.models
+        var seen = Set<String>()
+        return options.filter { seen.insert($0.model).inserted }
+    }
+
+    private var selectedModelOption: LLMModelOption? {
+        visibleModelOptions.first { $0.model == selectedModel }
     }
 
     private var effectiveModel: String {
@@ -662,6 +908,8 @@ struct SettingsView: View {
         hydratePreferences(force: true)
         await model.loadLLMConfig()
         hydrateLLM(force: true)
+        await model.loadSubscriptionData()
+        hydrateSubscriptionSelection()
     }
 
     private func hydrateProfile(force: Bool = false) {
@@ -702,7 +950,10 @@ struct SettingsView: View {
         guard force || !didHydrateLLM else { return }
         guard let config = model.llmConfig else { return }
         let configEndpoint = config.endpoint ?? ""
-        if let provider = SettingsModelProvider.provider(forBackendProvider: config.provider, endpoint: configEndpoint) {
+        let provider = config.catalogProvider.flatMap { catalogProvider in
+            SettingsModelProvider.providers.first { $0.id == catalogProvider }
+        } ?? SettingsModelProvider.provider(forBackendProvider: config.provider, endpoint: configEndpoint)
+        if let provider {
             selectedProviderID = provider.id
             endpoint = configEndpoint.isEmpty ? provider.defaultEndpoint : configEndpoint
             if provider.models.contains(where: { $0.model == config.model }) {
@@ -716,6 +967,43 @@ struct SettingsView: View {
         didHydrateLLM = true
     }
 
+    private func hydrateSubscriptionSelection() {
+        if let current = model.currentSubscription, current.isActive {
+            selectedSubscriptionPlanID = current.planId
+        } else if let recommended = model.subscriptionCatalog?.plans.first(where: \.recommended) {
+            selectedSubscriptionPlanID = recommended.id
+        }
+        if let catalog = model.subscriptionCatalog,
+           let firstMethod = catalog.paymentMethods.first,
+           !catalog.paymentMethods.contains(where: { $0.id == selectedPaymentMethod }) {
+            selectedPaymentMethod = firstMethod.id
+        }
+    }
+
+    private func checkoutSubscription() async {
+        subscriptionNotice = nil
+        guard let result = await model.checkoutSubscription(
+            planID: selectedSubscriptionPlanID,
+            paymentMethod: selectedPaymentMethod
+        ) else {
+            subscriptionNotice = SettingsNotice(message: model.errorMessage ?? "无法创建支付订单", isSuccess: false)
+            return
+        }
+        subscriptionNotice = SettingsNotice(
+            message: result.message,
+            isSuccess: result.checkoutStatus == "paid"
+        )
+    }
+
+    private func cancelSubscription() async {
+        subscriptionNotice = nil
+        let canceled = await model.cancelCurrentSubscription(reason: "用户在 macOS 客户端取消自动续费")
+        subscriptionNotice = SettingsNotice(
+            message: canceled ? "已取消自动续费，当前权益保留至本周期结束" : (model.errorMessage ?? "取消自动续费失败"),
+            isSuccess: canceled
+        )
+    }
+
     private func selectProvider(_ provider: SettingsModelProvider) {
         selectedProviderID = provider.id
         selectedModel = provider.defaultModel
@@ -723,8 +1011,8 @@ struct SettingsView: View {
         endpoint = provider.defaultEndpoint
         apiKey = ""
         model.llmModelCatalog = nil
-        catalogProviderID = nil
         testResult = nil
+        Task { await loadProviderModels() }
     }
 
     private func llmPayload(enabled: Bool = true) -> LLMConfigPayload {
@@ -733,6 +1021,7 @@ struct SettingsView: View {
         let backendProvider = selectedProvider.backendProvider
         return LLMConfigPayload(
             provider: backendProvider.rawValue,
+            catalogProvider: selectedProvider.id,
             model: effectiveModel,
             endpoint: cleanEndpoint.isEmpty ? selectedProvider.defaultEndpoint : cleanEndpoint,
             apiKey: cleanKey.isEmpty ? nil : cleanKey,
@@ -741,14 +1030,16 @@ struct SettingsView: View {
             temperature: 0.25,
             topP: 0.9,
             timeoutMs: 60000,
-            reasoningEffort: backendProvider == .custom ? "xhigh" : nil,
-            disableResponseStorage: backendProvider == .custom ? true : nil
+            wireApi: selectedProvider.wireAPI,
+            reasoningEffort: selectedProvider.reasoningEffort,
+            disableResponseStorage: selectedProvider.disableResponseStorage
         )
     }
 
     private func modelsPayload() -> LLMModelsPayload {
         LLMModelsPayload(
             provider: selectedProvider.backendProvider.rawValue,
+            catalogProvider: selectedProvider.id,
             endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? selectedProvider.defaultEndpoint : endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
             timeoutMs: 30000
@@ -756,7 +1047,6 @@ struct SettingsView: View {
     }
 
     private func loadProviderModels() async {
-        catalogProviderID = selectedProviderID
         await model.loadLLMModels(modelsPayload())
     }
 
@@ -891,9 +1181,37 @@ struct SettingsView: View {
     }
 }
 
-private enum SettingsSection: CaseIterable, Identifiable {
+struct SettingsWindowAppearanceConfigurator: NSViewRepresentable {
+    let darkMode: Bool
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        updateWindow(for: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        updateWindow(for: nsView)
+    }
+
+    private func updateWindow(for view: NSView) {
+        DispatchQueue.main.async {
+            configureSettingsWindowAppearance(view.window, darkMode: darkMode)
+        }
+    }
+}
+
+func configureSettingsWindowAppearance(_ window: NSWindow?, darkMode: Bool) {
+    window?.appearance = NSAppearance(
+        named: darkMode ? .darkAqua : .aqua
+    )
+}
+
+enum SettingsSection: CaseIterable, Identifiable {
     case profile
     case modelConfig
+    case subscription
+    case logs
     case general
     case about
 
@@ -903,6 +1221,8 @@ private enum SettingsSection: CaseIterable, Identifiable {
         switch self {
         case .profile: "用户资料"
         case .modelConfig: "模型配置"
+        case .subscription: "订阅管理"
+        case .logs: "日志管理"
         case .general: "通用设置"
         case .about: "关于安全智脑"
         }
@@ -912,13 +1232,15 @@ private enum SettingsSection: CaseIterable, Identifiable {
         switch self {
         case .profile: "person"
         case .modelConfig: "brain.head.profile"
+        case .subscription: "crown"
+        case .logs: "list.bullet.rectangle.portrait"
         case .general: "gearshape"
         case .about: "info.circle"
         }
     }
 }
 
-private enum SettingsDocument {
+enum SettingsDocument: Identifiable, Hashable {
     case terms
     case privacy
 
@@ -1054,54 +1376,42 @@ private enum ProfileAvatarError: LocalizedError {
 }
 
 private struct SettingsSidebar: View {
+    @EnvironmentObject private var model: AppModel
     @Binding var selectedSection: SettingsSection
     @Binding var activeDocument: SettingsDocument?
     let profileName: String
     let role: String
+    let avatarImage: NSImage?
+    @State private var isFooterHovered = false
 
     var body: some View {
         ZStack {
             SidebarGlassBackground()
 
             VStack(alignment: .leading, spacing: 26) {
-                SettingsTrafficLights()
-                    .padding(.top, 14)
-                    .padding(.leading, 14)
-
                 HStack(spacing: 12) {
                     AppBrandLogo(size: 46, shadow: false)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(AppBrand.chineseName)
-                            .font(.headline.weight(.bold))
-                            .foregroundStyle(.white)
+                            .font(AppTypography.sidebarBrandTitle)
+                            .foregroundStyle(AppPalette.sidebarText)
                         Text(AppBrand.subtitle)
-                            .font(.caption)
-                            .foregroundStyle(AppPalette.onBrandMuted)
+                            .font(AppTypography.sidebarBrandSubtitle)
+                            .foregroundStyle(AppPalette.sidebarTextMuted)
                     }
                 }
                 .padding(.horizontal, 18)
+                .padding(.top, 24)
 
                 VStack(spacing: 8) {
                     ForEach(SettingsSection.allCases) { section in
-                        Button {
+                        SettingsSidebarItemButton(
+                            section: section,
+                            selected: selectedSection == section
+                        ) {
                             selectedSection = section
                             activeDocument = nil
-                        } label: {
-                            HStack(spacing: 14) {
-                                Image(systemName: section.icon)
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .frame(width: 22)
-                                Text(section.title)
-                                    .font(.callout.weight(.semibold))
-                                Spacer()
-                            }
-                            .foregroundStyle(selectedSection == section ? .white : AppPalette.onBrandMuted)
-                            .padding(.horizontal, 18)
-                            .frame(height: 54)
-                            .background(selectedSection == section ? AppPalette.primary.opacity(0.22) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -1111,28 +1421,47 @@ private struct SettingsSidebar: View {
                 HStack(spacing: 12) {
                     ZStack {
                         Circle().fill(AppPalette.primary)
-                        Text(profileInitial)
-                            .font(.callout.weight(.bold))
-                            .foregroundStyle(.white)
+                        if let avatarImage {
+                            Image(nsImage: avatarImage)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 36, height: 36)
+                                .clipShape(Circle())
+                        } else {
+                            Text(profileInitial)
+                                .font(AppTypography.sidebarIdentity)
+                                .foregroundStyle(.white)
+                        }
                     }
                     .frame(width: 36, height: 36)
+                    .overlay(Circle().stroke(AppPalette.sidebarDivider.opacity(0.72), lineWidth: 1))
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(profileName.isEmpty ? "小安用户" : profileName)
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.white)
+                            .font(AppTypography.sidebarIdentity)
+                            .foregroundStyle(AppPalette.sidebarText)
                             .lineLimit(1)
                         Text(role.isEmpty ? "专业版" : role)
-                            .font(.caption2)
-                            .foregroundStyle(AppPalette.onBrandMuted)
+                            .font(AppTypography.sidebarIdentityCaption)
+                            .foregroundStyle(AppPalette.sidebarTextMuted)
                             .lineLimit(1)
                     }
                     Spacer()
                     Image(systemName: "ellipsis")
-                        .foregroundStyle(AppPalette.onBrandMuted)
+                        .foregroundStyle(AppPalette.sidebarTextMuted)
+                        .opacity(isFooterHovered ? 1 : 0.55)
                 }
                 .padding(.horizontal, 18)
+                .frame(minHeight: 58)
+                .background(isFooterHovered ? AppPalette.sidebarHover.opacity(0.74) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .padding(.horizontal, 8)
                 .padding(.bottom, 18)
+                .onHover { hovering in
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isFooterHovered = hovering
+                    }
+                }
             }
         }
     }
@@ -1144,12 +1473,39 @@ private struct SettingsSidebar: View {
     }
 }
 
-private struct SettingsTrafficLights: View {
+private struct SettingsSidebarItemButton: View {
+    @EnvironmentObject private var model: AppModel
+    let section: SettingsSection
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
     var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(Color(red: 1.0, green: 0.37, blue: 0.33)).frame(width: 12, height: 12)
-            Circle().fill(Color(red: 1.0, green: 0.74, blue: 0.20)).frame(width: 12, height: 12)
-            Circle().fill(Color(red: 0.19, green: 0.79, blue: 0.33)).frame(width: 12, height: 12)
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: section.icon)
+                    .font(AppTypography.system(size: 16, weight: .semibold))
+                    .frame(width: 22)
+                Text(model.uiText(section.title))
+                    .font(AppTypography.sidebarItem)
+                Spacer()
+            }
+            .foregroundStyle(selected ? AppPalette.sidebarText : AppPalette.sidebarTextMuted)
+            .padding(.horizontal, 18)
+            .frame(height: 48)
+            .background(
+                selected
+                    ? AppPalette.sidebarSelected
+                    : (hovering ? AppPalette.sidebarHover.opacity(0.82) : Color.clear)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { value in
+            withAnimation(.easeInOut(duration: 0.16)) {
+                hovering = value
+            }
         }
     }
 }
@@ -1166,16 +1522,17 @@ private struct SettingsTopBar<Trailing: View>: View {
     var body: some View {
         HStack {
             Text(title)
-                .font(.title3.weight(.bold))
+                .font(AppTypography.title3.weight(.bold))
                 .foregroundStyle(AppPalette.text)
             Spacer()
             trailing
         }
         .padding(.horizontal, 32)
         .frame(height: 66)
-        .background(Color.white)
+        .background(.ultraThinMaterial)
+        .background(AppPalette.page.opacity(0.28))
         .overlay(alignment: .bottom) {
-            Rectangle().fill(AppPalette.border.opacity(0.45)).frame(height: 1)
+            Rectangle().fill(AppPalette.separator.opacity(0.42)).frame(height: 1)
         }
     }
 }
@@ -1197,11 +1554,17 @@ private struct SettingsPanel<Content: View>: View {
         content
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(
+                .regularMaterial,
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .background(
+                AppPalette.card.opacity(0.44),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
             .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(AppPalette.border.opacity(0.9))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(AppPalette.separator.opacity(0.52))
             }
     }
 }
@@ -1213,11 +1576,11 @@ private struct SettingsSectionTitle: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 17, weight: .semibold))
+                .font(AppTypography.system(size: 17, weight: .semibold))
                 .foregroundStyle(AppPalette.primary)
                 .frame(width: 22)
             Text(title)
-                .font(.headline.weight(.bold))
+                .font(AppTypography.headline.weight(.bold))
                 .foregroundStyle(AppPalette.text)
         }
     }
@@ -1233,7 +1596,7 @@ private struct SettingsSearchField: View {
                 .foregroundStyle(AppPalette.textSubtle)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.callout)
+                .font(AppTypography.callout)
         }
         .modifier(SettingsFieldChrome(height: 48))
     }
@@ -1251,7 +1614,7 @@ private struct SettingsInputField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.caption.weight(.semibold))
+                .font(AppTypography.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.textMuted)
             HStack(spacing: 10) {
                 if let icon {
@@ -1261,23 +1624,23 @@ private struct SettingsInputField: View {
                 }
                 TextField(placeholder.isEmpty ? title : placeholder, text: $text)
                     .textFieldStyle(.plain)
-                    .font(.callout)
+                    .font(AppTypography.callout)
                     .foregroundStyle(isReadOnly ? AppPalette.textMuted : AppPalette.text)
                     .disabled(isReadOnly)
                 if let trailingText {
                     Text(trailingText)
-                        .font(.caption.weight(.semibold))
+                        .font(AppTypography.caption.weight(.semibold))
                         .foregroundStyle(trailingColor)
                 }
             }
-            .modifier(SettingsFieldChrome(background: isReadOnly ? AppPalette.cardMuted.opacity(0.75) : Color.white))
+            .modifier(SettingsFieldChrome(background: isReadOnly ? AppPalette.cardMuted.opacity(0.75) : AppPalette.card))
         }
     }
 }
 
 private struct SettingsFieldChrome: ViewModifier {
     var height: CGFloat = 44
-    var background: Color = Color.white
+    var background: Color = AppPalette.card
 
     func body(content: Content) -> some View {
         content
@@ -1314,7 +1677,7 @@ private struct ProfileAvatarView: View {
                     .clipShape(Circle())
             } else {
                 Text(initial)
-                    .font(.system(size: 34, weight: .bold))
+                    .font(AppTypography.system(size: 34, weight: .bold))
                     .foregroundStyle(.white)
             }
         }
@@ -1337,10 +1700,10 @@ private struct SettingsInfoPill: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.caption2.weight(.semibold))
+                .font(AppTypography.caption2.weight(.semibold))
                 .foregroundStyle(AppPalette.textSubtle)
             Text(value.isEmpty ? "—" : value)
-                .font(.caption.weight(.semibold))
+                .font(AppTypography.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.textMuted)
                 .lineLimit(1)
         }
@@ -1364,21 +1727,21 @@ private struct SettingsActionRow: View {
             SettingsIconBox(icon: icon)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
             }
             Spacer()
             if let trailing {
                 Text(trailing)
-                    .font(.caption.weight(.semibold))
+                    .font(AppTypography.caption.weight(.semibold))
                     .foregroundStyle(AppPalette.primary)
             }
             if showChevron {
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
+                    .font(AppTypography.caption.weight(.bold))
                     .foregroundStyle(AppPalette.textSubtle)
             }
         }
@@ -1396,10 +1759,10 @@ private struct SettingsToggleRow: View {
             SettingsIconBox(icon: icon)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
             }
             Spacer()
@@ -1418,26 +1781,60 @@ private struct SettingsMenuRow: View {
     @Binding var selection: String
     let items: [(String, String)]
 
+    private var selectedTitle: String {
+        items.first(where: { $0.0 == selection })?.1 ?? items.first?.1 ?? selection
+    }
+
     var body: some View {
         HStack(spacing: 14) {
             SettingsIconBox(icon: icon)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
             }
             Spacer()
-            Picker(title, selection: $selection) {
+            Menu {
                 ForEach(items, id: \.0) { item in
-                    Text(item.1).tag(item.0)
+                    Button {
+                        selection = item.0
+                    } label: {
+                        if item.0 == selection {
+                            Label(item.1, systemImage: "checkmark")
+                        } else {
+                            Text(item.1)
+                        }
+                    }
                 }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(selectedTitle)
+                        .font(AppTypography.caption.weight(.semibold))
+                        .foregroundStyle(AppPalette.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(AppTypography.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AppPalette.textMuted)
+                }
+                .padding(.horizontal, 11)
+                .frame(width: 104, height: 34)
+                .background(AppPalette.controlBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(AppPalette.border, lineWidth: 1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(width: 96)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityValue(selectedTitle)
         }
     }
 }
@@ -1447,7 +1844,7 @@ private struct SettingsIconBox: View {
 
     var body: some View {
         Image(systemName: icon)
-            .font(.system(size: 15, weight: .semibold))
+            .font(AppTypography.system(size: 15, weight: .semibold))
             .foregroundStyle(AppPalette.primary)
             .frame(width: 34, height: 34)
             .background(AppPalette.primary.opacity(0.12))
@@ -1464,12 +1861,390 @@ private struct SettingsNoticeView: View {
             Text(notice.message)
             Spacer()
         }
-        .font(.caption.weight(.semibold))
+        .font(AppTypography.caption.weight(.semibold))
         .foregroundStyle(notice.isSuccess ? AppPalette.success : AppPalette.warning)
         .padding(.horizontal, 14)
         .frame(minHeight: 38)
         .background((notice.isSuccess ? AppPalette.success : AppPalette.warning).opacity(0.10))
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+}
+
+private struct SubscriptionCurrentPlanView: View {
+    let subscription: SubscriptionSnapshot?
+    let plan: SubscriptionPlan?
+    let isCanceling: Bool
+    let cancelAction: () -> Void
+
+    private var isActive: Bool { subscription?.isActive == true }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                SettingsIconBox(icon: "crown.fill")
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("当前订阅")
+                        .font(AppTypography.callout.weight(.semibold))
+                        .foregroundStyle(AppPalette.textMuted)
+                    Text(currentTitle)
+                        .font(AppTypography.title2.weight(.bold))
+                        .foregroundStyle(AppPalette.text)
+                    Text(currentSubtitle)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppPalette.textMuted)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 8) {
+                    StatusBadge(
+                        text: subscriptionStatusText(subscription?.status ?? "free"),
+                        tone: isActive ? .good : .neutral
+                    )
+                    if let plan {
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Text(plan.priceText)
+                                .font(AppTypography.system(size: 32, weight: .bold, design: .rounded))
+                            Text("/\(subscriptionPeriodUnit(plan.billingPeriod))")
+                                .font(AppTypography.callout)
+                                .foregroundStyle(AppPalette.textMuted)
+                        }
+                    }
+                }
+            }
+
+            if isActive, subscription?.autoRenew == true {
+                Divider().overlay(AppPalette.border)
+                HStack {
+                    Label("到期自动续费", systemImage: "arrow.triangle.2.circlepath")
+                        .font(AppTypography.caption.weight(.semibold))
+                        .foregroundStyle(AppPalette.textMuted)
+                    Spacer()
+                    Button(action: cancelAction) {
+                        Label(isCanceling ? "处理中" : "取消自动续费", systemImage: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .font(AppTypography.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.danger)
+                    .disabled(isCanceling)
+                }
+            }
+        }
+    }
+
+    private var currentTitle: String {
+        guard isActive else { return "免费版" }
+        let periodName = subscription?.periodName ?? ""
+        return [subscription?.planName ?? "专业版", periodName]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
+    private var currentSubtitle: String {
+        if subscription?.cancelAtPeriodEnd == true,
+           let end = subscription?.currentPeriodEnd,
+           let date = settingsDateTime(end, locale: Locale(identifier: "zh_CN")) {
+            return "已取消自动续费 · 权益保留至 \(date)"
+        }
+        if isActive,
+           let end = subscription?.currentPeriodEnd,
+           let date = settingsDateTime(end, locale: Locale(identifier: "zh_CN")) {
+            return "下次续费日期：\(date)"
+        }
+        return "升级专业版后可使用完整订阅权益"
+    }
+}
+
+private struct SubscriptionPlanCard: View {
+    let plan: SubscriptionPlan
+    let isSelected: Bool
+    let isCurrent: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: SubscriptionPlanVisuals.symbolName(for: plan))
+                        .font(AppTypography.system(size: 18, weight: .semibold))
+                        .foregroundStyle(plan.recommended ? Color.white : AppPalette.primary)
+                        .frame(width: 38, height: 38)
+                        .background(plan.recommended ? AppPalette.primary : AppPalette.primary.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    Spacer(minLength: 4)
+
+                    VStack(alignment: .trailing, spacing: 7) {
+                        Text(plan.badge)
+                            .font(AppTypography.caption2.weight(.bold))
+                            .foregroundStyle(plan.recommended ? Color.white : AppPalette.textMuted)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(plan.recommended ? AppPalette.primary : AppPalette.cardMuted)
+                            .clipShape(Capsule())
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(AppTypography.system(size: 17, weight: .semibold))
+                            .foregroundStyle(isSelected ? AppPalette.primary : AppPalette.textSubtle)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(plan.name) · \(plan.periodName)")
+                        .font(AppTypography.title3.weight(.bold))
+                        .foregroundStyle(AppPalette.text)
+                        .lineLimit(1)
+                    Text(plan.description)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppPalette.textMuted)
+                        .lineLimit(2)
+                        .frame(minHeight: 32, alignment: .topLeading)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(plan.priceText)
+                            .font(AppTypography.system(size: 34, weight: .bold, design: .rounded))
+                            .foregroundStyle(AppPalette.text)
+                        Text("/\(subscriptionPeriodUnit(plan.billingPeriod))")
+                            .font(AppTypography.callout)
+                            .foregroundStyle(AppPalette.textMuted)
+                    }
+
+                    HStack(spacing: 7) {
+                        Text(plan.intervalMonths > 1 ? "折合 \(plan.monthlyEquivalentText)/月" : "按月计费")
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppPalette.textMuted)
+                        if plan.discountPercent > 0 {
+                            Text("省 \(plan.discountPercent)%")
+                                .font(AppTypography.caption2.weight(.bold))
+                                .foregroundStyle(AppPalette.warning)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(AppPalette.warning.opacity(0.12))
+                                .clipShape(Capsule())
+                        }
+                    }
+                }
+
+                Divider().overlay(AppPalette.border)
+
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(Array(plan.features.enumerated()), id: \.offset) { _, feature in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(AppTypography.system(size: 13, weight: .semibold))
+                                .foregroundStyle(AppPalette.success)
+                                .padding(.top, 1)
+                            Text(feature)
+                                .font(AppTypography.caption)
+                                .foregroundStyle(AppPalette.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 7) {
+                    Image(systemName: isCurrent ? "checkmark.seal.fill" : (isSelected ? "checkmark" : "arrow.right"))
+                    Text(isCurrent ? "当前方案" : (isSelected ? "已选择" : "选择\(plan.periodName)"))
+                }
+                .font(AppTypography.callout.weight(.semibold))
+                .foregroundStyle(isSelected ? Color.white : AppPalette.primary)
+                .frame(maxWidth: .infinity, minHeight: 40)
+                .background(isSelected ? AppPalette.primary : Color.clear)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(AppPalette.primary, lineWidth: 1)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, minHeight: 390, alignment: .topLeading)
+            .background(AppPalette.card)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(cardBorderColor, lineWidth: isSelected ? 2 : (plan.recommended ? 1.5 : 1))
+            }
+            .shadow(color: Color.black.opacity(isSelected || plan.recommended ? 0.075 : 0.035), radius: 10, y: 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(plan.name)\(plan.periodName)方案，\(plan.priceText)")
+        .accessibilityValue(isCurrent ? "当前方案" : (isSelected ? "已选择" : "未选择"))
+    }
+
+    private var cardBorderColor: Color {
+        if isSelected { return AppPalette.primary }
+        if plan.recommended { return AppPalette.primary.opacity(0.72) }
+        return AppPalette.border
+    }
+}
+
+enum SubscriptionPlanVisuals {
+    static func symbolName(for plan: SubscriptionPlan) -> String {
+        if plan.recommended { return "sparkles" }
+        switch plan.billingPeriod.lowercased() {
+        case "month", "monthly":
+            return "bolt.fill"
+        case "quarter", "quarterly":
+            return "calendar.badge.clock"
+        case "year", "yearly", "annual":
+            return "arrow.down.to.line"
+        default:
+            return "sparkles"
+        }
+    }
+}
+
+private struct SubscriptionRecordsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var model: AppModel
+    let usage: SubscriptionUsageSnapshot?
+    let orders: [SubscriptionOrder]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("使用与订单记录")
+                        .font(AppTypography.title3.weight(.bold))
+                    Text("本周期资源用量和最近支付订单")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppPalette.textMuted)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("关闭")
+            }
+            .padding(22)
+            .background(AppPalette.card)
+
+            Divider().overlay(AppPalette.border)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        SettingsSectionTitle(icon: "chart.bar", title: "本周期用量")
+                        if let usage {
+                            ForEach(usage.metrics) { metric in
+                                VStack(alignment: .leading, spacing: 7) {
+                                    HStack {
+                                        Text(metric.label).font(AppTypography.callout.weight(.semibold))
+                                        Spacer()
+                                        Text("\(metric.used) / \(metric.limit) \(metric.unit)")
+                                            .font(AppTypography.caption.monospacedDigit())
+                                            .foregroundStyle(AppPalette.textMuted)
+                                    }
+                                    ProgressView(value: metric.progress)
+                                        .tint(AppPalette.primary)
+                                }
+                            }
+                        } else {
+                            Text("暂无使用记录")
+                                .font(AppTypography.callout)
+                                .foregroundStyle(AppPalette.textMuted)
+                        }
+                    }
+
+                    Divider().overlay(AppPalette.border)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        SettingsSectionTitle(icon: "list.bullet.rectangle", title: "订单记录")
+                        if orders.isEmpty {
+                            ContentUnavailableView("暂无订单", systemImage: "creditcard")
+                                .frame(maxWidth: .infinity, minHeight: 140)
+                        } else {
+                            ForEach(orders) { order in
+                                HStack(spacing: 14) {
+                                    SettingsIconBox(icon: subscriptionPaymentIcon(order.paymentMethod))
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("\(order.planName) · \(order.periodName)")
+                                            .font(AppTypography.callout.weight(.semibold))
+                                        Text(order.id)
+                                            .font(AppTypography.caption2.monospaced())
+                                            .foregroundStyle(AppPalette.textSubtle)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    VStack(alignment: .trailing, spacing: 4) {
+                                        Text(order.amountText)
+                                            .font(AppTypography.callout.weight(.bold).monospacedDigit())
+                                        Text(settingsDateTime(order.createdAt, locale: model.appLanguage.locale) ?? order.createdAt)
+                                            .font(AppTypography.caption2)
+                                            .foregroundStyle(AppPalette.textMuted)
+                                    }
+                                    StatusBadge(
+                                        text: subscriptionOrderStatusText(order.status),
+                                        tone: subscriptionOrderStatusTone(order.status)
+                                    )
+                                }
+                                .padding(14)
+                                .background(AppPalette.card)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(AppPalette.border)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(22)
+            }
+            .background(AppPalette.page)
+        }
+        .frame(width: 720, height: 580)
+    }
+}
+
+private func subscriptionPeriodUnit(_ billingPeriod: String) -> String {
+    switch billingPeriod {
+    case "month": "月"
+    case "quarter": "季"
+    case "year": "年"
+    default: "期"
+    }
+}
+
+private func subscriptionPaymentIcon(_ method: String) -> String {
+    switch method {
+    case "alipay": "a.circle.fill"
+    case "wechat": "message.fill"
+    case "unionpay": "creditcard.fill"
+    default: "creditcard"
+    }
+}
+
+private func subscriptionStatusText(_ status: String) -> String {
+    switch status {
+    case "active": "订阅中"
+    case "canceled": "已取消"
+    case "expired": "已到期"
+    default: "免费版"
+    }
+}
+
+private func subscriptionOrderStatusText(_ status: String) -> String {
+    switch status {
+    case "paid": "已支付"
+    case "failed": "支付失败"
+    case "refunded": "已退款"
+    case "integration_required": "待接入"
+    default: "待支付"
+    }
+}
+
+private func subscriptionOrderStatusTone(_ status: String) -> StatusTone {
+    switch status {
+    case "paid": .good
+    case "failed": .critical
+    case "refunded": .warning
+    case "integration_required": .info
+    default: .neutral
     }
 }
 
@@ -1480,34 +2255,37 @@ private struct SettingsProviderCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.white)
+                        .fill(AppPalette.card)
                     Image(systemName: provider.icon)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(AppTypography.system(size: 22, weight: .bold))
                         .foregroundStyle(isSelected ? AppPalette.text : AppPalette.textMuted)
                 }
-                .frame(width: 48, height: 48)
+                .frame(width: 44, height: 44)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(provider.title)
-                        .font(.callout.weight(.bold))
+                        .font(AppTypography.callout.weight(.bold))
                         .foregroundStyle(AppPalette.text)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     Text(provider.vendor)
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.textMuted)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
+                .layoutPriority(1)
                 Spacer(minLength: 4)
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(AppPalette.primary)
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(AppTypography.system(size: 18, weight: .semibold))
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 12)
             .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
             .background(isSelected ? AppPalette.selectedStrong : AppPalette.cardMuted.opacity(0.72))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1529,7 +2307,7 @@ private struct SettingsProviderBadge: View {
             Image(systemName: provider.icon)
             Text(provider.title)
         }
-        .font(.caption.weight(.semibold))
+        .font(AppTypography.caption.weight(.semibold))
         .foregroundStyle(AppPalette.primary)
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -1548,17 +2326,17 @@ private struct SettingsModelRow: View {
         Button(action: action) {
             HStack(spacing: 14) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(AppTypography.system(size: 19, weight: .semibold))
                     .foregroundStyle(isSelected ? AppPalette.primary : AppPalette.textSubtle.opacity(0.7))
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(option.title)
-                            .font(.callout.weight(.bold))
+                            .font(AppTypography.callout.weight(.bold))
                             .foregroundStyle(AppPalette.text)
                         if isSelected {
                             Text("默认")
-                                .font(.caption2.weight(.bold))
+                                .font(AppTypography.caption2.weight(.bold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
@@ -1570,28 +2348,28 @@ private struct SettingsModelRow: View {
                                 .fill(isEnabled ? AppPalette.success : AppPalette.textSubtle)
                                 .frame(width: 7, height: 7)
                             Text(isEnabled ? "已启用" : "已禁用")
-                                .font(.caption.weight(.semibold))
+                                .font(AppTypography.caption.weight(.semibold))
                                 .foregroundStyle(isEnabled ? AppPalette.success : AppPalette.textMuted)
                         }
                     }
                     Text("\(option.subtitle) · \(option.model)")
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.textMuted)
                         .lineLimit(1)
                 }
 
                 Spacer()
                 Image(systemName: "square.and.pencil")
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.textSubtle)
                     .frame(width: 34, height: 34)
-                    .background(Color.white)
+                    .background(AppPalette.card)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 Image(systemName: "ellipsis")
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.textSubtle)
                     .frame(width: 34, height: 34)
-                    .background(Color.white)
+                    .background(AppPalette.card)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .padding(.horizontal, 16)
@@ -1615,14 +2393,14 @@ private struct SettingsConnectionStatusCard: View {
     var body: some View {
         HStack(spacing: 14) {
             Image(systemName: isHealthy ? "checkmark.circle.fill" : "info.circle.fill")
-                .font(.system(size: 20, weight: .semibold))
+                .font(AppTypography.system(size: 20, weight: .semibold))
                 .foregroundStyle(isHealthy ? AppPalette.success : AppPalette.warning)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.callout.weight(.bold))
+                    .font(AppTypography.callout.weight(.bold))
                     .foregroundStyle(AppPalette.text)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
             }
             Spacer()
@@ -1667,13 +2445,13 @@ private struct SettingsLanguageRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 14) {
-                Text(option.flag).font(.title3)
+                Text(option.flag).font(AppTypography.title3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(option.title)
-                        .font(.callout.weight(.bold))
+                        .font(AppTypography.callout.weight(.bold))
                         .foregroundStyle(AppPalette.text)
                     Text(option.subtitle)
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.textMuted)
                 }
                 Spacer()
@@ -1713,16 +2491,16 @@ private struct SettingsAboutRow: View {
             HStack(spacing: 14) {
                 SettingsIconBox(icon: icon)
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                 Spacer()
                 if let trailing {
                     Text(trailing)
-                        .font(.caption.weight(.semibold))
+                        .font(AppTypography.caption.weight(.semibold))
                         .foregroundStyle(AppPalette.success)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
+                    .font(AppTypography.caption.weight(.bold))
                     .foregroundStyle(AppPalette.textSubtle)
             }
             .padding(.vertical, 12)
@@ -1748,13 +2526,13 @@ private struct SettingsDocumentCard: View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(spacing: 7) {
                 Text(backendDocument?.heading ?? document.heading)
-                    .font(.title2.weight(.bold))
+                    .font(AppTypography.title2.weight(.bold))
                     .foregroundStyle(AppPalette.text)
                 Text("最后更新日期：\(backendDocument?.updatedAt ?? document.updatedAt)")
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textSubtle)
                 Text("生效日期：\(backendDocument?.effectiveAt ?? document.effectiveAt)")
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textSubtle)
             }
             .frame(maxWidth: .infinity)
@@ -1762,7 +2540,7 @@ private struct SettingsDocumentCard: View {
             .padding(.bottom, 24)
 
             Text(backendDocument?.intro ?? document.intro)
-                .font(.callout)
+                .font(AppTypography.callout)
                 .foregroundStyle(AppPalette.textMuted)
                 .lineSpacing(4)
                 .padding(18)
@@ -1773,11 +2551,11 @@ private struct SettingsDocumentCard: View {
             ForEach(Array(documentSections.enumerated()), id: \.offset) { _, section in
                 VStack(alignment: .leading, spacing: 12) {
                     Text(section.heading)
-                        .font(.headline.weight(.bold))
+                        .font(AppTypography.headline.weight(.bold))
                         .foregroundStyle(AppPalette.text)
                     ForEach(section.paragraphs, id: \.self) { line in
                         Text(line)
-                            .font(.callout)
+                            .font(AppTypography.callout)
                             .foregroundStyle(line.hasPrefix("邮箱：") ? AppPalette.primary : AppPalette.textMuted)
                             .lineSpacing(4)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1786,7 +2564,7 @@ private struct SettingsDocumentCard: View {
             }
         }
         .padding(42)
-        .background(Color.white)
+        .background(AppPalette.card)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -1809,7 +2587,7 @@ private struct SettingsPrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
+            .font(AppTypography.callout.weight(.semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 20)
             .frame(height: height)
@@ -1823,7 +2601,7 @@ private struct SettingsSecondaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
+            .font(AppTypography.callout.weight(.semibold))
             .foregroundStyle(AppPalette.textMuted)
             .padding(.horizontal, 18)
             .frame(height: height)
@@ -1839,11 +2617,11 @@ private struct SettingsSecondaryButtonStyle: ButtonStyle {
 private struct SettingsDangerButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
+            .font(AppTypography.callout.weight(.semibold))
             .foregroundStyle(AppPalette.danger)
             .padding(.horizontal, 18)
             .frame(height: 48)
-            .background(configuration.isPressed ? AppPalette.danger.opacity(0.10) : Color.white)
+            .background(configuration.isPressed ? AppPalette.danger.opacity(0.10) : AppPalette.card)
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -1862,15 +2640,35 @@ private struct SettingsModelProvider: Identifiable, Equatable {
     let defaultEndpoint: String
     let placeholder: String
     let models: [LLMModelOption]
+    let docsURL: URL
     let keyURL: URL
 
     var defaultModel: String { models.first?.model ?? "" }
+
+    var wireAPI: String? { backendProvider == .custom ? (id == "sub2api" ? "responses" : "chat") : nil }
+    var reasoningEffort: String? { id == "sub2api" ? "xhigh" : (backendProvider == .custom ? "none" : nil) }
+    var disableResponseStorage: Bool? { backendProvider == .custom ? id == "sub2api" : nil }
 
     var compatibilityNote: String {
         backendProvider == .custom ? "该厂商按 OpenAI 兼容接口保存到后端自定义模型配置。" : "该厂商由后端原生模型链路支持。"
     }
 
     static let providers: [SettingsModelProvider] = [
+        SettingsModelProvider(
+            id: "sub2api",
+            title: "Sub2API",
+            vendor: "自定义网关",
+            subtitle: "GPT-5.6 Sol · Responses API",
+            icon: "bolt.horizontal.circle",
+            backendProvider: .custom,
+            defaultEndpoint: "https://carpool.composiastack.com",
+            placeholder: "sk-••••••••••••••••••••",
+            models: [
+                LLMModelOption(title: "GPT-5.6 Sol", model: "gpt-5.6-sol", subtitle: "极高推理 · 不存储响应"),
+            ],
+            docsURL: URL(string: "https://carpool.composiastack.com")!,
+            keyURL: URL(string: "https://carpool.composiastack.com")!
+        ),
         SettingsModelProvider(
             id: "openai",
             title: "OpenAI",
@@ -1881,11 +2679,13 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://api.openai.com/v1",
             placeholder: "sk-proj-••••••••••••••••••••••",
             models: [
-                LLMModelOption(title: "gpt-4o", model: "gpt-4o", subtitle: "多模态 · 128K 上下文"),
-                LLMModelOption(title: "gpt-4o-mini", model: "gpt-4o-mini", subtitle: "轻量多模态 · 128K 上下文"),
-                LLMModelOption(title: "gpt-4-turbo", model: "gpt-4-turbo", subtitle: "文本 · 128K 上下文"),
-                LLMModelOption(title: "gpt-3.5-turbo", model: "gpt-3.5-turbo", subtitle: "文本 · 16K 上下文"),
+                LLMModelOption(title: "GPT-5.6", model: "gpt-5.6", subtitle: "Sol 官方别名 · 推荐"),
+                LLMModelOption(title: "GPT-5.6 Sol", model: "gpt-5.6-sol", subtitle: "旗舰能力 · 复杂生产工作流"),
+                LLMModelOption(title: "GPT-5.6 Terra", model: "gpt-5.6-terra", subtitle: "能力、成本与速度平衡"),
+                LLMModelOption(title: "GPT-5.6 Luna", model: "gpt-5.6-luna", subtitle: "高吞吐 · 低延迟"),
+                LLMModelOption(title: "GPT-5.4", model: "gpt-5.4", subtitle: "兼容既有 GPT-5 工作流"),
             ],
+            docsURL: URL(string: "https://developers.openai.com/api/docs/models")!,
             keyURL: URL(string: "https://platform.openai.com/api-keys")!
         ),
         SettingsModelProvider(
@@ -1898,9 +2698,12 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://api.anthropic.com/v1",
             placeholder: "sk-ant-••••••••••••••••••••",
             models: [
-                LLMModelOption(title: "claude-3-5-sonnet", model: "claude-3-5-sonnet-latest", subtitle: "综合推理 · 长上下文"),
-                LLMModelOption(title: "claude-3-5-haiku", model: "claude-3-5-haiku-latest", subtitle: "低延迟 · 轻量任务"),
+                LLMModelOption(title: "Claude Sonnet 5", model: "claude-sonnet-5", subtitle: "速度与能力平衡"),
+                LLMModelOption(title: "Claude Fable 5", model: "claude-fable-5", subtitle: "最高能力模型"),
+                LLMModelOption(title: "Claude Opus 4.8", model: "claude-opus-4-8", subtitle: "复杂智能体与企业工作"),
+                LLMModelOption(title: "Claude Haiku 4.5", model: "claude-haiku-4-5", subtitle: "低延迟 · 轻量任务"),
             ],
+            docsURL: URL(string: "https://platform.claude.com/docs/en/about-claude/models/overview")!,
             keyURL: URL(string: "https://console.anthropic.com/settings/keys")!
         ),
         SettingsModelProvider(
@@ -1913,9 +2716,15 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
             placeholder: "AIza••••••••••••••••••••",
             models: [
-                LLMModelOption(title: "gemini-1.5-pro", model: "gemini-1.5-pro", subtitle: "多模态 · 长上下文"),
-                LLMModelOption(title: "gemini-1.5-flash", model: "gemini-1.5-flash", subtitle: "低延迟 · 高吞吐"),
+                LLMModelOption(title: "Gemini 3.5 Flash", model: "gemini-3.5-flash", subtitle: "稳定版 · 智能体与编码"),
+                LLMModelOption(title: "Gemini 3.1 Pro", model: "gemini-3.1-pro-preview", subtitle: "高级推理 · 预览版"),
+                LLMModelOption(title: "Gemini 3 Flash", model: "gemini-3-flash-preview", subtitle: "高性价比 · 预览版"),
+                LLMModelOption(title: "Gemini 3.1 Flash-Lite", model: "gemini-3.1-flash-lite", subtitle: "稳定版 · 低成本"),
+                LLMModelOption(title: "Gemini 2.5 Pro", model: "gemini-2.5-pro", subtitle: "复杂推理与编码"),
+                LLMModelOption(title: "Gemini 2.5 Flash", model: "gemini-2.5-flash", subtitle: "低延迟 · 高吞吐"),
+                LLMModelOption(title: "Gemini 2.5 Flash-Lite", model: "gemini-2.5-flash-lite", subtitle: "经济型多模态模型"),
             ],
+            docsURL: URL(string: "https://ai.google.dev/gemini-api/docs/models")!,
             keyURL: URL(string: "https://aistudio.google.com/app/apikey")!
         ),
         SettingsModelProvider(
@@ -1931,6 +2740,7 @@ private struct SettingsModelProvider: Identifiable, Equatable {
                 LLMModelOption(title: "llama-3.1-405b", model: "llama-3.1-405b-instruct", subtitle: "开源生态 · 高能力"),
                 LLMModelOption(title: "llama-3.1-70b", model: "llama-3.1-70b-instruct", subtitle: "开源生态 · 平衡模型"),
             ],
+            docsURL: URL(string: "https://llama.developer.meta.com/docs/models")!,
             keyURL: URL(string: "https://llama.developer.meta.com")!
         ),
         SettingsModelProvider(
@@ -1943,9 +2753,10 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://api.deepseek.com/v1",
             placeholder: "sk-••••••••••••••••••••••",
             models: [
-                LLMModelOption(title: "deepseek-chat", model: "deepseek-chat", subtitle: "通用对话 · 代码分析"),
-                LLMModelOption(title: "deepseek-reasoner", model: "deepseek-reasoner", subtitle: "推理增强 · 复杂任务"),
+                LLMModelOption(title: "DeepSeek V4 Flash", model: "deepseek-v4-flash", subtitle: "低延迟 · 默认思考模式"),
+                LLMModelOption(title: "DeepSeek V4 Pro", model: "deepseek-v4-pro", subtitle: "高能力 · 复杂任务"),
             ],
+            docsURL: URL(string: "https://api-docs.deepseek.com/quick_start/pricing")!,
             keyURL: URL(string: "https://platform.deepseek.com/api_keys")!
         ),
         SettingsModelProvider(
@@ -1958,10 +2769,12 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
             placeholder: "sk-••••••••••••••••••••••",
             models: [
-                LLMModelOption(title: "qwen-plus", model: "qwen-plus", subtitle: "中文任务 · 通用分析"),
-                LLMModelOption(title: "qwen-max", model: "qwen-max", subtitle: "高能力 · 复杂推理"),
-                LLMModelOption(title: "qwen-turbo", model: "qwen-turbo", subtitle: "低延迟 · 成本友好"),
+                LLMModelOption(title: "Qwen 3.8 Max Preview", model: "qwen3.8-max-preview", subtitle: "最新预览文本模型"),
+                LLMModelOption(title: "Qwen 3.7 Max", model: "qwen3.7-max", subtitle: "高能力 · 复杂推理"),
+                LLMModelOption(title: "Qwen 3.7 Plus", model: "qwen3.7-plus", subtitle: "通用任务 · 视觉理解"),
+                LLMModelOption(title: "Qwen 3.7 Flash", model: "qwen3.7-flash", subtitle: "低延迟 · 高吞吐"),
             ],
+            docsURL: URL(string: "https://help.aliyun.com/zh/model-studio/models")!,
             keyURL: URL(string: "https://bailian.console.aliyun.com")!
         ),
         SettingsModelProvider(
@@ -1977,6 +2790,7 @@ private struct SettingsModelProvider: Identifiable, Equatable {
                 LLMModelOption(title: "ernie-4.0", model: "ernie-4.0-turbo-8k", subtitle: "中文理解 · 企业场景"),
                 LLMModelOption(title: "ernie-speed", model: "ernie-speed-128k", subtitle: "快速响应 · 长上下文"),
             ],
+            docsURL: URL(string: "https://cloud.baidu.com/doc/qianfan/index.html")!,
             keyURL: URL(string: "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/application")!
         ),
         SettingsModelProvider(
@@ -1989,9 +2803,14 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://open.bigmodel.cn/api/paas/v4",
             placeholder: "••••••••.••••••••",
             models: [
-                LLMModelOption(title: "glm-4", model: "glm-4", subtitle: "通用推理 · 中文增强"),
-                LLMModelOption(title: "glm-4-flash", model: "glm-4-flash", subtitle: "低延迟 · 免费额度友好"),
+                LLMModelOption(title: "GLM-5", model: "glm-5", subtitle: "旗舰文本模型"),
+                LLMModelOption(title: "GLM-5 Turbo", model: "glm-5-turbo", subtitle: "高吞吐文本模型"),
+                LLMModelOption(title: "GLM-5.2", model: "glm-5.2", subtitle: "新一代通用模型"),
+                LLMModelOption(title: "GLM-5.1", model: "glm-5.1", subtitle: "通用推理模型"),
+                LLMModelOption(title: "GLM-4.7", model: "glm-4.7", subtitle: "稳定通用模型"),
+                LLMModelOption(title: "GLM-4.7 Flash", model: "glm-4.7-flash", subtitle: "低延迟通用模型"),
             ],
+            docsURL: URL(string: "https://docs.bigmodel.cn/cn/guide/models/text/glm-4.5")!,
             keyURL: URL(string: "https://open.bigmodel.cn/usercenter/apikeys")!
         ),
         SettingsModelProvider(
@@ -2007,6 +2826,7 @@ private struct SettingsModelProvider: Identifiable, Equatable {
                 LLMModelOption(title: "spark-max", model: "generalv3.5", subtitle: "中文任务 · 通用模型"),
                 LLMModelOption(title: "spark-pro", model: "generalv3", subtitle: "平衡能力 · 低成本"),
             ],
+            docsURL: URL(string: "https://www.xfyun.cn/doc/spark/Web.html")!,
             keyURL: URL(string: "https://console.xfyun.cn/services/bm35")!
         ),
         SettingsModelProvider(
@@ -2019,10 +2839,14 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             defaultEndpoint: "https://api.moonshot.cn/v1",
             placeholder: "sk-••••••••••••••••••••",
             models: [
-                LLMModelOption(title: "moonshot-v1-8k", model: "moonshot-v1-8k", subtitle: "中文问答 · 快速响应"),
-                LLMModelOption(title: "moonshot-v1-128k", model: "moonshot-v1-128k", subtitle: "长文本 · 128K 上下文"),
+                LLMModelOption(title: "Kimi K3", model: "kimi-k3", subtitle: "旗舰编程、知识工作与深度推理"),
+                LLMModelOption(title: "Kimi K2.7 Code", model: "kimi-k2.7-code", subtitle: "编程与代码智能体"),
+                LLMModelOption(title: "Kimi K2.7 Code Highspeed", model: "kimi-k2.7-code-highspeed", subtitle: "高速编程模型"),
+                LLMModelOption(title: "Kimi K2.6", model: "kimi-k2.6", subtitle: "通用对话、智能体与复杂推理"),
+                LLMModelOption(title: "Kimi K2.5", model: "kimi-k2.5", subtitle: "兼容既有 Kimi 工作流"),
             ],
-            keyURL: URL(string: "https://platform.moonshot.cn/console/api-keys")!
+            docsURL: URL(string: "https://platform.kimi.com/docs/models")!,
+            keyURL: URL(string: "https://platform.kimi.com/console/api-keys")!
         ),
         SettingsModelProvider(
             id: "stepfun",
@@ -2037,6 +2861,7 @@ private struct SettingsModelProvider: Identifiable, Equatable {
                 LLMModelOption(title: "step-2", model: "step-2-16k", subtitle: "中文推理 · 复杂任务"),
                 LLMModelOption(title: "step-1", model: "step-1-32k", subtitle: "通用任务 · 长上下文"),
             ],
+            docsURL: URL(string: "https://platform.stepfun.com/docs/llm/text")!,
             keyURL: URL(string: "https://platform.stepfun.com/interface-key")!
         ),
         SettingsModelProvider(
@@ -2051,6 +2876,7 @@ private struct SettingsModelProvider: Identifiable, Equatable {
             models: [
                 LLMModelOption(title: "自定义模型", model: "gpt-5.6-sol", subtitle: "OpenAI 兼容 · 自定义端点"),
             ],
+            docsURL: URL(string: "https://platform.openai.com/docs/api-reference")!,
             keyURL: URL(string: "https://platform.openai.com/api-keys")!
         ),
     ]
@@ -2107,16 +2933,16 @@ enum LLMProvider: String, CaseIterable, Identifiable {
         case .openai: "OpenAI"
         case .claude: "Anthropic"
         case .deepseek: "DeepSeek"
-        case .custom: "自定义"
+        case .custom: "Sub2API"
         }
     }
 
     var subtitle: String {
         switch self {
-        case .openai: "OpenAI Chat Completions / Models"
+        case .openai: "OpenAI Responses / Models API"
         case .claude: "Claude Messages / Models API"
         case .deepseek: "DeepSeek Chat Completions"
-        case .custom: "OpenAI 兼容自定义网关"
+        case .custom: "Responses API 自定义网关"
         }
     }
 
@@ -2143,7 +2969,7 @@ enum LLMProvider: String, CaseIterable, Identifiable {
         case .openai: "https://api.openai.com/v1"
         case .claude: "https://api.anthropic.com/v1"
         case .deepseek: "https://api.deepseek.com/v1"
-        case .custom: "https://api.example.com/v1"
+        case .custom: "https://carpool.composiastack.com"
         }
     }
 
@@ -2160,23 +2986,27 @@ enum LLMProvider: String, CaseIterable, Identifiable {
         switch self {
         case .openai:
             [
-                LLMModelOption(title: "gpt-4o", model: "gpt-4o", subtitle: "多模态通用模型"),
-                LLMModelOption(title: "gpt-4o-mini", model: "gpt-4o-mini", subtitle: "低延迟轻量模型"),
-                LLMModelOption(title: "gpt-4-turbo", model: "gpt-4-turbo", subtitle: "兼容既有配置"),
+                LLMModelOption(title: "GPT-5.6", model: "gpt-5.6", subtitle: "Sol 官方别名 · 推荐"),
+                LLMModelOption(title: "GPT-5.6 Sol", model: "gpt-5.6-sol", subtitle: "旗舰能力"),
+                LLMModelOption(title: "GPT-5.6 Terra", model: "gpt-5.6-terra", subtitle: "能力与成本平衡"),
+                LLMModelOption(title: "GPT-5.6 Luna", model: "gpt-5.6-luna", subtitle: "高吞吐低延迟"),
+                LLMModelOption(title: "GPT-5.4", model: "gpt-5.4", subtitle: "兼容既有 GPT-5 工作流"),
             ]
         case .claude:
             [
-                LLMModelOption(title: "Claude 3.5 Sonnet", model: "claude-3-5-sonnet-latest", subtitle: "速度与能力平衡"),
-                LLMModelOption(title: "Claude 3.5 Haiku", model: "claude-3-5-haiku-latest", subtitle: "低延迟轻量模型"),
+                LLMModelOption(title: "Claude Sonnet 5", model: "claude-sonnet-5", subtitle: "速度与能力平衡"),
+                LLMModelOption(title: "Claude Fable 5", model: "claude-fable-5", subtitle: "最高能力模型"),
+                LLMModelOption(title: "Claude Opus 4.8", model: "claude-opus-4-8", subtitle: "复杂智能体与企业工作"),
+                LLMModelOption(title: "Claude Haiku 4.5", model: "claude-haiku-4-5", subtitle: "低延迟轻量模型"),
             ]
         case .deepseek:
             [
-                LLMModelOption(title: "DeepSeek Chat", model: "deepseek-chat", subtitle: "通用对话模型"),
-                LLMModelOption(title: "DeepSeek Reasoner", model: "deepseek-reasoner", subtitle: "推理增强模型"),
+                LLMModelOption(title: "DeepSeek V4 Flash", model: "deepseek-v4-flash", subtitle: "低延迟 · 默认思考模式"),
+                LLMModelOption(title: "DeepSeek V4 Pro", model: "deepseek-v4-pro", subtitle: "高能力复杂任务"),
             ]
         case .custom:
             [
-                LLMModelOption(title: "自定义模型", model: "gpt-4o", subtitle: "OpenAI 兼容自定义模型"),
+                LLMModelOption(title: "GPT-5.6 Sol", model: "gpt-5.6-sol", subtitle: "极高推理 · Responses API"),
             ]
         }
     }

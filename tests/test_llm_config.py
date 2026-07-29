@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.llm import diagnose_chat_completion, list_llm_models, llm_public_config, save_llm_config
+from app.llm import (
+    _fetch_provider_models,
+    diagnose_chat_completion,
+    list_llm_models,
+    llm_public_config,
+    save_llm_config,
+)
 from app.storage import StateStore, default_state
 
 
@@ -98,14 +104,46 @@ class LLMConfigTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(captured["url"], "https://carpool.example/responses")
+        self.assertEqual(captured["body"]["model"], "gpt-5.6-sol")
         self.assertEqual(captured["body"]["reasoning"], {"effort": "xhigh"})
         self.assertFalse(captured["body"]["store"])
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer test-key")
 
     def test_fresh_install_has_empty_disabled_llm_configuration(self) -> None:
         config = default_state()["llm"]
 
+        self.assertEqual(config["provider"], "custom")
+        self.assertEqual(config["catalog_provider"], "sub2api")
+        self.assertEqual(config["model"], "gpt-5.6-sol")
+        self.assertEqual(config["endpoint"], "https://carpool.composiastack.com")
+        self.assertEqual(config["wire_api"], "responses")
+        self.assertEqual(config["reasoning_effort"], "xhigh")
+        self.assertTrue(config["disable_response_storage"])
         self.assertEqual(config["api_key"], "")
         self.assertFalse(config["enabled"])
+
+    def test_public_config_exposes_non_secret_custom_response_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                config = save_llm_config(
+                    {
+                        "provider": "custom",
+                        "model": "gpt-5.6-sol",
+                        "endpoint": "https://carpool.composiastack.com",
+                        "wire_api": "responses",
+                        "reasoning_effort": "xhigh",
+                        "disable_response_storage": True,
+                        "enabled": True,
+                    }
+                )
+
+        self.assertEqual(config["name"], "Sub2API")
+        self.assertEqual(config["wire_api"], "responses")
+        self.assertEqual(config["reasoning_effort"], "xhigh")
+        self.assertTrue(config["disable_response_storage"])
+        self.assertFalse(config["has_api_key"])
+        self.assertNotIn("api_key", config)
 
     def test_saved_api_key_is_masked_in_public_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -166,6 +204,83 @@ class LLMConfigTests(unittest.TestCase):
             self.assertEqual(catalog["provider"], "deepseek")
             self.assertEqual(catalog["source"], "fallback")
             self.assertTrue(catalog["models"])
+
+    def test_custom_backend_uses_selected_vendor_fallback_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                catalog = list_llm_models(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "qwen",
+                        "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    }
+                )
+
+        self.assertEqual(catalog["provider"], "qwen")
+        self.assertEqual(catalog["source"], "fallback")
+        self.assertEqual(catalog["models"][0]["id"], "qwen3.8-max-preview")
+
+    def test_custom_vendor_does_not_reuse_key_from_another_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("app.llm.store", local_store),
+                patch("app.llm._fetch_provider_models") as fetch_models,
+            ):
+                save_llm_config(
+                    {
+                        "provider": "custom",
+                        "model": "gpt-5.6-sol",
+                        "endpoint": "https://carpool.composiastack.com",
+                        "api_key": "sub2api-secret",
+                    }
+                )
+                catalog = list_llm_models(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "google",
+                        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+                    }
+                )
+
+        fetch_models.assert_not_called()
+        self.assertEqual(catalog["provider"], "google")
+        self.assertEqual(catalog["source"], "fallback")
+
+    def test_provider_model_sync_filters_non_chat_models(self) -> None:
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "data": [
+                        {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol"},
+                        {"id": "text-embedding-4", "name": "Embedding"},
+                        {"id": "gpt-image-2", "name": "Image"},
+                        {"id": "whisper-2", "name": "Speech"},
+                    ]
+                }
+
+        class FakeClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def get(self, _url: str, *, headers: dict):
+                self.headers = headers
+                return FakeResponse()
+
+        with patch("app.llm.httpx.Client", FakeClient):
+            models = _fetch_provider_models("openai", "https://api.openai.com/v1", "sk-test", 1)
+
+        self.assertEqual([model["id"] for model in models], ["gpt-5.6-sol"])
 
 
 if __name__ == "__main__":

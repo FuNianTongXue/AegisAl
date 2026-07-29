@@ -54,7 +54,7 @@ struct LanguagePickerMenu: View {
         } label: {
             HStack(spacing: compact ? 0 : 9) {
                 Image(systemName: "globe")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(AppTypography.system(size: 14, weight: .semibold))
                     .foregroundStyle(AppPalette.primary)
                     .frame(width: compact ? 30 : 24, height: compact ? 30 : 24)
                     .background(AppPalette.primary.opacity(0.14))
@@ -63,10 +63,10 @@ struct LanguagePickerMenu: View {
                 if !compact {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(model.text(.interfaceLanguage))
-                            .font(.caption2.weight(.semibold))
+                            .font(AppTypography.caption2.weight(.semibold))
                             .foregroundStyle(muted)
                         Text(model.appLanguage.displayName)
-                            .font(.caption.weight(.semibold))
+                            .font(AppTypography.caption.weight(.semibold))
                             .foregroundStyle(foreground)
                             .lineLimit(1)
                     }
@@ -74,7 +74,7 @@ struct LanguagePickerMenu: View {
                     Spacer(minLength: 0)
 
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(AppTypography.system(size: 10, weight: .bold))
                         .foregroundStyle(muted)
                 }
             }
@@ -91,6 +91,7 @@ struct LanguagePickerMenu: View {
         }
         .menuStyle(.borderlessButton)
         .buttonStyle(.plain)
+        .tint(variant == .sidebar ? AppPalette.onBrand : AppPalette.text)
         .help(model.text(.languageHint))
         .accessibilityLabel(model.text(.interfaceLanguage))
     }

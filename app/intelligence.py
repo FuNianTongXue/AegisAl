@@ -57,6 +57,13 @@ _OSV_BATCH_BUDGET_SECONDS = 8.0
 _PATCH_ENRICHMENT_BUDGET_SECONDS = 4.0
 _PATCH_ENRICHMENT_MAX_COMMITS = 3
 _RECORD_NORMALIZATION_VERSION = 2
+_COMPONENT_EXPORT_RECORD_LIMIT = 25_000
+_COMPONENT_GRAPH_RECORD_LIMIT = 80
+_COMPONENT_REALTIME_RECORD_LIMIT = 1_000
+_GITHUB_BATCH_PAGE_SIZE = 100
+_GITHUB_BATCH_MAX_PAGES = 50
+_GITHUB_BATCH_MAX_RECORDS = 5_000
+_GITHUB_BATCH_BUDGET_SECONDS = 18.0
 
 
 def _collect_futures_with_budget(futures: dict[Any, Any], budget_seconds: float) -> tuple[list[tuple[Any, Any]], list[Any]]:
@@ -321,7 +328,7 @@ class _VulnerabilityCatalog:
         clean = str(identifier or "").strip().upper()
         if not clean:
             return []
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT v.record_json
@@ -343,7 +350,7 @@ class _VulnerabilityCatalog:
         if not key_to_dependency:
             return []
         keys = list(key_to_dependency)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             placeholders = ",".join("?" for _ in keys)
             rows = connection.execute(
                 f"""
@@ -367,9 +374,69 @@ class _VulnerabilityCatalog:
                 break
         return _records_by_canonical_vulnerability_id(_merge_records(records))
 
+    def find_component_vulnerabilities(
+        self,
+        name: str,
+        version: str,
+        ecosystem: str = "",
+        *,
+        limit: int = _COMPONENT_EXPORT_RECORD_LIMIT,
+    ) -> tuple[list[dict[str, Any]], list[str], bool]:
+        clean_name = re.sub(r"\s+", " ", str(name or "").strip().lower())
+        clean_ecosystem = re.sub(r"\s+", " ", str(ecosystem or "").strip().lower())
+        clean_version = str(version or "").strip()
+        if not clean_name or not _is_concrete_dependency_version(clean_version):
+            return [], [], False
+        safe_limit = max(1, min(int(limit), _COMPONENT_EXPORT_RECORD_LIMIT))
+        with self._connect() as connection:
+            if clean_ecosystem:
+                rows = connection.execute(
+                    """
+                    SELECT DISTINCT v.record_json, c.component_key
+                    FROM vulnerability_components c
+                    JOIN vulnerabilities v ON v.canonical_id = c.canonical_id
+                    WHERE c.component_key = ?
+                    ORDER BY v.record_date DESC, v.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (_component_key(clean_ecosystem, clean_name), safe_limit * 5 + 1),
+                ).fetchall()
+            else:
+                escaped_name = clean_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                rows = connection.execute(
+                    """
+                    SELECT DISTINCT v.record_json, c.component_key
+                    FROM vulnerability_components c
+                    JOIN vulnerabilities v ON v.canonical_id = c.canonical_id
+                    WHERE c.component_key LIKE ? ESCAPE '\\'
+                    ORDER BY v.record_date DESC, v.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (f"%|{escaped_name}", safe_limit * 5 + 1),
+                ).fetchall()
+        ecosystems: set[str] = set()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            component_key = str(row["component_key"] or "")
+            matched_ecosystem, _, _ = component_key.partition("|")
+            if not matched_ecosystem:
+                continue
+            ecosystems.add(matched_ecosystem)
+            dependency = {
+                "ecosystem": clean_ecosystem or matched_ecosystem,
+                "name": clean_name,
+                "version": clean_version,
+            }
+            record = self._decode_record(str(row["record_json"]))
+            if _record_affects_dependency(record, dependency):
+                records.append(_tag_dependency_record(record, dependency))
+        merged = _records_by_canonical_vulnerability_id(_merge_records(records))
+        truncated = len(merged) > safe_limit or len(rows) > safe_limit * 5
+        return merged[:safe_limit], sorted(ecosystems), truncated
+
     def metadata(self, key: str, default: str = "") -> str:
         secure_key = secure_metadata_key(key)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute("SELECT key, value FROM catalog_metadata WHERE key = ?", (secure_key,)).fetchone()
             if row is None and secure_key != key:
                 row = connection.execute("SELECT key, value FROM catalog_metadata WHERE key = ?", (key,)).fetchone()
@@ -397,7 +464,7 @@ class _VulnerabilityCatalog:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
 
         severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             total = int(connection.execute(f"SELECT COUNT(*) FROM vulnerabilities{where}", values).fetchone()[0])
             rows = connection.execute(
                 f"SELECT severity, COUNT(*) AS count FROM vulnerabilities{where} GROUP BY severity",
@@ -418,6 +485,37 @@ class _VulnerabilityCatalog:
             "severity": severity,
             "records": [self._decode_record(str(row["record_json"])) for row in recent_rows],
         }
+
+    def component_records_in_range(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int = _COMPONENT_EXPORT_RECORD_LIMIT,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        safe_limit = max(1, min(int(limit), _COMPONENT_EXPORT_RECORD_LIMIT))
+        values = [
+            start.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+            end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+            safe_limit + 1,
+        ]
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT v.record_json
+                FROM vulnerabilities v
+                WHERE v.record_date >= ? AND v.record_date < ?
+                  AND EXISTS (
+                      SELECT 1 FROM vulnerability_components c
+                      WHERE c.canonical_id = v.canonical_id
+                  )
+                ORDER BY v.record_date DESC, v.updated_at DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        truncated = len(rows) > safe_limit
+        return [self._decode_record(str(row["record_json"])) for row in rows[:safe_limit]], truncated
 
     @staticmethod
     def _encode_record(record: dict[str, Any]) -> str:
@@ -735,6 +833,310 @@ class RealtimeIntelligenceService:
         self._remember(result)
         return deepcopy(result)
 
+    def query_component_vulnerabilities(
+        self,
+        name: str,
+        version: str,
+        *,
+        ecosystem: str = "",
+        include_realtime: bool = True,
+        preview_limit: int = 200,
+    ) -> dict[str, Any]:
+        records, metadata = self._resolve_component_vulnerabilities(
+            name,
+            version,
+            ecosystem=ecosystem,
+            include_realtime=include_realtime,
+        )
+        public_records = _public_records(records)
+        visible_limit = max(1, min(int(preview_limit), _COMPONENT_GRAPH_RECORD_LIMIT))
+        graph_records = records[:visible_limit]
+        query = f"{metadata['name']}@{metadata['version']}"
+        return {
+            "status": "success" if public_records else "warning",
+            "query": query,
+            "component": {
+                "name": metadata["name"],
+                "version": metadata["version"],
+                "ecosystem": metadata["ecosystem"],
+            },
+            "records": public_records[:visible_limit],
+            "total": len(public_records),
+            "preview_limit": visible_limit,
+            "truncated": metadata["truncated"],
+            "ecosystems": metadata["ecosystems"],
+            "graph": build_knowledge_graph(graph_records, query),
+            "source": metadata["source"],
+            "generated_at": metadata["generated_at"],
+        }
+
+    def query_component_vulnerability_catalog(
+        self,
+        start_date: date | str,
+        end_date: date | str,
+        *,
+        ecosystems: list[str] | None = None,
+        severities: list[str] | None = None,
+        component_names: list[str] | None = None,
+        include_realtime: bool = True,
+        limit: int = 5000,
+    ) -> dict[str, Any]:
+        range_start, range_end = _dashboard_date_range(start_date, end_date)
+        if range_start is None or range_end is None:
+            raise ValueError("组件漏洞目录必须提供开始日期和结束日期")
+        safe_limit = max(1, min(int(limit), _COMPONENT_EXPORT_RECORD_LIMIT))
+        source_status: list[dict[str, Any]] = []
+        realtime_refreshed = False
+        if include_realtime:
+            try:
+                refreshed = self.refresh_dashboard_batch(
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=min(safe_limit, _BATCH_LIMIT),
+                )
+                source_status = list(refreshed.get("sources") or [])
+                realtime_refreshed = True
+            except Exception:  # noqa: BLE001 - the encrypted catalog remains queryable when upstream sources fail.
+                source_status = self.sources_status()
+
+        records, catalog_truncated = self._catalog.component_records_in_range(
+            start=range_start,
+            end=range_end,
+            limit=_COMPONENT_EXPORT_RECORD_LIMIT,
+        )
+        ecosystem_filter = {str(value).strip().casefold() for value in ecosystems or [] if str(value).strip()}
+        severity_filter = {str(value).strip().upper() for value in severities or [] if str(value).strip()}
+        name_filter = {str(value).strip().casefold() for value in component_names or [] if str(value).strip()}
+        filtered: list[dict[str, Any]] = []
+        for record in records:
+            if severity_filter and str(record.get("severity") or "UNKNOWN").upper() not in severity_filter:
+                continue
+            components = [item for item in record.get("components") or [] if isinstance(item, dict)]
+            matched_components = [
+                component
+                for component in components
+                if (not ecosystem_filter or str(component.get("ecosystem") or "").casefold() in ecosystem_filter)
+                and (
+                    not name_filter
+                    or any(
+                        requested_name == str(component.get("name") or "").casefold()
+                        or requested_name in str(component.get("name") or "").casefold()
+                        for requested_name in name_filter
+                    )
+                )
+            ]
+            if not matched_components:
+                continue
+            filtered_record = deepcopy(record)
+            filtered_record["components"] = deepcopy(matched_components)
+            filtered.append(filtered_record)
+
+        filtered = _records_by_canonical_vulnerability_id(_merge_records(filtered))
+        filtered.sort(
+            key=lambda item: (str(item.get("published_at") or ""), str(item.get("updated_at") or "")),
+            reverse=True,
+        )
+        total = len(filtered)
+        visible = filtered[:safe_limit]
+        severity_counts = {severity: 0 for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")}
+        component_keys: set[str] = set()
+        ecosystem_counts: dict[str, int] = {}
+        for record in visible:
+            severity = str(record.get("severity") or "UNKNOWN").upper()
+            severity_counts[severity if severity in severity_counts else "UNKNOWN"] += 1
+            for component in record.get("components") or []:
+                if not isinstance(component, dict):
+                    continue
+                ecosystem = str(component.get("ecosystem") or "未标明生态").strip() or "未标明生态"
+                name = str(component.get("name") or "未提供组件名称").strip() or "未提供组件名称"
+                component_keys.add(f"{ecosystem.casefold()}|{name.casefold()}")
+                ecosystem_counts[ecosystem] = ecosystem_counts.get(ecosystem, 0) + 1
+        query = f"component-catalog:{start_date}:{end_date}"
+        graph_records = visible[: min(200, len(visible))]
+        public_records = _public_records(visible)
+        from app.vulnerability_export import component_catalog_result_fingerprint
+
+        result = {
+            "status": "success" if visible else "warning",
+            "query": query,
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+            "records": public_records,
+            "total": total,
+            "component_count": len(component_keys),
+            "severity": severity_counts,
+            "ecosystem_counts": dict(sorted(ecosystem_counts.items(), key=lambda item: (-item[1], item[0].casefold()))),
+            "filters": {
+                "ecosystems": sorted(ecosystem_filter),
+                "severities": sorted(severity_filter),
+                "component_names": sorted(name_filter),
+            },
+            "truncated": catalog_truncated or total > safe_limit,
+            "graph": build_knowledge_graph(graph_records, query),
+            "source_status": _public_source_status(source_status),
+            "source": "local-catalog+realtime" if realtime_refreshed else "local-catalog",
+            "generated_at": now_iso(),
+            "result_sha256": component_catalog_result_fingerprint(
+                public_records,
+                start_date=str(start_date)[:10],
+                end_date=str(end_date)[:10],
+                filters={
+                    "ecosystems": sorted(ecosystem_filter),
+                    "severities": sorted(severity_filter),
+                    "component_names": sorted(name_filter),
+                },
+            ),
+        }
+        self._remember(result)
+        return deepcopy(result)
+
+    @staticmethod
+    def export_component_vulnerability_catalog(
+        records: list[dict[str, Any]],
+        *,
+        start_date: str,
+        end_date: str,
+        filters: dict[str, Any] | None = None,
+        generated_at: str | None = None,
+    ) -> tuple[bytes, dict[str, Any]]:
+        from app.vulnerability_export import build_component_vulnerability_catalog_workbook
+
+        clean_records = [dict(record) for record in records if isinstance(record, dict)]
+        timestamp = str(generated_at or now_iso())
+        content = build_component_vulnerability_catalog_workbook(
+            clean_records,
+            start_date=str(start_date)[:10],
+            end_date=str(end_date)[:10],
+            filters=dict(filters or {}),
+            generated_at=timestamp,
+        )
+        component_count = len(
+            {
+                f"{str(component.get('ecosystem') or '').casefold()}|{str(component.get('name') or '').casefold()}"
+                for record in clean_records
+                for component in record.get("components") or []
+                if isinstance(component, dict)
+            }
+        )
+        return content, {
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+            "filters": dict(filters or {}),
+            "total": len(clean_records),
+            "component_count": component_count,
+            "generated_at": timestamp,
+        }
+
+    def export_component_vulnerabilities(
+        self,
+        name: str,
+        version: str,
+        *,
+        ecosystem: str = "",
+        include_realtime: bool = True,
+    ) -> tuple[bytes, dict[str, Any]]:
+        records, metadata = self._resolve_component_vulnerabilities(
+            name,
+            version,
+            ecosystem=ecosystem,
+            include_realtime=include_realtime,
+        )
+        from app.vulnerability_export import build_component_vulnerability_workbook
+
+        content = build_component_vulnerability_workbook(
+            _public_records(records),
+            component_name=metadata["name"],
+            version=metadata["version"],
+            ecosystem=metadata["ecosystem"],
+            generated_at=metadata["generated_at"],
+        )
+        return content, {**metadata, "total": len(records)}
+
+    def export_vulnerability_components(self, identifier: str) -> tuple[bytes, dict[str, Any]]:
+        clean_identifier = " ".join(str(identifier or "").split()).upper()
+        if not VULNERABILITY_ID.fullmatch(clean_identifier):
+            raise ValueError("请输入有效的 CVE 或 GHSA 漏洞编号")
+
+        result = self.query(clean_identifier, limit=50)
+        records = [
+            record
+            for record in result.get("records") or []
+            if clean_identifier
+            in {
+                str(record.get("id") or "").upper(),
+                *(str(value or "").upper() for value in record.get("aliases") or []),
+            }
+        ]
+        if not records:
+            raise ValueError(f"未找到漏洞 {clean_identifier} 的组件版本范围")
+
+        from app.vulnerability_export import build_vulnerability_component_workbook
+
+        generated_at = str(result.get("generated_at") or now_iso())
+        content = build_vulnerability_component_workbook(
+            records,
+            identifier=clean_identifier,
+            generated_at=generated_at,
+        )
+        component_count = sum(len(record.get("components") or []) for record in records)
+        return content, {
+            "identifier": clean_identifier,
+            "total": len(records),
+            "component_count": component_count,
+            "generated_at": generated_at,
+            "source": result.get("persistence") or "api-only",
+        }
+
+    def _resolve_component_vulnerabilities(
+        self,
+        name: str,
+        version: str,
+        *,
+        ecosystem: str,
+        include_realtime: bool,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        clean_name = " ".join(str(name or "").split())
+        clean_version = str(version or "").strip()
+        clean_ecosystem = " ".join(str(ecosystem or "").split())
+        if not clean_name:
+            raise ValueError("组件名称不能为空")
+        if not _is_concrete_dependency_version(clean_version):
+            raise ValueError("请输入明确的组件版本，不能使用 latest、* 或变量占位符")
+
+        local_records, discovered_ecosystems, truncated = self._catalog.find_component_vulnerabilities(
+            clean_name,
+            clean_version,
+            clean_ecosystem,
+            limit=_COMPONENT_EXPORT_RECORD_LIMIT,
+        )
+        records = list(local_records)
+        source = "local-catalog" if records else "local-catalog-miss"
+        realtime_records: list[dict[str, Any]] = []
+        if include_realtime and clean_ecosystem:
+            dependency = {"ecosystem": clean_ecosystem, "name": clean_name, "version": clean_version}
+            try:
+                realtime_records = self._query_osv_dependency(dependency, _COMPONENT_REALTIME_RECORD_LIMIT)
+            except Exception:  # noqa: BLE001 - a complete local result remains exportable if OSV is unavailable.
+                realtime_records = []
+            if realtime_records:
+                records.extend(realtime_records)
+                source = "local-catalog+osv-realtime" if local_records else "osv-realtime"
+                truncated = truncated or len(realtime_records) >= _COMPONENT_REALTIME_RECORD_LIMIT
+
+        merged = _records_by_canonical_vulnerability_id(_merge_records(records))[:_COMPONENT_EXPORT_RECORD_LIMIT]
+        if realtime_records and merged:
+            self._catalog.upsert(merged)
+        ecosystems = sorted({*discovered_ecosystems, *([clean_ecosystem] if clean_ecosystem else [])})
+        return merged, {
+            "name": clean_name,
+            "version": clean_version,
+            "ecosystem": clean_ecosystem,
+            "ecosystems": ecosystems,
+            "truncated": truncated or len(merged) >= _COMPONENT_EXPORT_RECORD_LIMIT,
+            "source": source,
+            "generated_at": now_iso(),
+        }
+
     def recent(self) -> list[dict[str, Any]]:
         with self._lock:
             return deepcopy(self._recent)
@@ -803,13 +1205,21 @@ class RealtimeIntelligenceService:
             records: list[dict[str, Any]] = []
             source_status: list[dict[str, Any]] = []
             executor = ThreadPoolExecutor(max_workers=2)
+            batch_stop = Event()
             try:
                 futures = {
                     executor.submit(self._query_nvd_batch, query_start, query_end, date_field): "nvd",
-                    executor.submit(self._query_github_batch, query_start, query_end, date_field): "github_advisory",
+                    executor.submit(
+                        self._query_github_batch,
+                        query_start,
+                        query_end,
+                        date_field,
+                        batch_stop,
+                    ): "github_advisory",
                 }
                 completed, timed_out_sources = _collect_futures_with_budget(futures, _dashboard_refresh_budget_seconds())
             finally:
+                batch_stop.set()
                 executor.shutdown(wait=False, cancel_futures=True)
 
             for source, outcome in completed:
@@ -1062,16 +1472,28 @@ class RealtimeIntelligenceService:
         return records
 
     @staticmethod
-    def _query_github_batch(start: datetime, end: datetime, date_field: str) -> list[dict[str, Any]]:
+    def _query_github_batch(
+        start: datetime,
+        end: datetime,
+        date_field: str,
+        stop: Event | None = None,
+    ) -> list[dict[str, Any]]:
         headers = default_headers(auth="secondary")
         records: list[dict[str, Any]] = []
         page = 1
+        seen_page_fingerprints: set[str] = set()
+        seen_advisory_ids: set[str] = set()
+        deadline = monotonic_time.monotonic() + _GITHUB_BATCH_BUDGET_SECONDS
         range_value = f"{start.date().isoformat()}..{(end - timedelta(milliseconds=1)).date().isoformat()}"
         filter_key = "updated" if date_field == "modified" else "published"
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-            while True:
+        with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+            while page <= _GITHUB_BATCH_MAX_PAGES and len(records) < _GITHUB_BATCH_MAX_RECORDS:
+                if stop is not None and stop.is_set():
+                    break
+                if monotonic_time.monotonic() >= deadline:
+                    break
                 params = {
-                    "per_page": "100",
+                    "per_page": str(_GITHUB_BATCH_PAGE_SIZE),
                     "page": str(page),
                     "sort": filter_key,
                     "direction": "desc",
@@ -1084,8 +1506,28 @@ class RealtimeIntelligenceService:
                 items = payload if isinstance(payload, list) else []
                 if not items:
                     break
-                records.extend(_github_record(item) for item in items if item.get("ghsa_id"))
-                if len(items) < 100:
+                page_ids = [
+                    str(item.get("ghsa_id") or "").strip().upper()
+                    for item in items
+                    if isinstance(item, dict) and item.get("ghsa_id")
+                ]
+                if not page_ids:
+                    break
+                page_fingerprint = hashlib.sha256("\n".join(page_ids).encode("utf-8")).hexdigest()
+                if page_fingerprint in seen_page_fingerprints:
+                    break
+                seen_page_fingerprints.add(page_fingerprint)
+                for item, advisory_id in zip(
+                    (item for item in items if isinstance(item, dict) and item.get("ghsa_id")),
+                    page_ids,
+                ):
+                    if advisory_id in seen_advisory_ids:
+                        continue
+                    seen_advisory_ids.add(advisory_id)
+                    records.append(_github_record(item))
+                    if len(records) >= _GITHUB_BATCH_MAX_RECORDS:
+                        break
+                if len(items) < _GITHUB_BATCH_PAGE_SIZE or "next" not in response.links:
                     break
                 page += 1
         return records
@@ -1408,6 +1850,27 @@ def _localized_vulnerability_summary(record: dict[str, Any], language: str = "zh
         if translated:
             return translated
     return _fallback_vulnerability_summary(record, language)
+
+
+def localized_vulnerability_summary(
+    record: dict[str, Any],
+    language: str = "zh-Hans",
+    *,
+    prefer_translation: bool = False,
+) -> str:
+    """Return a public, sanitized description in the requested report language."""
+
+    language = _normalize_response_language(language)
+    summary = str(record.get("summary") or record.get("title") or "").strip()
+    if prefer_translation and summary:
+        requires_translation = (language == "zh-Hans" and not _contains_cjk(summary)) or (
+            language == "en" and _contains_cjk(summary)
+        )
+        if requires_translation:
+            translated = _translate_vulnerability_summary(summary, language)
+            if translated and (language != "zh-Hans" or _contains_cjk(translated)):
+                return translated
+    return _localized_vulnerability_summary(record, language)
 
 
 def _translate_vulnerability_summary(summary: str, language: str = "zh-Hans") -> str:
@@ -1940,6 +2403,7 @@ def _github_record(item: dict[str, Any]) -> dict[str, Any]:
         "title": item.get("summary") or cve_id or ghsa_id,
         "severity": str(item.get("severity") or "UNKNOWN").upper(),
         "cvss_score": _github_cvss_score(item),
+        "cvss_vector": str((item.get("cvss") or {}).get("vector_string") or "").strip(),
         "summary": description,
         "affected_versions": affected,
         "fixed_versions": _unique([*fixed, *_fixed_commit_facts(description)]),
@@ -1984,6 +2448,14 @@ def _osv_record(item: dict[str, Any]) -> dict[str, Any]:
             fixed_versions.extend(f"{ecosystem} / {name}: {value}" for value in fixed)
     database = item.get("database_specific") or {}
     severity = str(database.get("severity") or "UNKNOWN").upper()
+    cvss_vector = next(
+        (
+            str(entry.get("score") or "").strip()
+            for entry in item.get("severity") or []
+            if isinstance(entry, dict) and str(entry.get("score") or "").strip().startswith("CVSS:")
+        ),
+        "",
+    )
     references = [str(reference.get("url") or "") for reference in item.get("references") or []]
     details = str(item.get("details") or item.get("summary") or "")
     vulnerable_snippets, fixed_snippets = _extract_advisory_code_snippets(details)
@@ -1992,6 +2464,7 @@ def _osv_record(item: dict[str, Any]) -> dict[str, Any]:
         "title": item.get("summary") or primary,
         "severity": severity,
         "cvss_score": None,
+        "cvss_vector": cvss_vector,
         "summary": details,
         "affected_versions": _unique(affected_versions),
         "fixed_versions": _unique([*fixed_versions, *_fixed_commit_facts(details)]),
@@ -2151,6 +2624,10 @@ def _merge_record(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     incoming_score = incoming.get("cvss_score")
     if incoming_score is not None and (current_score is None or float(incoming_score) > float(current_score)):
         target["cvss_score"] = incoming_score
+        if incoming.get("cvss_vector"):
+            target["cvss_vector"] = incoming["cvss_vector"]
+    elif not target.get("cvss_vector") and incoming.get("cvss_vector"):
+        target["cvss_vector"] = incoming["cvss_vector"]
     if _SEVERITY_RANK.get(str(incoming.get("severity") or "UNKNOWN").upper(), 0) > _SEVERITY_RANK.get(str(target.get("severity") or "UNKNOWN").upper(), 0):
         target["severity"] = incoming["severity"]
     for key in ("title", "summary"):

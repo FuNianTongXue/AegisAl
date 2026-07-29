@@ -13,6 +13,7 @@ from app.semgrep_tool import (
     _metadata_cwes,
     _best_record_for_scenario,
     _enrich_code_findings,
+    _is_review_finding,
     _merge_cross_engine_findings,
     _merge_findings,
     _parse_semgrep_json,
@@ -23,19 +24,80 @@ from app.semgrep_tool import (
 )
 from app.dependencies import scan_dependency_attachments
 from app.graph import KnowledgeSecurityGraph, build_report_conclusion, empty_knowledge_graph
+from app.report_subgraph import report_capability_subgraph
 from app.reports import (
     ReportStore,
     _build_html_report,
     _markdown_fragment_to_html,
     _parse_report_document,
     _pdf_inline_markdown,
+    _report_china_time,
     _sanitize_report_content,
+    build_agent_task_markdown_report,
     build_dependency_markdown_report,
     build_report_metrics,
 )
 
 
 class SemgrepToolTests(unittest.TestCase):
+    def test_low_confidence_standard_findings_are_review_only_but_recall_findings_remain_primary(self) -> None:
+        self.assertTrue(_is_review_finding({"confidence": "low", "rule_profile": "standard"}))
+        self.assertTrue(_is_review_finding({"confidence": "high", "rule_profile": "review"}))
+        self.assertFalse(_is_review_finding({"confidence": "low", "rule_profile": "recall"}))
+        self.assertFalse(_is_review_finding({"confidence": "high", "rule_profile": "standard"}))
+
+    def test_complete_scan_processes_all_attachments(self) -> None:
+        attachments = [
+            {"file_name": f"src/file-{index}.py", "content": f"value_{index} = {index}\n"}
+            for index in range(4)
+        ]
+        tool = SemgrepTool()
+
+        with (
+            patch("app.semgrep_tool.MAX_ASK_ATTACHMENTS", 2),
+            patch.dict(os.environ, {"SECFLOW_SEMGREP_DISABLE_CLI": "1"}),
+        ):
+            bounded = tool.analyze(attachments, {"dependencies": []}, [])
+            complete = tool.analyze(
+                attachments,
+                {"dependencies": []},
+                [],
+                include_all_attachments=True,
+            )
+
+        self.assertEqual(len(bounded["files"]), 2)
+        self.assertEqual(len(complete["files"]), 4)
+
+    def test_complete_cli_scan_disables_process_rule_and_target_size_limits(self) -> None:
+        calls: list[dict] = []
+
+        def run(command, **kwargs):
+            calls.append({"command": command, **kwargs})
+            result_path = Path(command[command.index("--json-output") + 1])
+            result_path.write_text('{"results": [], "errors": []}', encoding="utf-8")
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        source = [{"file_name": "src/demo.py", "content": "value = 1\n"}]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "semgrep"
+            executable.touch()
+            executable.chmod(0o755)
+            tool = SemgrepTool(str(executable))
+            with patch("app.semgrep_tool.subprocess.run", side_effect=run):
+                status, _, _ = tool._run_cli(
+                    source,
+                    source,
+                    {"dependencies": []},
+                    [],
+                    complete_scan=True,
+                )
+
+        command = calls[0]["command"]
+        self.assertEqual(status, "completed")
+        self.assertIsNone(calls[0]["timeout"])
+        self.assertEqual(command[command.index("--timeout") + 1], "0")
+        self.assertEqual(command[command.index("--max-target-bytes") + 1], "0")
+
     def test_semgrep_json_is_mapped_to_ast_cfg_dfg_report_fields(self) -> None:
         source = """import javax.servlet.http.HttpServletRequest;
 class Demo {
@@ -739,7 +801,7 @@ class ReportStoreTests(unittest.TestCase):
             )
 
             self.assertRegex(saved["file_name"], r"^PaymentWalletApplicationAPI_\d{8}-\d{6}\.md$")
-            self.assertEqual(set(saved["available_formats"]), {"html", "md", "pdf"})
+            self.assertEqual(set(saved["available_formats"]), {"html", "md", "docx", "pdf"})
             md_path, md_name = store.resolve_download(saved["id"])
             html_path, html_name, html_type = store.resolve_download(saved["id"], "html")
             pdf_path, pdf_name, pdf_type = store.resolve_download(saved["id"], "pdf")
@@ -890,10 +952,128 @@ class ReportStoreTests(unittest.TestCase):
         self.assertIn("riskyCall(value);", rendered)
         self.assertNotIn("<p>```</p>", rendered)
 
+    def test_numbered_code_block_separates_line_numbers_and_wrap_safe_source(self) -> None:
+        long_source = "invoke(" + ("x" * 420) + ");"
+        rendered = _markdown_fragment_to_html(
+            "证据代码片段（第 9999-10001 行，风险点为第 10000 行）：\n"
+            "```java\n"
+            " 9999 | prepare();\n"
+            f"10000 | {long_source}\n"
+            "10001 | commit();\n"
+            "```"
+        )
+
+        self.assertIn('class="numbered-code"', rendered)
+        self.assertIn('class="code-row risk"', rendered)
+        self.assertIn('<span class="code-line-number" aria-hidden="true">10000</span>', rendered)
+        self.assertIn(f'<span class="code-source">{long_source}</span>', rendered)
+        self.assertNotIn("10000 |", rendered)
+
     def test_pdf_path_keeps_file_name_and_line_together(self) -> None:
         rendered = _pdf_inline_markdown("src/main/java/Demo.java:42")
 
         self.assertIn("/<br/>Demo.java:&nbsp;42", rendered)
+
+    def test_html_report_uses_native_secflow_font_cascade(self) -> None:
+        rendered = _build_html_report("# Demo", {"language": "zh-Hans"})
+
+        self.assertIn(
+            'font: 14px/1.68 "SF Pro Text", "PingFang SC", "Apple Color Emoji",',
+            rendered,
+        )
+        self.assertLess(rendered.index('"SF Pro Text"'), rendered.index('"PingFang SC"'))
+        self.assertLess(rendered.index('"PingFang SC"'), rendered.index('"Apple Color Emoji"'))
+
+    def test_pdf_latin_runs_can_use_native_report_font(self) -> None:
+        rendered = _pdf_inline_markdown("安全 SecFlow 2026", "SecFlowLatin")
+
+        self.assertIn('安全<font name="SecFlowLatin"> SecFlow 2026</font>', rendered)
+
+    def test_report_generation_time_uses_china_standard_time(self) -> None:
+        self.assertEqual(
+            _report_china_time("2026-07-28T06:13:21+00:00"),
+            "2026-07-28 14:13:21 UTC+08:00",
+        )
+
+    def test_code_report_removes_file_rule_section_and_visible_scan_mode(self) -> None:
+        report = build_agent_task_markdown_report(
+            {
+                "workspace_name": "demo",
+                "workspace_path": "/tmp/demo",
+                "workspace_type": "directory",
+                "objective": "scan project",
+                "events": [],
+                "result": {
+                    "languages": ["python"],
+                    "total_files": 1,
+                    "scan_mode": "adaptive_upload",
+                    "language_results": {
+                        "python": {
+                            "file_count": 1,
+                            "files": ["app.py"],
+                            "rule_files": ["python-security.yml"],
+                            "syntax_summary": {},
+                            "findings": [],
+                        }
+                    },
+                },
+            }
+        )
+
+        self.assertNotIn("扫描文件与规则", report)
+        self.assertNotIn("扫描模式", report)
+        self.assertIn("## 7. 项目自适应与回归审计", report)
+        self.assertIn("## 9. 方法与限制", report)
+
+    def test_legacy_report_cleanup_renumbers_sections_and_localizes_time(self) -> None:
+        legacy = """# demo 代码安全漏洞扫描报告
+
+- 生成时间：2026-07-28T06:13:21+00:00
+
+## 1. 执行摘要
+
+摘要
+
+## 2. 扫描文件与规则
+
+- 规则文件：`python-security.yml`
+- 扫描文件：`app.py`
+
+## 3. 项目自适应与回归审计
+
+- 扫描模式：`adaptive_upload`
+- 自适应状态：`completed`
+"""
+
+        cleaned = _sanitize_report_content(legacy)
+
+        self.assertIn("2026-07-28 14:13:21 UTC+08:00", cleaned)
+        self.assertNotIn("扫描文件与规则", cleaned)
+        self.assertNotIn("python-security.yml", cleaned)
+        self.assertNotIn("扫描模式", cleaned)
+        self.assertIn("## 2. 项目自适应与回归审计", cleaned)
+
+    def test_chinese_severity_chart_shows_percentages_without_format_or_mode(self) -> None:
+        metadata = {
+            "language": "zh-Hans",
+            "mode": "agent_static_scan",
+            "created_at": "2026-07-28T06:13:21+00:00",
+            "report_metrics": {
+                "language": "zh-Hans",
+                "generated_at": "2026-07-28T06:13:21+00:00",
+                "code_findings": 4,
+                "total_risks": 4,
+                "severity": {"HIGH": 1, "MEDIUM": 3},
+            },
+        }
+
+        rendered = _build_html_report("# demo 代码安全漏洞扫描报告\n\n## 1. 摘要\n\n完成。", metadata)
+
+        self.assertIn("生成时间: 2026-07-28 14:13:21 UTC+08:00", rendered)
+        self.assertIn("<b>高危</b><span>1 · 25.0%</span>", rendered)
+        self.assertIn("<b>中危</b><span>3 · 75.0%</span>", rendered)
+        self.assertNotIn("HTML / PDF / Markdown", rendered)
+        self.assertNotIn("agent_static_scan", rendered)
 
     def test_structured_metrics_drive_english_report_charts(self) -> None:
         record = {
@@ -988,7 +1168,7 @@ class ReportStoreTests(unittest.TestCase):
                 finding_count=0,
             )
 
-            self.assertEqual(set(saved["available_formats"]), {"html", "md"})
+            self.assertEqual(set(saved["available_formats"]), {"html", "md", "docx"})
             with self.assertRaises(ValueError):
                 store.resolve_download(saved["id"], "pdf")
 
@@ -1348,10 +1528,21 @@ class DependencyReportGraphTests(unittest.TestCase):
         self.assertIn("修复后代码", result["summary"])
         self.assertNotIn("CodeQL", result["summary"])
         self.assertIn("source", result["summary"].lower())
-        self.assertIn("报告文件", result["fields"])
-        self.assertIn("report", result)
-        self.assertEqual(result["report"]["title"], "依赖漏洞与代码漏洞分析报告")
-        self.assertIn("generate_markdown_report", [item["node"] for item in result["trace"]])
+        self.assertEqual(result["interrupt"]["kind"], "report_generation_confirmation")
+        generated = report_capability_subgraph.resume(
+            result["interrupt"]["thread_id"],
+            decision="confirm",
+            user_id="default",
+            session_id="default",
+        )
+        self.assertEqual(generated["interrupt"]["kind"], "report_download_confirmation")
+        self.assertEqual(generated["report"]["title"], "依赖漏洞与代码漏洞分析报告")
+        nodes = [item["node"] for item in generated["trace"]]
+        self.assertIn("report.markdown_mcp", nodes)
+        self.assertIn("report.word_mcp", nodes)
+        self.assertIn("report.pdf_mcp", nodes)
+        self.assertIn("report.persist", nodes)
+        self.assertIn("report_capability_subgraph", [item["node"] for item in result["trace"]])
         self.assertIn("run_static_path_analysis", [item["node"] for item in result["trace"]])
 
 

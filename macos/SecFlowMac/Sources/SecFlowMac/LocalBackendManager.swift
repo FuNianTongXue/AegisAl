@@ -18,7 +18,7 @@ enum LocalBackendError: LocalizedError {
 @MainActor
 final class LocalBackendManager: ObservableObject {
     static let shared = LocalBackendManager()
-    private static let expectedContractVersion = "2026-07-dashboard-published-at-v1"
+    private static let expectedContractVersion = "2026-07-subscriptions-v1"
     static let isolatedLLMEnvironmentKeys = [
         "SECFLOW_LLM_PROVIDER",
         "SECFLOW_LLM_API_KEY",
@@ -40,13 +40,26 @@ final class LocalBackendManager: ObservableObject {
 
     private let isExternalDevelopmentServer: Bool
     private let backendPort: Int
+    private let trialDurationHours: Int
+    private let trialReleaseChannel: String
+    private let trialKeychainService: String
     private var backendProcess: Process?
     private var logHandle: FileHandle?
 
     private init() {
         let environment = ProcessInfo.processInfo.environment
-        isTrialBuild = Bundle.main.object(forInfoDictionaryKey: "SecFlowTrialEnabled") as? Bool == true
-        backendPort = isTrialBuild ? 18782 : 18781
+        let bundle = Bundle.main
+        isTrialBuild = bundle.object(forInfoDictionaryKey: "SecFlowTrialEnabled") as? Bool == true
+        trialDurationHours = max(
+            1,
+            (bundle.object(forInfoDictionaryKey: "SecFlowTrialDurationHours") as? NSNumber)?.intValue ?? 72
+        )
+        trialReleaseChannel = bundle.object(forInfoDictionaryKey: "SecFlowTrialReleaseChannel") as? String
+            ?? "限时试用版"
+        trialKeychainService = bundle.object(forInfoDictionaryKey: "SecFlowTrialKeychainService") as? String
+            ?? "com.secflow.ai.mac.trial"
+        let configuredTrialPort = (bundle.object(forInfoDictionaryKey: "SecFlowTrialBackendPort") as? NSNumber)?.intValue
+        backendPort = isTrialBuild ? max(1, configuredTrialPort ?? 18782) : 18781
         if !isTrialBuild, let override = environment["SECFLOW_SERVER_URL"], !override.isEmpty {
             baseURLString = override
             isExternalDevelopmentServer = true
@@ -59,8 +72,10 @@ final class LocalBackendManager: ObservableObject {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
+        let trialDataDirectory = bundle.object(forInfoDictionaryKey: "SecFlowTrialDataDirectory") as? String
+            ?? "SecFlow-Trial"
         dataDirectoryURL = applicationSupport.appendingPathComponent(
-            isTrialBuild ? "SecFlow-Trial" : "SecFlow",
+            isTrialBuild ? trialDataDirectory : "SecFlow",
             isDirectory: true
         )
         try? FileManager.default.createDirectory(
@@ -141,10 +156,12 @@ final class LocalBackendManager: ObservableObject {
         environment["PYTHONUNBUFFERED"] = "1"
         if isTrialBuild {
             environment["SECFLOW_TRIAL_ENABLED"] = "1"
-            environment["SECFLOW_APP_RELEASE_CHANNEL"] = "三天试用版"
-            environment["SECFLOW_KEYCHAIN_SERVICE"] = "com.secflow.ai.mac.trial"
+            environment["SECFLOW_TRIAL_DURATION_HOURS"] = String(trialDurationHours)
+            environment["SECFLOW_APP_RELEASE_CHANNEL"] = trialReleaseChannel
+            environment["SECFLOW_KEYCHAIN_SERVICE"] = trialKeychainService
         } else {
             environment.removeValue(forKey: "SECFLOW_TRIAL_ENABLED")
+            environment.removeValue(forKey: "SECFLOW_TRIAL_DURATION_HOURS")
             environment.removeValue(forKey: "SECFLOW_KEYCHAIN_SERVICE")
         }
         for key in [

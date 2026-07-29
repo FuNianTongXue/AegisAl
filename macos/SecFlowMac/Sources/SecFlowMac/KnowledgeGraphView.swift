@@ -1,35 +1,120 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
+
+private enum KnowledgeLookupMode: String, CaseIterable, Identifiable {
+    case component
+    case vulnerability
+
+    var id: String { rawValue }
+}
 
 struct KnowledgeGraphView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var lookupMode: KnowledgeLookupMode = .component
     @State private var query = "CVE-2021-44228"
+    @State private var componentName = "org.apache.logging.log4j:log4j-core"
+    @State private var componentVersion = "2.14.1"
+    @State private var ecosystem = "Maven"
     @State private var selectedNodeID: String?
+
+    private let ecosystems = ["Maven", "npm", "PyPI", "Go", "crates.io", "NuGet", "RubyGems", "Packagist"]
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 16) {
-                Text(model.uiText("知识图谱")).font(.title2.bold()).foregroundStyle(AppPalette.text)
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(AppPalette.textMuted)
-                    TextField(model.uiText("输入 CVE 编号，生成漏洞知识图谱"), text: $query)
-                        .textFieldStyle(.plain)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 14) {
+                    Text(model.uiText("组件查询"))
+                        .font(AppTypography.title2.bold())
                         .foregroundStyle(AppPalette.text)
-                        .onSubmit { Task { await model.queryIntelligence(query: query) } }
+                    Picker("", selection: $lookupMode) {
+                        Text(model.uiText("组件版本")).tag(KnowledgeLookupMode.component)
+                        Text(model.uiText("漏洞编号")).tag(KnowledgeLookupMode.vulnerability)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 230)
+                    Spacer()
+                    if lookupMode == .component, let result = model.componentVulnerabilityResult {
+                        StatusBadge(text: model.uiText("%d 条漏洞", result.total), tone: result.total > 0 ? .warning : .neutral)
+                        if result.truncated {
+                            StatusBadge(text: model.uiText("导出达到上限"), tone: .warning)
+                        }
+                    }
+                    if lookupMode == .vulnerability, canExportVulnerability {
+                        StatusBadge(
+                            text: model.uiText("%d 个涉及组件", vulnerabilityComponentCount),
+                            tone: vulnerabilityComponentCount > 0 ? .warning : .neutral
+                        )
+                    }
+                    Button(action: exportExcel) {
+                        Label(model.uiText("下载全量 Excel"), systemImage: "arrow.down.doc")
+                    }
+                    .buttonStyle(SecondaryActionButtonStyle())
+                    .disabled(exportDisabled)
                 }
-                .padding(9).frame(maxWidth: 420)
-                .background(AppPalette.card).clipShape(RoundedRectangle(cornerRadius: 6))
-                Spacer()
-                Button { Task { await model.queryIntelligence(query: query) } } label: { Label(model.uiText("查询图谱"), systemImage: "point.3.connected.trianglepath.dotted") }
-                .buttonStyle(PrimaryActionButtonStyle())
+
+                if lookupMode == .component {
+                    HStack(spacing: 10) {
+                        Picker(model.uiText("生态系统"), selection: $ecosystem) {
+                            ForEach(ecosystems, id: \.self) { value in
+                                Text(value).tag(value)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+
+                        graphSearchField(
+                            icon: "shippingbox",
+                            placeholder: model.uiText("组件名称"),
+                            text: $componentName,
+                            width: 360,
+                            submit: queryComponent
+                        )
+                        graphSearchField(
+                            icon: "number",
+                            placeholder: model.uiText("明确版本"),
+                            text: $componentVersion,
+                            width: 180,
+                            submit: queryComponent
+                        )
+                        Spacer()
+                        Button(action: queryComponent) {
+                            Label(model.uiText("查询组件漏洞"), systemImage: "arrow.triangle.branch")
+                        }
+                        .buttonStyle(PrimaryActionButtonStyle())
+                        .disabled(
+                            componentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || componentVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || model.isBusy("component-vulnerability-query")
+                        )
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        graphSearchField(
+                            icon: "magnifyingglass",
+                            placeholder: model.uiText("输入 CVE 编号，生成漏洞知识图谱"),
+                            text: $query,
+                            width: 520,
+                            submit: queryVulnerability
+                        )
+                        Spacer()
+                        Button(action: queryVulnerability) {
+                            Label(model.uiText("查询漏洞"), systemImage: "exclamationmark.shield")
+                        }
+                        .buttonStyle(PrimaryActionButtonStyle())
+                        .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isBusy("intelligence-query"))
+                    }
+                }
             }
             .padding(22)
             Divider()
             HSplitView {
                 Group {
                     if let graph = model.knowledgeGraph, !graph.nodes.isEmpty {
-                        GraphCanvas(graph: graph, selectedNodeID: $selectedNodeID)
+                        KnowledgeSankeyCanvas(graph: graph, selectedNodeID: $selectedNodeID)
                     } else {
-                        ContentUnavailableView(model.uiText("暂无图谱"), systemImage: "point.3.connected.trianglepath.dotted")
+                        ContentUnavailableView(model.uiText("暂无桑基图"), systemImage: "arrow.triangle.branch")
                     }
                 }
                 .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
@@ -39,6 +124,186 @@ struct KnowledgeGraphView: View {
         }
         .background(AppPalette.page)
         .foregroundStyle(AppPalette.text)
+    }
+
+    private func graphSearchField(
+        icon: String,
+        placeholder: String,
+        text: Binding<String>,
+        width: CGFloat,
+        submit: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(AppPalette.textMuted)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .foregroundStyle(AppPalette.text)
+                .onSubmit(submit)
+        }
+        .padding(.horizontal, 11)
+        .frame(width: width, height: 38)
+        .background(AppPalette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(AppPalette.border)
+        }
+    }
+
+    private func queryComponent() {
+        selectedNodeID = nil
+        Task {
+            await model.queryComponentVulnerabilities(
+                name: componentName,
+                version: componentVersion,
+                ecosystem: ecosystem
+            )
+        }
+    }
+
+    private func queryVulnerability() {
+        selectedNodeID = nil
+        Task { await model.queryIntelligence(query: query) }
+    }
+
+    private func exportExcel() {
+        if lookupMode == .vulnerability {
+            exportVulnerabilityComponents()
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = model.uiText("下载组件漏洞 Excel")
+        let stem = "\(ecosystem)-\(componentName)-\(componentVersion)"
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        panel.nameFieldStringValue = "SecFlow-\(stem.isEmpty ? "component" : stem)-vulnerabilities.xlsx"
+        panel.canCreateDirectories = true
+        if let xlsx = UTType(filenameExtension: "xlsx") {
+            panel.allowedContentTypes = [xlsx]
+        }
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        Task {
+            await model.downloadComponentVulnerabilities(
+                name: componentName,
+                version: componentVersion,
+                ecosystem: ecosystem,
+                to: destination
+            )
+        }
+    }
+
+    private func exportVulnerabilityComponents() {
+        let cleanIdentifier = query.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let panel = NSSavePanel()
+        panel.title = model.uiText("下载漏洞组件 Excel")
+        let stem = cleanIdentifier
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        panel.nameFieldStringValue = "SecFlow-\(stem.isEmpty ? "vulnerability" : stem)-component-ranges.xlsx"
+        panel.canCreateDirectories = true
+        if let xlsx = UTType(filenameExtension: "xlsx") {
+            panel.allowedContentTypes = [xlsx]
+        }
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        Task {
+            await model.downloadVulnerabilityComponents(identifier: cleanIdentifier, to: destination)
+        }
+    }
+
+    private var canExportVulnerability: Bool {
+        guard let result = model.intelligenceResult, !result.records.isEmpty else { return false }
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.query.caseInsensitiveCompare(cleanQuery) == .orderedSame
+    }
+
+    private var vulnerabilityComponentCount: Int {
+        guard canExportVulnerability else { return 0 }
+        return model.intelligenceResult?.records.reduce(0) { $0 + ($1.components?.count ?? 0) } ?? 0
+    }
+
+    private var exportDisabled: Bool {
+        switch lookupMode {
+        case .component:
+            return model.componentVulnerabilityResult == nil
+                || model.isBusy("component-vulnerability-query")
+                || model.isBusy("component-vulnerability-export")
+        case .vulnerability:
+            return !canExportVulnerability
+                || model.isBusy("intelligence-query")
+                || model.isBusy("vulnerability-component-export")
+        }
+    }
+}
+
+private struct KnowledgeSankeyCanvas: View {
+    @EnvironmentObject private var model: AppModel
+    let graph: KnowledgeGraphPayload
+    @Binding var selectedNodeID: String?
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            D3SankeyChartView(
+                data: sankeyData,
+                selectedNodeID: selectedNodeID,
+                onSelect: { selectedNodeID = $0 }
+            )
+            GraphLegend()
+                .padding(14)
+        }
+        .background(AppPalette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(AppPalette.border.opacity(0.9))
+        }
+        .padding(22)
+        .onAppear(perform: selectPrimaryNode)
+        .onChange(of: graphSignature) { _, _ in selectPrimaryNode() }
+    }
+
+    private var graphSignature: String {
+        "\(graph.nodes.map(\.id).joined(separator: "|"))::\(graph.edges.map(\.id).joined(separator: "|"))"
+    }
+
+    private var sankeyData: SankeyChartData {
+        let nodesByID = Dictionary(uniqueKeysWithValues: graph.nodes.map { ($0.id, $0) })
+        let nodes = graph.nodes.map { node in
+            ChartNode(
+                id: node.id,
+                label: node.label,
+                type: node.type,
+                severity: node.metadata["severity"]?.text,
+                column: column(for: node.type),
+                version: node.type == "fix" ? node.label : nil,
+                ecosystem: node.metadata["ecosystem"]?.text
+            )
+        }
+        let links = graph.edges.map { edge in
+            let sourceSeverity = nodesByID[edge.source]?.metadata["severity"]?.text
+            let targetSeverity = nodesByID[edge.target]?.metadata["severity"]?.text
+            return ChartLink(
+                from: edge.source,
+                to: edge.target,
+                type: edge.type,
+                value: 1,
+                severity: sourceSeverity ?? targetSeverity
+            )
+        }
+        return SankeyChartData(nodes: nodes, links: links)
+    }
+
+    private func column(for type: String) -> Int {
+        switch type {
+        case "vulnerability": 0
+        case "fix": 2
+        default: 1
+        }
+    }
+
+    private func selectPrimaryNode() {
+        guard selectedNodeID == nil || !graph.nodes.contains(where: { $0.id == selectedNodeID }) else { return }
+        selectedNodeID = graph.nodes.first { $0.type == "vulnerability" }?.id ?? graph.nodes.first?.id
     }
 }
 
@@ -84,7 +349,7 @@ private struct GraphCanvas: View {
                             let labelPoint = CGPoint(x: (mid.x + control.x) / 2, y: (mid.y + control.y) / 2)
                             context.draw(
                                 Text(graphEdgeLabel(edge, language: model.appLanguage))
-                                    .font(.caption2.weight(.semibold))
+                                    .font(AppTypography.caption2.weight(.semibold))
                                     .foregroundColor(AppPalette.textMuted),
                                 at: labelPoint
                             )
@@ -120,7 +385,7 @@ private struct GraphCanvas: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
 
                 Text(model.uiText("拖动画布移动 · 双指捏合或按钮缩放"))
-                    .font(.caption2.weight(.semibold))
+                    .font(AppTypography.caption2.weight(.semibold))
                     .foregroundStyle(AppPalette.textMuted)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -372,7 +637,7 @@ private struct ForceGraphNodeView: View {
                         )
                     )
                 Image(systemName: nodeIcon(node.type))
-                    .font(.system(size: node.type == "vulnerability" ? 20 : 15, weight: .semibold))
+                    .font(AppTypography.system(size: node.type == "vulnerability" ? 20 : 15, weight: .semibold))
                     .foregroundStyle(.white)
             }
             .frame(width: nodeSize, height: nodeSize)
@@ -388,7 +653,7 @@ private struct ForceGraphNodeView: View {
             .shadow(color: color.opacity(isSelected ? 0.42 : 0.2), radius: isSelected ? 18 : 10, y: isSelected ? 8 : 5)
 
             Text(node.label)
-                .font(.caption2.weight(.semibold))
+                .font(AppTypography.caption2.weight(.semibold))
                 .foregroundStyle(AppPalette.text)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
@@ -415,7 +680,7 @@ private struct GraphCanvasToolbar: View {
         HStack(spacing: 8) {
             GraphToolButton(systemImage: "minus.magnifyingglass", action: zoomOut, help: model.uiText("缩小"))
             Text("\(Int(scale * 100))%")
-                .font(.caption.monospacedDigit().weight(.semibold))
+                .font(AppTypography.caption.monospacedDigit().weight(.semibold))
                 .foregroundStyle(AppPalette.textMuted)
                 .frame(width: 48)
             GraphToolButton(systemImage: "plus.magnifyingglass", action: zoomIn, help: model.uiText("放大"))
@@ -438,7 +703,7 @@ private struct GraphToolButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.caption.weight(.bold))
+                .font(AppTypography.caption.weight(.bold))
                 .foregroundStyle(AppPalette.text)
                 .frame(width: 24, height: 24)
                 .background(AppPalette.card.opacity(0.72), in: Circle())
@@ -466,7 +731,7 @@ private struct GraphLegend: View {
                         .fill(nodeColor(item.type))
                         .frame(width: 8, height: 8)
                     Text(model.uiText(item.label))
-                        .font(.caption2.weight(.semibold))
+                        .font(AppTypography.caption2.weight(.semibold))
                         .foregroundStyle(AppPalette.textMuted)
                 }
             }
@@ -518,14 +783,14 @@ private struct GraphInspector: View {
                                         .frame(width: 42, height: 42)
                                     Image(systemName: nodeIcon(node.type))
                                         .foregroundStyle(nodeColor(node.type))
-                                        .font(.title2)
+                                        .font(AppTypography.title2)
                                 }
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(node.label)
-                                        .font(.headline)
+                                        .font(AppTypography.headline)
                                         .foregroundStyle(AppPalette.text)
                                     Text(typeLabel(node.type, language: model.appLanguage))
-                                        .font(.caption)
+                                        .font(AppTypography.caption)
                                         .foregroundStyle(AppPalette.textMuted)
                                 }
                                 Spacer(minLength: 0)
@@ -543,7 +808,7 @@ private struct GraphInspector: View {
                             let cards = metadataCards(for: node)
                             if cards.isEmpty {
                                 Text(model.uiText("暂无更多详情"))
-                                    .font(.callout)
+                                    .font(AppTypography.callout)
                                     .foregroundStyle(AppPalette.textMuted)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(12)
@@ -563,13 +828,13 @@ private struct GraphInspector: View {
                     }
                     Panel {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text(model.uiText("关联实体")).font(.headline)
+                            Text(model.uiText("关联实体")).font(AppTypography.headline)
                             ForEach(relatedNodes(to: node)) { related in
                                 HStack {
                                     Image(systemName: nodeIcon(related.type)).foregroundStyle(nodeColor(related.type))
                                     VStack(alignment: .leading) {
-                                        Text(related.label).font(.callout.weight(.semibold))
-                                        Text(typeLabel(related.type, language: model.appLanguage)).font(.caption).foregroundStyle(AppPalette.textMuted)
+                                        Text(related.label).font(AppTypography.callout.weight(.semibold))
+                                        Text(typeLabel(related.type, language: model.appLanguage)).font(AppTypography.caption).foregroundStyle(AppPalette.textMuted)
                                     }
                                     Spacer()
                                 }
@@ -725,10 +990,10 @@ private struct MetadataFactPill: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(fact.title)
-                .font(.caption2.weight(.semibold))
+                .font(AppTypography.caption2.weight(.semibold))
                 .foregroundStyle(AppPalette.textMuted)
             Text(fact.value)
-                .font(.callout.weight(.semibold))
+                .font(AppTypography.callout.weight(.semibold))
                 .foregroundStyle(fact.tone.color)
                 .lineLimit(1)
         }
@@ -780,16 +1045,16 @@ private struct ExpandableMetadataCard: View {
                             .fill(cardAccent.opacity(0.12))
                             .frame(width: 30, height: 30)
                         Image(systemName: card.icon)
-                            .font(.caption.weight(.semibold))
+                            .font(AppTypography.caption.weight(.semibold))
                             .foregroundStyle(cardAccent)
                     }
                     VStack(alignment: .leading, spacing: 5) {
                         Text(card.title)
-                            .font(.callout.weight(.semibold))
+                            .font(AppTypography.callout.weight(.semibold))
                             .foregroundStyle(AppPalette.text)
                         if !isExpanded {
                             Text(card.preview)
-                                .font(.caption)
+                                .font(AppTypography.caption)
                                 .foregroundStyle(AppPalette.textMuted)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -797,7 +1062,7 @@ private struct ExpandableMetadataCard: View {
                     }
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.down")
-                        .font(.caption.weight(.bold))
+                        .font(AppTypography.caption.weight(.bold))
                         .foregroundStyle(AppPalette.textSubtle)
                         .rotationEffect(.degrees(isExpanded ? 180 : 0))
                         .padding(.top, 6)
@@ -830,23 +1095,23 @@ private struct ExpandableMetadataCard: View {
                         Link(destination: url) {
                             HStack(alignment: .firstTextBaseline, spacing: 7) {
                                 Image(systemName: "arrow.up.right.square")
-                                    .font(.caption)
+                                    .font(AppTypography.caption)
                                 Text(item)
-                                    .font(.caption)
+                                    .font(AppTypography.caption)
                                     .lineLimit(2)
                             }
                             .foregroundStyle(AppPalette.primary)
                         }
                     } else {
                         Text(item)
-                            .font(.caption)
+                            .font(AppTypography.caption)
                             .foregroundStyle(AppPalette.text)
                     }
                 }
             }
         } else {
             Text(card.value)
-                .font(.callout)
+                .font(AppTypography.callout)
                 .foregroundStyle(AppPalette.text)
                 .lineSpacing(4)
                 .textSelection(.enabled)

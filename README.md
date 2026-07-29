@@ -149,6 +149,7 @@ classify_query
 | --- | --- |
 | macOS 客户端 | SwiftUI；总览、智能问答、资讯、图谱、漏洞库、报告、设置与试用状态 |
 | API 与工作流 | FastAPI、Pydantic、LangGraph；REST API、问答编排、采集器子图与运行诊断 |
+| 独立问答服务 | `app.assistant_app:app`；只暴露问答、SSE、LangGraph、Interrupt、制品和会话管理 |
 | 漏洞情报 | NVD、GitHub Advisory、OSV、本地 JSON 知识库、多源别名归并 |
 | 静态分析 | Semgrep OSS、Tree-sitter、AST / CFG / DFG、Java 跨方法路径分析 |
 | 数据与记忆 | 本地 JSON、可选 PostgreSQL、应用包内加密存储、macOS Keychain |
@@ -188,6 +189,16 @@ SECFLOW_SERVER_URL=http://127.0.0.1:18081 \
 swift run --package-path macos/SecFlowMac
 ```
 
+只部署智能问答能力时，使用独立入口：
+
+```bash
+uvicorn app.assistant_app:app --host 127.0.0.1 --port 18082
+```
+
+该入口不加载扫描任务、订阅、资讯面板或平台管理路由。启动后访问
+`http://127.0.0.1:18082/docs` 查看独立 OpenAPI；接口边界与部署说明见
+[智能问答独立模块](./docs/ASSISTANT_MODULE.md)。
+
 ### 构建独立 macOS 应用
 
 ```bash
@@ -196,13 +207,13 @@ bash scripts/build_macos_app.sh
 open dist/SecFlow.app
 ```
 
-构建 Apple Silicon 三天试用版：
+构建 Apple Silicon 7 天试用版：
 
 ```bash
 bash scripts/build_macos_trial_app.sh
 ```
 
-构建 Intel 三天试用版时，`PYTHON_BIN` 必须指向 x86_64 Python 环境：
+构建 Intel 7 天试用版时，`PYTHON_BIN` 必须指向 x86_64 Python 环境：
 
 ```bash
 SECFLOW_MACOS_ARCH=x86_64 \
@@ -210,13 +221,14 @@ PYTHON_BIN=/path/to/x86_64/venv/bin/python \
 bash scripts/build_macos_trial_app.sh
 ```
 
-产物分别写入 `dist-macos-trial/SecFlow-Trial-3Days-macOS-arm64.zip` 与 `dist-macos-trial/SecFlow-Trial-3Days-macOS-x86_64.zip`，不会互相覆盖。详细说明见 [macOS 构建文档](./macos/SecFlowMac/README.md)。
+产物分别写入 `dist-macos-trial/SecFlow-Trial-7Days-macOS-arm64.zip` 与 `dist-macos-trial/SecFlow-Trial-7Days-macOS-x86_64.zip`，不会互相覆盖。上方 `v1.2.0` 下载链接仍是已发布的历史三天试用包；当前源码构建脚本使用独立标识和数据目录生成 7 天试用包。详细说明见 [macOS 构建文档](./macos/SecFlowMac/README.md)。
 
 ## 🛡️ 能力清单
 
 | 能力 | 说明 |
 | --- | --- |
 | AI 安全问答 | 长期记忆、跨会话召回、智能路由和模型不可用时的本地专家降级 |
+| 独立问答 API | 问答、SSE 流式输出、LangGraph 图定义、Interrupt、制品和会话归档可单独部署 |
 | 中文漏洞卡片 | 固定输出编号、名称、描述、CVSS、严重等级、涉及版本、修复版本、修复方案、缓释措施和代码片段 |
 | 事实保护 | 不把通配符解释为“所有版本”；缺少结构化证据时不猜测修复版本 |
 | 实时漏洞情报 | 查询本地记录并按需补充 NVD、GitHub Advisory 与 OSV，归并后写回本地 |
@@ -225,6 +237,7 @@ bash scripts/build_macos_trial_app.sh
 | 依赖分析 | 解析 Maven / Gradle 项目依赖并关联已知漏洞 |
 | 代码审计 | 七种语言离线规则、Java 跨方法传播及文件内 AST / CFG / DFG 路径分析 |
 | 报告中心 | 统一呈现依赖与代码发现，提供 Markdown、HTML、PDF 交付格式 |
+| 报告状态门禁 | 结果、计划步骤和 `task.completed` 事件全部终态后才允许生成报告 |
 | 隐私保护 | 响应移除来源 URL、内部集合名与检索链路，API 自动隐藏密钥和 Token |
 
 <details>
@@ -237,13 +250,17 @@ bash scripts/build_macos_trial_app.sh
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/api/dashboard` | 获取本地情报总览统计 |
 | `POST` | `/api/ask` | 调用知识库安全助手 |
+| `POST` | `/api/assistant/questions` | 独立入口的结构化问答 |
+| `POST` | `/api/assistant/questions/stream` | 独立入口的 SSE 流式问答 |
+| `POST` | `/api/assistant/interrupts/resume` | 恢复组件、SBOM 或报告确认流程 |
+| `GET` | `/api/assistant/conversations` | 查询、归档、恢复或删除问答会话 |
 | `POST` | `/api/intelligence/query` | 本地检索、外部补充、写回并生成图谱 |
 | `POST` | `/api/knowledge-graph/query` | 返回富化后的知识图谱节点与边 |
 | `GET` | `/api/information` | 获取公开安全资讯 |
 | `POST` | `/api/collect/{collector_id}` | 执行 CVE 或 GitHub Advisory 采集 |
 | `GET` | `/api/vulnerabilities` | 查看本地漏洞记录 |
 | `GET` | `/api/runtime` | 查看 LLM 与长期记忆运行状态 |
-| `GET` | `/api/trial/status` | 查看三天试用状态与剩余时间 |
+| `GET` | `/api/trial/status` | 查看配置时长对应的试用状态与剩余时间 |
 | `DELETE` | `/api/memory` | 清空指定用户长期记忆 |
 
 ```bash
@@ -268,7 +285,8 @@ curl -X POST http://127.0.0.1:18081/api/ask \
 | `SECFLOW_LLM_API_KEY` | 空 | 模型 API Key，也支持 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY` |
 | `SECFLOW_SEMGREP_BIN` | 应用内 CLI | 覆盖静态分析可执行文件路径 |
 | `SECFLOW_SEMGREP_RULES` | 内置规则目录 | 覆盖离线规则目录或单个规则文件 |
-| `SECFLOW_TRIAL_ENABLED` | 空 | 打包版 72 小时试用开关 |
+| `SECFLOW_TRIAL_ENABLED` | 空 | 打包版试用开关 |
+| `SECFLOW_TRIAL_DURATION_HOURS` | `72` | 试用时长；当前 macOS 试用构建脚本写入 `168` |
 | `SECFLOW_KEYCHAIN_SERVICE` | `com.secflow.ai.mac.intelligence` | macOS Keychain 服务名 |
 
 </details>
@@ -279,17 +297,19 @@ curl -X POST http://127.0.0.1:18081/api/ask \
 .
 ├── macos/SecFlowMac/          # 原生 SwiftUI macOS 客户端
 ├── app/
-│   ├── main.py                # FastAPI 入口与 API 路由
-│   ├── graph.py               # LangGraph 安全问答工作流
-│   ├── collector_graph.py     # 漏洞情报采集器子图
+│   ├── assistant_app.py       # 可独立部署的智能问答 FastAPI 入口
+│   ├── agent/                 # 意图规划、问答服务与工作区任务智能体
+│   ├── api/routes/            # 完整应用与独立问答 API
+│   ├── langgraph/             # 问答、采集、组件、SBOM 与报告子图
+│   ├── mcp/                   # Excel、Sankey、Markdown、Mermaid、Word、PDF 工具
 │   ├── intelligence.py        # 多源检索、归并和知识图谱富化
 │   ├── semgrep_runner.py      # 多语言静态分析执行层
 │   ├── java_flow_analyzer.py  # Java AST / CFG / DFG 路径分析
 │   ├── memory.py              # 按用户隔离的长期记忆
 │   ├── secure_storage.py      # macOS 加密状态存储
 │   ├── reports.py             # Markdown / HTML / PDF 报告
-│   └── trial.py               # 三天试用状态校验
-├── config/semgrep/            # 七种语言离线安全规则
+│   └── trial.py               # 可配置时长的试用状态校验
+├── config/semgrep/            # 八种语言离线安全规则
 ├── scripts/                   # 构建、烟测与评估脚本
 ├── tests/                     # Python 自动化测试
 ├── docs/                      # 架构、评估、发布说明与产品图片
@@ -322,6 +342,9 @@ swift test --package-path macos/SecFlowMac
 - [多语言静态分析与 Go 基线评估](./docs/multilang-static-analysis-and-go-evaluation-2026-07-21.md)
 - [Go 外部语料 598×2 资格评测](./docs/go-external-598x2-qualification-2026-07-22.md)
 - [macOS v1.2.0 发布说明](./docs/macos-agent-v1.2.0-release-notes.md)
+- [智能问答独立模块](./docs/ASSISTANT_MODULE.md)
+- [系统架构](./docs/ARCHITECTURE.md)
+- [API 参考](./docs/API_REFERENCE.md)
 
 ## 🗺️ 路线图
 
@@ -329,6 +352,8 @@ swift test --package-path macos/SecFlowMac
 - [x] LangGraph 安全问答、长期记忆与中文漏洞卡片
 - [x] CVE / GHSA / CWE / 组件知识图谱
 - [x] 七种语言离线静态分析与结构化报告
+- [x] 独立智能问答服务、Interrupt 与会话归档
+- [x] 扫描完成状态与报告生成门禁一致性
 - [ ] 定时情报采集调度器与任务执行日志
 - [ ] SQLite 与向量检索适配层
 - [ ] Docker 镜像发布流程

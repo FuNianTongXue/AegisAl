@@ -6,9 +6,10 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event
-from unittest.mock import patch
+from threading import Event, Thread
+from unittest.mock import Mock, patch
 
 from app.intelligence import (
     RealtimeIntelligenceService,
@@ -130,6 +131,40 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(result["records"][0]["id"], "CVE-2026-7777")
         self.assertEqual(result["persistence"], "local-catalog")
         self.assertIn("本地漏洞 catalog 命中", result["trace"][1]["message"])
+
+    def test_catalog_reads_do_not_wait_for_background_writer_lock(self) -> None:
+        self.service._catalog.upsert(
+            [
+                {
+                    "id": "CVE-2026-9001",
+                    "title": "Concurrent catalog read",
+                    "severity": "HIGH",
+                    "aliases": ["CVE-2026-9001"],
+                    "components": [],
+                    "references": [],
+                    "published_at": "2026-07-20T00:00:00+00:00",
+                    "updated_at": "2026-07-20T00:00:00+00:00",
+                }
+            ]
+        )
+        completed = Event()
+        observed: dict[str, object] = {}
+
+        def read_snapshot() -> None:
+            observed["snapshot"] = self.service._catalog.snapshot()
+            observed["metadata"] = self.service._catalog.metadata("baseline_status", "pending")
+            observed["finding"] = self.service._catalog.find_by_identifier("CVE-2026-9001")
+            completed.set()
+
+        with self.service._catalog._lock:
+            reader = Thread(target=read_snapshot)
+            reader.start()
+            self.assertTrue(completed.wait(1), "catalog read waited for the background writer lock")
+        reader.join(timeout=1)
+
+        self.assertEqual(observed["snapshot"]["total"], 1)
+        self.assertEqual(observed["metadata"], "pending")
+        self.assertEqual(observed["finding"][0]["id"], "CVE-2026-9001")
 
     def test_incomplete_local_identifier_is_realtime_enriched_and_repaired(self) -> None:
         self.service._catalog.upsert(
@@ -427,6 +462,54 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(len(dashboard["recent_records"]), 2)
         self.assertNotIn("provenance", dashboard["recent_records"][0])
 
+    def test_github_batch_stops_when_an_upstream_repeats_a_full_page(self) -> None:
+        items = [
+            {
+                "ghsa_id": f"GHSA-{index:04x}-1111-2222",
+                "summary": f"Advisory {index}",
+                "description": "Example advisory.",
+                "severity": "high",
+                "vulnerabilities": [],
+            }
+            for index in range(100)
+        ]
+        response = Mock()
+        response.json.return_value = items
+        response.links = {"next": {"url": "https://example.test/advisories?page=2"}}
+        response.raise_for_status.return_value = None
+        client = Mock()
+        client.get.return_value = response
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+
+        with patch("app.intelligence.httpx.Client", return_value=client):
+            records = self.service._query_github_batch(
+                datetime(2026, 7, 1, tzinfo=timezone.utc),
+                datetime(2026, 7, 8, tzinfo=timezone.utc),
+                "modified",
+            )
+
+        self.assertEqual(len(records), 100)
+        self.assertEqual(client.get.call_count, 2)
+
+    def test_github_batch_honors_cancellation_before_requesting(self) -> None:
+        stop = Event()
+        stop.set()
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+
+        with patch("app.intelligence.httpx.Client", return_value=client):
+            records = self.service._query_github_batch(
+                datetime(2026, 7, 1, tzinfo=timezone.utc),
+                datetime(2026, 7, 8, tzinfo=timezone.utc),
+                "modified",
+                stop,
+            )
+
+        self.assertEqual(records, [])
+        client.get.assert_not_called()
+
     def test_dashboard_date_range_filters_persistent_catalog(self) -> None:
         january = {
             "id": "CVE-2026-1000",
@@ -635,6 +718,90 @@ class RealtimeIntelligenceTests(unittest.TestCase):
 
 
 class LocalMemoryTests(unittest.TestCase):
+    def test_conversations_are_grouped_by_session_and_sorted_by_latest_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            service.local_only = True
+            service.add_exchange("user-a", "第一轮问题", {"summary": "第一轮回答"}, session_id="session-1")
+            service.add_exchange("user-a", "第二轮问题", {"summary": "第二轮回答"}, session_id="session-1")
+            service.add_exchange("user-a", "另一个会话", {"summary": "另一个回答"}, session_id="session-2")
+
+            conversations = service.list_conversations("user-a")
+            detail = service.get_conversation("user-a", "session-1")
+
+            self.assertEqual({item["id"] for item in conversations}, {"session-1", "session-2"})
+            session_one = next(item for item in conversations if item["id"] == "session-1")
+            self.assertEqual(session_one["title"], "第一轮问题")
+            self.assertEqual(session_one["turn_count"], 2)
+            self.assertEqual([item["question"] for item in detail["exchanges"]], ["第一轮问题", "第二轮问题"])
+            self.assertEqual(detail["exchanges"][-1]["answer"], "第二轮回答")
+
+    def test_conversations_belong_to_assistant_project_and_support_archive_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            service.local_only = True
+            service.add_exchange("user-a", "需要归档的对话", {"summary": "归档回答"}, session_id="session-1")
+            service.add_exchange("user-a", "保持活动的对话", {"summary": "活动回答"}, session_id="session-2")
+
+            archived = service.archive_conversation("user-a", "session-1", True)
+
+            self.assertEqual(archived["project_id"], "assistant")
+            self.assertEqual(archived["project_name"], "智能问答")
+            self.assertTrue(archived["archived"])
+            self.assertTrue(archived["archived_at"])
+            self.assertEqual([item["id"] for item in service.list_conversations("user-a")], ["session-2"])
+            self.assertEqual(
+                [item["id"] for item in service.list_conversations("user-a", archived=True)],
+                ["session-1"],
+            )
+
+            restored = service.archive_conversation("user-a", "session-1", False)
+            self.assertFalse(restored["archived"])
+            self.assertEqual(
+                {item["id"] for item in service.list_conversations("user-a")},
+                {"session-1", "session-2"},
+            )
+
+    def test_delete_conversation_removes_only_that_session_and_rebuilds_memory_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            service.local_only = True
+            service.add_exchange(
+                "user-a",
+                "记住 deleted-project-alpha",
+                {"summary": "仅属于待删除会话的回答"},
+                session_id="delete-me",
+            )
+            service.add_exchange(
+                "user-a",
+                "记住 retained-project-beta",
+                {"summary": "需要保留的回答"},
+                session_id="keep-me",
+            )
+
+            result = service.delete_conversation("user-a", "delete-me")
+
+            self.assertTrue(result["deleted"])
+            self.assertEqual(result["deleted_turn_count"], 1)
+            self.assertEqual([item["id"] for item in service.list_conversations("user-a")], ["keep-me"])
+            with self.assertRaises(KeyError):
+                service.get_conversation("user-a", "delete-me")
+            context = service.build_context("user-a", "project")
+            self.assertNotIn("deleted-project-alpha", context["summary"])
+            self.assertIn("retained-project-beta", context["summary"])
+
+    def test_conversation_lookup_is_strictly_isolated_by_user(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            service.local_only = True
+            service.add_exchange("user-a", "A 的问题", {"summary": "A 的回答"}, session_id="shared-session")
+            service.add_exchange("user-b", "B 的问题", {"summary": "B 的回答"}, session_id="shared-session")
+
+            self.assertEqual(service.get_conversation("user-a", "shared-session")["title"], "A 的问题")
+            self.assertEqual(service.get_conversation("user-b", "shared-session")["title"], "B 的问题")
+            with self.assertRaises(KeyError):
+                service.get_conversation("user-c", "shared-session")
+
     def test_punctuation_only_question_does_not_inject_recent_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = LongTermMemoryService(Path(temp_dir) / "memory.json")

@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 try:
     from tree_sitter import Language, Node, Parser
@@ -264,8 +264,16 @@ class MethodRun:
 
 
 class JavaFlowAnalyzer:
-    def __init__(self, code_files: list[dict[str, str]]) -> None:
+    def __init__(
+        self,
+        code_files: list[dict[str, str]],
+        *,
+        complete_analysis: bool = False,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         self.code_files = [item for item in code_files if str(item.get("file_name") or "").lower().endswith(".java")]
+        self.complete_analysis = complete_analysis
+        self.cancelled = cancelled or (lambda: False)
         self.methods: dict[str, JavaMethod] = {}
         self.by_class_name_arity: dict[tuple[str, str, int], list[str]] = {}
         self.by_name_arity: dict[tuple[str, int], list[str]] = {}
@@ -274,7 +282,11 @@ class JavaFlowAnalyzer:
         self.call_edges: set[tuple[str, str]] = set()
         self.finance_analysis: dict[str, Any] = {}
         self.started_at = 0.0
-        self.max_seconds = _env_float("SECFLOW_JAVA_FLOW_MAX_SECONDS", 18.0, minimum=2.0, maximum=300.0)
+        self.max_seconds = (
+            None
+            if complete_analysis
+            else _env_float("SECFLOW_JAVA_FLOW_MAX_SECONDS", 18.0, minimum=2.0, maximum=300.0)
+        )
 
     def analyze(self) -> dict[str, Any]:
         self.started_at = time.monotonic()
@@ -286,6 +298,8 @@ class JavaFlowAnalyzer:
                 "diagnostics": ["跨方法 Java 分析运行库不可用，已跳过该分析阶段。"],
             }
         self._parse_project()
+        if self.cancelled():
+            return self._cancelled_result(0)
         if self._timed_out():
             return self._timeout_result(0)
         if not self.methods:
@@ -297,8 +311,12 @@ class JavaFlowAnalyzer:
                 "method_count": 0,
                 "call_edge_count": 0,
             }
-        max_methods = _env_int("SECFLOW_JAVA_FLOW_MAX_METHODS", 50000, minimum=100, maximum=250000)
-        if len(self.methods) > max_methods:
+        max_methods = (
+            None
+            if self.complete_analysis
+            else _env_int("SECFLOW_JAVA_FLOW_MAX_METHODS", 50000, minimum=100, maximum=250000)
+        )
+        if max_methods is not None and len(self.methods) > max_methods:
             self.diagnostics.append(f"项目包含 {len(self.methods)} 个方法，超过跨方法分析上限 {max_methods}。")
             return {
                 "status": "limit_exceeded",
@@ -321,28 +339,39 @@ class JavaFlowAnalyzer:
             self.diagnostics.append(f"原生资金 CFG/DFG 分析失败，已保留其它分析结果：{exc}")
 
         summaries = {key: MethodSummary() for key in self.methods}
-        iterations = _env_int("SECFLOW_JAVA_FLOW_MAX_ITERATIONS", 6, minimum=2, maximum=12)
+        max_iterations = (
+            None
+            if self.complete_analysis
+            else _env_int("SECFLOW_JAVA_FLOW_MAX_ITERATIONS", 6, minimum=2, maximum=12)
+        )
         completed_iterations = 0
-        for iteration in range(iterations):
+        while max_iterations is None or completed_iterations < max_iterations:
             updated: dict[str, MethodSummary] = {}
             changed = False
             for key, method in self.methods.items():
+                if self.cancelled():
+                    return self._cancelled_result(completed_iterations)
                 if self._timed_out():
-                    self.diagnostics.append(f"跨方法 Java 分析超过 {self.max_seconds:.1f}s，已降级保留其它本地扫描结果。")
+                    self.diagnostics.append(self._timeout_message("已降级保留其它本地扫描结果。"))
                     return self._timeout_result(completed_iterations)
                 summary, _, edges = self._run_method(method, summaries, collect=False)
                 updated[key] = summary
                 self.call_edges.update(edges)
-                changed = changed or summary != summaries[key]
+                if self.complete_analysis:
+                    changed = changed or _summary_semantic_signature(summary) != _summary_semantic_signature(summaries[key])
+                else:
+                    changed = changed or summary != summaries[key]
             summaries = updated
-            completed_iterations = iteration + 1
+            completed_iterations += 1
             if not changed:
                 break
 
         candidates: list[FlowCandidate] = []
         for method in self.methods.values():
+            if self.cancelled():
+                return self._cancelled_result(completed_iterations)
             if self._timed_out():
-                self.diagnostics.append(f"跨方法 Java 分析超过 {self.max_seconds:.1f}s，已返回超时前的基础信息。")
+                self.diagnostics.append(self._timeout_message("已返回超时前的基础信息。"))
                 return self._timeout_result(completed_iterations)
             _, method_candidates, edges = self._run_method(method, summaries, collect=True)
             candidates.extend(method_candidates)
@@ -373,8 +402,11 @@ class JavaFlowAnalyzer:
     def _parse_project(self) -> None:
         parser = Parser(Language(tree_sitter_java.language()))
         for code_file in self.code_files:
+            if self.cancelled():
+                self.diagnostics.append("跨方法 Java 分析已由用户停止。")
+                break
             if self._timed_out():
-                self.diagnostics.append(f"解析 Java 文件超过 {self.max_seconds:.1f}s，已停止跨方法分析。")
+                self.diagnostics.append(self._timeout_message("解析 Java 文件阶段已停止。"))
                 break
             file_name = str(code_file.get("file_name") or "")
             source = str(code_file.get("content") or "").encode("utf-8", errors="replace")
@@ -418,7 +450,15 @@ class JavaFlowAnalyzer:
             self.by_name_arity.setdefault((method.name, method.arity), []).append(key)
 
     def _timed_out(self) -> bool:
-        return bool(self.started_at and time.monotonic() - self.started_at >= self.max_seconds)
+        return bool(
+            self.max_seconds is not None
+            and self.started_at
+            and time.monotonic() - self.started_at >= self.max_seconds
+        )
+
+    def _timeout_message(self, suffix: str) -> str:
+        limit = f"{self.max_seconds:.1f}s" if self.max_seconds is not None else "配置的时间上限"
+        return f"跨方法 Java 分析超过 {limit}，{suffix}"
 
     def _timeout_result(self, completed_iterations: int) -> dict[str, Any]:
         finance_findings = list(self.finance_analysis.get("findings") or [])
@@ -427,7 +467,7 @@ class JavaFlowAnalyzer:
             "findings": finance_findings,
             "finding_count": len(finance_findings),
             "diagnostics": self.diagnostics
-            or [f"跨方法 Java 分析超过 {self.max_seconds:.1f}s，已降级保留其它本地扫描结果。"],
+            or [self._timeout_message("已降级保留其它本地扫描结果。")],
             "method_count": len(self.methods),
             "call_edge_count": len(self.call_edges),
             "iterations": completed_iterations,
@@ -437,6 +477,25 @@ class JavaFlowAnalyzer:
                 for key, value in self.finance_analysis.items()
                 if key not in {"findings", "finding_count"}
             },
+            "cfg_node_count": int(self.finance_analysis.get("cfg_node_count") or 0),
+            "cfg_edge_count": int(self.finance_analysis.get("cfg_edge_count") or 0),
+            "dfg_edge_count": int(self.finance_analysis.get("dfg_edge_count") or 0),
+        }
+
+    def _cancelled_result(self, completed_iterations: int) -> dict[str, Any]:
+        finance_findings = list(self.finance_analysis.get("findings") or [])
+        diagnostics = list(self.diagnostics)
+        if not any("用户停止" in item for item in diagnostics):
+            diagnostics.append("跨方法 Java 分析已由用户停止。")
+        return {
+            "status": "cancelled",
+            "findings": finance_findings,
+            "finding_count": len(finance_findings),
+            "diagnostics": diagnostics,
+            "method_count": len(self.methods),
+            "call_edge_count": len(self.call_edges),
+            "iterations": completed_iterations,
+            "parse_error_files": self.parse_error_files,
             "cfg_node_count": int(self.finance_analysis.get("cfg_node_count") or 0),
             "cfg_edge_count": int(self.finance_analysis.get("cfg_edge_count") or 0),
             "dfg_edge_count": int(self.finance_analysis.get("dfg_edge_count") or 0),
@@ -1058,20 +1117,37 @@ class JavaFlowAnalyzer:
         return findings[:max_findings]
 
 
-def analyze_java_interprocedural(code_files: list[dict[str, str]]) -> dict[str, Any]:
-    analysis = JavaFlowAnalyzer(code_files).analyze()
+def analyze_java_interprocedural(
+    code_files: list[dict[str, str]],
+    *,
+    complete_analysis: bool = False,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    analysis = JavaFlowAnalyzer(
+        code_files,
+        complete_analysis=complete_analysis,
+        cancelled=cancelled,
+    ).analyze()
     if (
         analysis.get("status") == "limit_exceeded"
         and len(code_files) > 1
         and str(os.getenv("SECFLOW_JAVA_FLOW_DISABLE_CHUNKING", "")).strip().lower() not in {"1", "true", "yes", "on"}
     ):
-        return _analyze_java_interprocedural_chunks(code_files, analysis)
+        return _analyze_java_interprocedural_chunks(
+            code_files,
+            analysis,
+            complete_analysis=complete_analysis,
+            cancelled=cancelled,
+        )
     return analysis
 
 
 def _analyze_java_interprocedural_chunks(
     code_files: list[dict[str, str]],
     base_analysis: dict[str, Any],
+    *,
+    complete_analysis: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     chunks = _module_chunks(code_files)
     min_chunk_files = _env_int("SECFLOW_JAVA_FLOW_MIN_CHUNK_FILES", 8, minimum=1, maximum=5000)
@@ -1090,7 +1166,11 @@ def _analyze_java_interprocedural_chunks(
     for chunk_name, chunk_files in chunks:
         if len(chunk_files) < min_chunk_files and len(chunks) > 1:
             continue
-        chunk_analysis = JavaFlowAnalyzer(chunk_files).analyze()
+        chunk_analysis = JavaFlowAnalyzer(
+            chunk_files,
+            complete_analysis=complete_analysis,
+            cancelled=cancelled,
+        ).analyze()
         status = str(chunk_analysis.get("status") or "")
         total_methods += int(chunk_analysis.get("method_count") or 0)
         total_call_edges += int(chunk_analysis.get("call_edge_count") or 0)
@@ -1614,6 +1694,33 @@ def _compact_steps(steps: Iterable[TraceStep]) -> tuple[TraceStep, ...]:
         result.append(step)
         seen_consecutive = key
     return tuple(result[-40:])
+
+
+def _summary_semantic_signature(summary: MethodSummary) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    returns = tuple(
+        sorted(
+            (
+                item.origin_kind,
+                item.param_index,
+                item.source_key,
+                tuple(sorted(item.sanitized_for)),
+            )
+            for item in summary.returns
+        )
+    )
+    sinks = tuple(
+        sorted(
+            (
+                item.param_index,
+                item.scenario,
+                item.sink.file,
+                item.sink.line,
+                item.unique_resolution,
+            )
+            for item in summary.sinks
+        )
+    )
+    return returns, sinks
 
 
 def _compact_flow_items(items: Iterable[FlowItem]) -> tuple[FlowItem, ...]:

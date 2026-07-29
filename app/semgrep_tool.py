@@ -3,19 +3,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.dependencies import MAX_ASK_ATTACHMENTS, attachment_kind, is_allowed_attachment_name
 from app.go_semantic_analyzer import analyze_go_semantics
 from app.java_flow_analyzer import analyze_java_interprocedural
 from app.language_support import analyze_source_structure, control_flow_steps, language_for_file, supported_flow_languages
-from app.source_filter import SEMGREP_EXCLUDE_PATTERNS, is_analyzable_source_path
+from app.source_filter import SEMGREP_EXCLUDE_PATTERNS, is_analyzable_source_path, is_symlink_like_source_stub
 from app.storage import DATA_DIR, now_iso
 
 
@@ -30,6 +33,16 @@ AST_CFG_DFG_ANALYSIS_PROMPT = """你是 SecFlow 静态分析节点。
 """
 
 DEFAULT_SEMGREP_RULES = "config/semgrep"
+LANGUAGE_SEMGREP_RULE_FILES: dict[str, tuple[str, ...]] = {
+    "java": ("java-security.yml",),
+    "python": ("python-security.yml",),
+    "go": ("go-security.yml", "go-security-recall.yml"),
+    "c": ("c-cpp-security.yml",),
+    "cpp": ("c-cpp-security.yml",),
+    "csharp": ("csharp-security.yml",),
+    "rust": ("rust-security.yml",),
+    "solidity": ("solidity-security.yml",),
+}
 
 
 SCENARIO_DEFINITIONS: tuple[dict[str, Any], ...] = (
@@ -345,11 +358,38 @@ class SemgrepTool:
         attachments: list[dict[str, Any]],
         dependency_scan: dict[str, Any],
         records: list[dict[str, Any]],
+        *,
+        rule_paths: list[str] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        language_hint: str | None = None,
+        include_all_attachments: bool = False,
     ) -> dict[str, Any]:
-        code_files = _code_attachments(attachments)
-        project_files = _project_attachments(attachments)
+        code_files = _code_attachments(
+            attachments,
+            include_all_attachments=include_all_attachments,
+        )
+        if language_hint in set(supported_flow_languages()):
+            for item in code_files:
+                item["language_hint"] = language_hint
+        project_files = _project_attachments(
+            attachments,
+            include_all_attachments=include_all_attachments,
+        )
+        compile_definitions = _compile_definitions_by_source_file(project_files)
+        project_preprocessor_definitions = {
+            **_project_preprocessor_definitions(project_files),
+            **_project_overlay_preprocessor_definitions(dependency_scan),
+        }
         syntax_analysis = [
-            analyze_source_structure(item["file_name"], item["content"])
+            analyze_source_structure(
+                item["file_name"],
+                item["content"],
+                language_hint=item.get("language_hint"),
+                preprocessor_definitions={
+                    **project_preprocessor_definitions,
+                    **_compile_definitions_for_file(item["file_name"], compile_definitions),
+                },
+            )
             for item in code_files
         ]
         scenarios = _select_scenarios(dependency_scan, records, code_files)
@@ -366,6 +406,9 @@ class SemgrepTool:
                 project_files,
                 dependency_scan,
                 records,
+                rule_paths=rule_paths,
+                cancelled=cancelled,
+                complete_scan=include_all_attachments,
             )
             diagnostics.extend(cli_diagnostics)
         elif not code_files:
@@ -376,7 +419,11 @@ class SemgrepTool:
         java_files = [item for item in code_files if _language_for_file(item["file_name"]) == "java"]
         if java_files:
             try:
-                path_analysis = analyze_java_interprocedural(java_files)
+                path_analysis = analyze_java_interprocedural(
+                    java_files,
+                    complete_analysis=include_all_attachments,
+                    cancelled=cancelled,
+                )
                 diagnostics.extend(str(item) for item in path_analysis.get("diagnostics") or [] if item)
                 interprocedural_findings = [
                     item
@@ -404,17 +451,21 @@ class SemgrepTool:
         selected_findings = _merge_cross_engine_findings(
             [*primary_findings, *correlated_paths, *go_semantic_findings]
         )
-        findings = _enrich_code_findings(selected_findings, code_files)
+        review_candidates = [item for item in selected_findings if _is_review_finding(item)]
+        primary_candidates = [item for item in selected_findings if not _is_review_finding(item)]
+        findings = _enrich_code_findings(primary_candidates, code_files)
+        review_findings = _enrich_code_findings(review_candidates, code_files)
         return {
             "status": "completed" if findings or cli_status == "completed" else "warning",
             "tool": "SecFlow Static Analyzer",
             "cli_status": cli_status,
             "mode": "bundled-cli" if cli_status == "completed" else "internal-fallback",
+            "rule_paths": list(rule_paths or []),
             "generated_at": now_iso(),
             "files": [
                 {
                     "file_name": item["file_name"],
-                    "language": _language_for_file(item["file_name"]),
+                    "language": syntax_analysis[index]["language"],
                     "syntax": syntax_analysis[index],
                 }
                 for index, item in enumerate(code_files)
@@ -423,6 +474,13 @@ class SemgrepTool:
                 "languages": sorted({item.get("language", "unknown") for item in syntax_analysis}),
                 "parsed_files": sum(1 for item in syntax_analysis if item.get("parser") == "tree-sitter"),
                 "parse_error_files": sum(1 for item in syntax_analysis if item.get("parse_error")),
+                "raw_parse_error_files": sum(1 for item in syntax_analysis if item.get("raw_parse_error")),
+                "recovered_parse_error_files": sum(
+                    1 for item in syntax_analysis if item.get("recovered_parse_error")
+                ),
+                "parse_error_file_names": [
+                    str(item.get("file") or "") for item in syntax_analysis if item.get("parse_error")
+                ],
                 "ast_node_count": sum(int(item.get("ast_node_count") or 0) for item in syntax_analysis),
                 "cfg_node_count": sum(int(item.get("cfg_node_count") or 0) for item in syntax_analysis),
                 "cfg_edge_count": sum(int(item.get("cfg_edge_count") or 0) for item in syntax_analysis),
@@ -432,6 +490,8 @@ class SemgrepTool:
             "conditional_edges": _scenario_edges(scenarios, bool(code_files)),
             "findings": findings,
             "finding_count": len(findings),
+            "review_findings": review_findings,
+            "review_finding_count": len(review_findings),
             "prompts": {
                 "ast_cfg_dfg": AST_CFG_DFG_ANALYSIS_PROMPT,
                 "selected_scenarios": [scenario["id"] for scenario in scenarios],
@@ -445,6 +505,10 @@ class SemgrepTool:
         project_files: list[dict[str, str]],
         dependency_scan: dict[str, Any],
         records: list[dict[str, Any]],
+        *,
+        rule_paths: list[str] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        complete_scan: bool = False,
     ) -> tuple[str, list[dict[str, Any]], list[str]]:
         cli_path = self._cli_path()
         if not cli_path:
@@ -454,22 +518,25 @@ class SemgrepTool:
         if not languages & supported:
             return "skipped", [], ["当前附件语言没有对应的离线 AST/CFG/DFG 规则，已使用内置分析。"]
 
-        timeout = int(os.getenv("SECFLOW_SEMGREP_TIMEOUT_SECONDS", "180"))
-        rule_timeout = int(os.getenv("SECFLOW_SEMGREP_RULE_TIMEOUT_SECONDS", "15"))
+        timeout = None if complete_scan else int(os.getenv("SECFLOW_SEMGREP_TIMEOUT_SECONDS", "180"))
+        rule_timeout = 0 if complete_scan else int(os.getenv("SECFLOW_SEMGREP_RULE_TIMEOUT_SECONDS", "15"))
         rules_path = _semgrep_rules_path()
         if not rules_path:
             return "failed", [], ["离线多语言安全规则缺失，已使用内置 AST/CFG/DFG 分析。"]
+        selected_rules = [Path(path) for path in (rule_paths or []) if Path(path).is_file()]
+        if rule_paths and not selected_rules:
+            return "failed", [], ["当前语言对应的离线安全规则缺失，已使用内置 AST/CFG/DFG 分析。"]
+        configs = selected_rules or [rules_path]
         diagnostics: list[str] = []
         with tempfile.TemporaryDirectory(prefix="secflow-semgrep-") as temp_dir:
             root = Path(temp_dir)
             source_root = root / "src"
             result_path = root / "results.json"
             _write_code_files(source_root, project_files)
-            analyze_cmd = [
-                cli_path,
-                "scan",
-                "--config",
-                str(rules_path),
+            analyze_cmd = [cli_path, "scan"]
+            for config in configs:
+                analyze_cmd.extend(["--config", str(config)])
+            analyze_cmd.extend([
                 "--json-output",
                 str(result_path),
                 "--dataflow-traces",
@@ -479,25 +546,36 @@ class SemgrepTool:
                 "--project-root",
                 str(source_root),
                 "--timeout",
-                str(max(1, rule_timeout)),
+                str(rule_timeout if complete_scan else max(1, rule_timeout)),
                 "--timeout-threshold",
                 "3",
                 "--max-target-bytes",
-                "5000000",
+                "0" if complete_scan else "5000000",
                 ".",
-            ]
+            ])
             for pattern in SEMGREP_EXCLUDE_PATTERNS:
                 analyze_cmd.extend(["--exclude", pattern])
             try:
-                analyzed = subprocess.run(
-                    analyze_cmd,
-                    cwd=source_root,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    check=False,
-                    env={**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"},
-                )
+                if cancelled is None:
+                    analyzed = subprocess.run(
+                        analyze_cmd,
+                        cwd=source_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        check=False,
+                        env={**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"},
+                    )
+                else:
+                    analyzed = _run_cancelable_process(
+                        analyze_cmd,
+                        cwd=source_root,
+                        timeout=timeout,
+                        env={**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"},
+                        cancelled=cancelled,
+                    )
+                    if analyzed is None:
+                        return "cancelled", [], ["静态分析已由用户停止。"]
             except subprocess.TimeoutExpired:
                 return "timeout", [], [f"静态分析超过 {timeout}s，已使用内置分析结果。"]
             except Exception as exc:  # noqa: BLE001
@@ -533,33 +611,335 @@ def analyze_static_paths(
     return semgrep_tool.analyze(attachments, dependency_scan, records)
 
 
-def _code_attachments(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
+def semgrep_rule_paths_for_language(language: str) -> list[str]:
+    root = _semgrep_rules_path()
+    if root is None:
+        return []
+    if root.is_file():
+        return [str(root)]
+    return [
+        str(path)
+        for file_name in LANGUAGE_SEMGREP_RULE_FILES.get(language, ())
+        if (path := root / file_name).is_file()
+    ]
+
+
+def _run_cancelable_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int | None,
+    env: dict[str, str],
+    cancelled: Callable[[], bool],
+) -> subprocess.CompletedProcess[str] | None:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=sys.platform != "win32",
+    )
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while process.poll() is None:
+        if cancelled():
+            _stop_process(process)
+            return None
+        if deadline is not None and time.monotonic() >= deadline:
+            _stop_process(process)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        time.sleep(0.1)
+    stdout, stderr = process.communicate()
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if sys.platform != "win32":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        process.wait(timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            if sys.platform != "win32":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _code_attachments(
+    attachments: list[dict[str, Any]],
+    *,
+    include_all_attachments: bool = False,
+) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
-    for attachment in attachments[:MAX_ASK_ATTACHMENTS]:
+    selected = attachments if include_all_attachments else attachments[:MAX_ASK_ATTACHMENTS]
+    for attachment in selected:
         file_name = str(attachment.get("file_name") or attachment.get("fileName") or "").strip()
         content = str(attachment.get("content") or "")
         if not file_name or not content or not is_allowed_attachment_name(file_name):
             continue
         if not is_analyzable_source_path(file_name):
             continue
+        if is_symlink_like_source_stub(file_name, content):
+            continue
         if attachment_kind(file_name) == "code":
             result.append({"file_name": file_name, "content": content})
     return result
 
 
-def _project_attachments(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _project_attachments(
+    attachments: list[dict[str, Any]],
+    *,
+    include_all_attachments: bool = False,
+) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
-    for attachment in attachments[:MAX_ASK_ATTACHMENTS]:
+    selected = attachments if include_all_attachments else attachments[:MAX_ASK_ATTACHMENTS]
+    for attachment in selected:
         file_name = str(attachment.get("file_name") or attachment.get("fileName") or "").strip()
         content = str(attachment.get("content") or "")
-        if file_name and content and is_allowed_attachment_name(file_name) and is_analyzable_source_path(file_name):
+        if not file_name or not content or not is_allowed_attachment_name(file_name):
+            continue
+        kind = attachment_kind(file_name)
+        if kind != "code" or is_analyzable_source_path(file_name):
             result.append({"file_name": file_name, "content": content})
     return result
 
 
+def _compile_definitions_by_source_file(project_files: list[dict[str, str]]) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    for project_file in project_files:
+        file_name = str(project_file.get("file_name") or "").replace("\\", "/")
+        if Path(file_name).name.lower() != "compile_commands.json":
+            continue
+        try:
+            payload = json.loads(str(project_file.get("content") or ""))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            source_file = str(entry.get("file") or "").replace("\\", "/").strip()
+            if not source_file:
+                continue
+            definitions = _compile_command_definitions(entry)
+            if definitions:
+                contexts.append({"file_name": source_file, "definitions": definitions})
+    return contexts
+
+
+def _project_preprocessor_definitions(project_files: list[dict[str, str]]) -> dict[str, str]:
+    definitions: dict[str, str] = {}
+    for project_file in project_files:
+        file_name = str(project_file.get("file_name") or "").replace("\\", "/")
+        if Path(file_name).name.lower() != "cmakelists.txt":
+            continue
+        definitions.update(_cmake_preprocessor_definitions(str(project_file.get("content") or "")))
+    return definitions
+
+
+def _project_overlay_preprocessor_definitions(dependency_scan: dict[str, Any]) -> dict[str, str]:
+    values = dependency_scan.get("project_preprocessor_definitions") or {}
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(name): str(value)[:80]
+        for name, value in values.items()
+        if re.fullmatch(r"[A-Za-z_]\w*", str(name))
+    }
+
+
+def _cmake_preprocessor_definitions(content: str) -> dict[str, str]:
+    definitions: dict[str, str] = {}
+    clean_content = _strip_cmake_comments(content)
+    for command, body in _cmake_command_bodies(clean_content):
+        command_name = command.casefold()
+        tokens = _cmake_tokens(body)
+        if command_name == "add_definitions":
+            definitions.update(_definition_tokens(tokens, require_prefix=True))
+        elif command_name == "add_compile_definitions":
+            definitions.update(_definition_tokens(tokens, require_prefix=False))
+        elif command_name == "target_compile_definitions":
+            scoped_tokens = [token for token in tokens[1:] if token.upper() not in {"PRIVATE", "PUBLIC", "INTERFACE"}]
+            definitions.update(_definition_tokens(scoped_tokens, require_prefix=False))
+    return definitions
+
+
+def _strip_cmake_comments(content: str) -> str:
+    lines: list[str] = []
+    for line in content.splitlines():
+        in_quote = False
+        escaped = False
+        end = len(line)
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                in_quote = not in_quote
+                continue
+            if char == "#" and not in_quote:
+                end = index
+                break
+        lines.append(line[:end])
+    return "\n".join(lines)
+
+
+def _cmake_command_bodies(content: str) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    command_pattern = re.compile(r"\b(?P<name>add_definitions|add_compile_definitions|target_compile_definitions)\s*\(", re.IGNORECASE)
+    for match in command_pattern.finditer(content):
+        opening = content.find("(", match.start())
+        closing = _matching_text_parenthesis(content, opening)
+        if closing is None:
+            continue
+        result.append((match.group("name"), content[opening + 1 : closing]))
+    return result
+
+
+def _matching_text_parenthesis(content: str, opening: int) -> int | None:
+    depth = 0
+    in_quote = False
+    escaped = False
+    for index in range(opening, len(content)):
+        char = content[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_quote = not in_quote
+            continue
+        if in_quote:
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _cmake_tokens(body: str) -> list[str]:
+    normalized = body.replace(";", " ")
+    try:
+        return shlex.split(normalized)
+    except ValueError:
+        return normalized.split()
+
+
+def _definition_tokens(tokens: list[str], *, require_prefix: bool) -> dict[str, str]:
+    definitions: dict[str, str] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        value = ""
+        if token in {"-D", "/D"} and index + 1 < len(tokens):
+            value = tokens[index + 1]
+            index += 2
+        else:
+            value = token
+            index += 1
+        parsed = _definition_token(value, require_prefix=require_prefix)
+        if parsed is not None:
+            name, definition_value = parsed
+            definitions[name] = definition_value
+    return definitions
+
+
+def _compile_definitions_for_file(file_name: str, contexts: list[dict[str, Any]]) -> dict[str, str]:
+    normalized = file_name.replace("\\", "/").strip()
+    matches: list[dict[str, Any]] = []
+    for context in contexts:
+        candidate = str(context.get("file_name") or "").replace("\\", "/").strip()
+        if (
+            normalized == candidate
+            or candidate.endswith("/" + normalized)
+            or normalized.endswith("/" + candidate)
+        ):
+            matches.append(context)
+    if not matches:
+        return {}
+    best = max(matches, key=lambda item: len(str(item.get("file_name") or "")))
+    return dict(best.get("definitions") or {})
+
+
+def _compile_command_definitions(entry: dict[str, Any]) -> dict[str, str]:
+    arguments = entry.get("arguments")
+    if isinstance(arguments, list):
+        tokens = [str(item) for item in arguments]
+    else:
+        command = str(entry.get("command") or "")
+        if not command:
+            return {}
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+    definitions: dict[str, str] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        value = ""
+        if token in {"-D", "/D"} and index + 1 < len(tokens):
+            value = tokens[index + 1]
+            index += 2
+        elif token.startswith("-D") and len(token) > 2:
+            value = token[2:]
+            index += 1
+        elif token.startswith("/D") and len(token) > 2:
+            value = token[2:]
+            index += 1
+        else:
+            index += 1
+        if value:
+            parsed = _definition_token(value, require_prefix=False)
+            if parsed is not None:
+                name, definition_value = parsed
+                definitions[name] = definition_value
+    return definitions
+
+
+def _definition_token(value: str, *, require_prefix: bool) -> tuple[str, str] | None:
+    token = value.strip().strip('"').strip("'")
+    if token.startswith("-D") or token.startswith("/D"):
+        token = token[2:]
+    elif require_prefix:
+        return None
+    if not token or token.startswith(("$", "<", "${")):
+        return None
+    name, _, definition_value = token.partition("=")
+    if not re.fullmatch(r"[A-Za-z_]\w*", name):
+        return None
+    return name, definition_value
+
+
 def _bundled_semgrep_path() -> Path | None:
     candidates: list[Path] = []
-    executable = Path(sys.executable).resolve()
+    raw_executable = Path(sys.executable)
+    candidates.extend(
+        [
+            raw_executable.parent / "semgrep",
+            raw_executable.parent / "semgrep.exe",
+        ]
+    )
+    executable = raw_executable.resolve()
     executable_parent = executable.parent
     candidates.extend(
         [
@@ -681,7 +1061,7 @@ def _heuristic_findings(
         sources = _matching_lines(lines, SOURCE_PATTERNS)
         sinks = _matching_sinks(lines)
         snippet_hits = _record_snippet_hits(lines, records)
-        ast = _ast_summary(file_name, code_file["content"])
+        ast = _ast_summary(file_name, code_file["content"], language_hint=code_file.get("language_hint"))
         findings.extend(
             _finance_fallback_findings(
                 lines,
@@ -1054,8 +1434,8 @@ def _conditions_between(lines: list[CodeLine], start: int, end: int) -> list[dic
     return result
 
 
-def _ast_summary(file_name: str, content: str) -> dict[str, Any]:
-    analysis = analyze_source_structure(file_name, content)
+def _ast_summary(file_name: str, content: str, *, language_hint: str | None = None) -> dict[str, Any]:
+    analysis = analyze_source_structure(file_name, content, language_hint=language_hint)
     # Preserve the legacy keys consumed by existing Java reports.
     analysis["classes"] = list(analysis.get("types") or [])
     analysis["methods"] = list(analysis.get("functions") or [])
@@ -1491,6 +1871,12 @@ def _max_findings() -> int:
     except ValueError:
         configured = 500
     return max(1, min(configured, 5000))
+
+
+def _is_review_finding(finding: dict[str, Any]) -> bool:
+    profile = str(finding.get("rule_profile") or "standard").lower()
+    confidence = str(finding.get("confidence") or "medium").lower()
+    return profile == "review" or (confidence == "low" and profile != "recall")
 
 
 def _enrich_code_findings(findings: list[dict[str, Any]], code_files: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -2419,7 +2805,11 @@ def _parse_semgrep_json(
         source = next((item for item in dataflow_path if item.get("kind") == "source"), {})
         scenario = str(metadata.get("scenario") or _scenario_from_rule(rule_id))
         record = _best_record_for_scenario(records, dependency_scan, scenario, snippet)
-        ast = _ast_summary(file_name, _source_content(code_files, file_name))
+        ast = _ast_summary(
+            file_name,
+            _source_content(code_files, file_name),
+            language_hint=_source_language_hint(code_files, file_name),
+        )
         ast["rule"] = rule_id
         ast["metavariables"] = _semgrep_metavariables(extra.get("metavars") or {})
         findings.append(
@@ -2491,6 +2881,14 @@ def _source_content(code_files: list[dict[str, str]], file_name: str) -> str:
     return ""
 
 
+def _source_language_hint(code_files: list[dict[str, str]], file_name: str) -> str | None:
+    for code_file in code_files:
+        candidate = str(code_file.get("file_name") or "")
+        if candidate == file_name or candidate.endswith(file_name) or file_name.endswith(candidate):
+            return str(code_file.get("language_hint") or "") or None
+    return None
+
+
 def _source_line(code_files: list[dict[str, str]], file_name: str, line: int) -> str:
     lines = _source_content(code_files, file_name).splitlines()
     return lines[line - 1].strip() if 0 < line <= len(lines) else ""
@@ -2529,6 +2927,7 @@ def _add_tree_sitter_controls(
         _source_content(code_files, file_name),
         int(source.get("line") or 0),
         int(sink.get("line") or 0),
+        language_hint=_source_language_hint(code_files, file_name),
     )
     if not controls:
         return path

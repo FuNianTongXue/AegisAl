@@ -16,5 +16,4 @@ RUN mkdir -p /app/data
 
 EXPOSE 18081
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18081"]
-
+CMD ["uvicorn", "app.api.routes.application:app", "--host", "0.0.0.0", "--port", "18081"]

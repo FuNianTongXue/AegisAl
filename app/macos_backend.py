@@ -7,7 +7,7 @@ import time
 
 import uvicorn
 
-from app.main import app
+from app.api.routes.application import app
 
 
 def main() -> None:

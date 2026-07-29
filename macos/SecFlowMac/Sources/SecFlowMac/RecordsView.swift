@@ -2,14 +2,22 @@ import SwiftUI
 
 struct RecordsView: View {
     @EnvironmentObject private var model: AppModel
+    private let showsHeader: Bool
+
     @State private var query = ""
     @State private var selectedLogID: String?
+
+    init(showsHeader: Bool = true) {
+        self.showsHeader = showsHeader
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                PageHeader(model.uiText("查询结果"), subtitle: model.uiText("仅保存和展示 API 查询日志，不保存漏洞明细数据")) {
-                    StatusBadge(text: model.uiText("%d 条日志", logs.count), tone: .info)
+                if showsHeader {
+                    PageHeader(model.uiText("日志管理"), subtitle: model.uiText("仅保存和展示 API 查询日志，不保存漏洞明细数据")) {
+                        StatusBadge(text: model.uiText("%d 条日志", logs.count), tone: .info)
+                    }
                 }
 
                 Panel {
@@ -110,13 +118,13 @@ private struct QueryLogTable: View {
             if logs.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "clock.badge.questionmark")
-                        .font(.title2)
+                        .font(AppTypography.title2)
                         .foregroundStyle(AppPalette.textSubtle)
                     Text(model.uiText("暂无查询日志"))
-                        .font(.headline)
+                        .font(AppTypography.headline)
                         .foregroundStyle(AppPalette.text)
-                    Text(model.uiText("通过知识图谱或智能问答触发漏洞查询后，这里只记录查询日志。"))
-                        .font(.callout)
+                    Text(model.uiText("通过智能问答触发漏洞查询后，这里只记录查询日志。"))
+                        .font(AppTypography.callout)
                         .foregroundStyle(AppPalette.textMuted)
                 }
                 .frame(maxWidth: .infinity)
@@ -142,7 +150,7 @@ private struct QueryLogTable: View {
 
     private func header(_ text: String, width: CGFloat? = nil) -> some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .font(AppTypography.caption.weight(.semibold))
             .foregroundStyle(AppPalette.textMuted)
             .frame(width: width, alignment: .leading)
             .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
@@ -158,11 +166,11 @@ private struct QueryLogRow: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(log.query)
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                     .lineLimit(1)
                 Text(sourceSummary)
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
                     .lineLimit(1)
             }
@@ -170,15 +178,15 @@ private struct QueryLogRow: View {
             StatusBadge(text: statusText, tone: StatusTone.operation(log.status))
                 .frame(width: 82, alignment: .leading)
             Text("\(log.records.count)")
-                .font(.caption.monospacedDigit().weight(.semibold))
+                .font(AppTypography.caption.monospacedDigit().weight(.semibold))
                 .foregroundStyle(AppPalette.text)
                 .frame(width: 70, alignment: .leading)
             Text(model.uiText("%d 个节点", log.graph.nodeCount))
-                .font(.caption.monospacedDigit())
+                .font(AppTypography.caption.monospacedDigit())
                 .foregroundStyle(AppPalette.textMuted)
                 .frame(width: 88, alignment: .leading)
             Text(log.generatedAt)
-                .font(.caption.monospacedDigit())
+                .font(AppTypography.caption.monospacedDigit())
                 .foregroundStyle(AppPalette.textMuted)
                 .lineLimit(1)
                 .frame(width: 150, alignment: .leading)
@@ -208,9 +216,9 @@ private struct QueryLogDetail: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(model.uiText("查询日志详情"))
-                        .font(.headline)
+                        .font(AppTypography.headline)
                     Text(log.query)
-                        .font(.title3.weight(.semibold))
+                        .font(AppTypography.title3.weight(.semibold))
                         .foregroundStyle(AppPalette.text)
                 }
                 Spacer()
@@ -258,12 +266,12 @@ private struct QueryLogDetail: View {
                     VStack(alignment: .leading, spacing: 14) {
                         if log.graph.nodes.isEmpty {
                             Text(model.uiText("暂无图谱节点"))
-                                .font(.callout)
+                                .font(AppTypography.callout)
                                 .foregroundStyle(AppPalette.textMuted)
                         } else {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(model.uiText("图谱节点"))
-                                    .font(.caption.weight(.semibold))
+                                    .font(AppTypography.caption.weight(.semibold))
                                     .foregroundStyle(AppPalette.textMuted)
                                 FlowLayout(spacing: 8, lineSpacing: 8) {
                                     ForEach(log.graph.nodes) { node in
@@ -276,7 +284,7 @@ private struct QueryLogDetail: View {
                         if !log.graph.edges.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(model.uiText("图谱关系"))
-                                    .font(.caption.weight(.semibold))
+                                    .font(AppTypography.caption.weight(.semibold))
                                     .foregroundStyle(AppPalette.textMuted)
                                 VStack(spacing: 7) {
                                     ForEach(log.graph.edges) { edge in
@@ -341,10 +349,10 @@ private struct LogFact: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.caption)
+                .font(AppTypography.caption)
                 .foregroundStyle(AppPalette.textMuted)
             Text(value)
-                .font(.title3.monospacedDigit().weight(.bold))
+                .font(AppTypography.title3.monospacedDigit().weight(.bold))
                 .foregroundStyle(AppPalette.text)
         }
         .padding(12)
@@ -375,17 +383,17 @@ private struct LogDisclosureCard<Content: View>: View {
                             .fill(accent.opacity(0.12))
                             .frame(width: 34, height: 34)
                         Image(systemName: icon)
-                            .font(.callout.weight(.semibold))
+                            .font(AppTypography.callout.weight(.semibold))
                             .foregroundStyle(accent)
                     }
 
                     VStack(alignment: .leading, spacing: 5) {
                         Text(title)
-                            .font(.callout.weight(.semibold))
+                            .font(AppTypography.callout.weight(.semibold))
                             .foregroundStyle(AppPalette.text)
                         if !isExpanded {
                             Text(preview)
-                                .font(.caption)
+                                .font(AppTypography.caption)
                                 .foregroundStyle(AppPalette.textMuted)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -394,7 +402,7 @@ private struct LogDisclosureCard<Content: View>: View {
 
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.down")
-                        .font(.caption.weight(.bold))
+                        .font(AppTypography.caption.weight(.bold))
                         .foregroundStyle(AppPalette.textSubtle)
                         .rotationEffect(.degrees(isExpanded ? 180 : 0))
                         .padding(.top, 8)
@@ -427,11 +435,11 @@ private struct LogInfoRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             Text(title)
-                .font(.caption.weight(.semibold))
+                .font(AppTypography.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.textMuted)
                 .frame(width: 74, alignment: .leading)
             Text(value)
-                .font(.callout)
+                .font(AppTypography.callout)
                 .foregroundStyle(AppPalette.text)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -450,14 +458,14 @@ private struct GraphNodeToken: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: logNodeIcon(node.type))
-                .font(.caption2.weight(.semibold))
+                .font(AppTypography.caption2.weight(.semibold))
                 .foregroundStyle(logNodeColor(node.type))
             Text(node.label)
-                .font(.caption.weight(.semibold))
+                .font(AppTypography.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.text)
                 .lineLimit(1)
             Text(logNodeTypeLabel(node.type, language: model.appLanguage))
-                .font(.caption2)
+                .font(AppTypography.caption2)
                 .foregroundStyle(AppPalette.textMuted)
         }
         .padding(.horizontal, 9)
@@ -481,19 +489,19 @@ private struct GraphEdgeSummary: View {
             Text(nodeLabel(for: edge.source))
                 .lineLimit(1)
             Image(systemName: "arrow.right")
-                .font(.caption2.weight(.bold))
+                .font(AppTypography.caption2.weight(.bold))
                 .foregroundStyle(AppPalette.textSubtle)
             Text(localizedUI(edge.label.isEmpty ? edge.type : edge.label, language: model.appLanguage))
-                .font(.caption.weight(.semibold))
+                .font(AppTypography.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.primary)
                 .lineLimit(1)
             Image(systemName: "arrow.right")
-                .font(.caption2.weight(.bold))
+                .font(AppTypography.caption2.weight(.bold))
                 .foregroundStyle(AppPalette.textSubtle)
             Text(nodeLabel(for: edge.target))
                 .lineLimit(1)
         }
-        .font(.caption)
+        .font(AppTypography.caption)
         .foregroundStyle(AppPalette.text)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 11)

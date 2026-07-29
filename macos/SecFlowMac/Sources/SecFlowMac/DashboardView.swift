@@ -3,7 +3,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
-    let openRecords: () -> Void
+    @EnvironmentObject private var informationPanel: InformationPanelPresenter
 
     @State private var selectedTimePreset: DashboardTimePreset = .all
     @State private var isTimePresetPopoverPresented = false
@@ -15,38 +15,51 @@ struct DashboardView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 16) {
                 dashboardHeader
-                dashboardCharts
+                advancedStats
                 metricsGrid
                 dashboardContent
             }
-            .padding(28)
-            .frame(maxWidth: 1280)
+            .padding(.horizontal, 24)
+            .padding(.top, 46)
+            .padding(.bottom, 24)
+            .frame(maxWidth: 1240)
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(AppPalette.page)
         .foregroundStyle(AppPalette.text)
+        .appTypography()
         .textSelection(.enabled)
         .onAppear { synchronizeTimeFilter() }
         .onChange(of: model.dashboardRange) { _, _ in synchronizeTimeFilter() }
     }
 
     private var dashboardHeader: some View {
-        HStack(alignment: .center, spacing: 20) {
-            VStack(alignment: .leading, spacing: 7) {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(model.text(.navOverview))
-                    .font(.system(size: 28, weight: .bold))
+                    .font(AppTypography.pageTitle)
                     .foregroundStyle(AppPalette.text)
                 Text(dashboardScopeText)
-                    .font(.callout)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
-                Label(lastUpdatedText, systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(AppPalette.textSubtle)
-                Label(catalogStatusText, systemImage: catalogIsReady ? "externaldrive.fill.badge.checkmark" : "externaldrive.badge.timemachine")
-                    .font(.caption)
+                Label(
+                    model.uiText("情报数据：CVE/GHSA 等已收录漏洞，不包含代码扫描结果"),
+                    systemImage: "antenna.radiowaves.left.and.right"
+                )
+                .font(AppTypography.caption)
+                .foregroundStyle(AppPalette.primaryStrong)
+                HStack(spacing: 12) {
+                    Label(lastUpdatedText, systemImage: "clock")
+                    Label(
+                        catalogStatusText,
+                        systemImage: catalogIsReady ? "externaldrive.fill.badge.checkmark" : "externaldrive.badge.timemachine"
+                    )
                     .foregroundStyle(catalogIsReady ? AppPalette.success : AppPalette.primary)
+                }
+                .font(AppTypography.caption)
+                .foregroundStyle(AppPalette.textSubtle)
             }
 
             Spacer(minLength: 12)
@@ -66,24 +79,25 @@ struct DashboardView: View {
                             .controlSize(.small)
                     } else {
                         Image(systemName: "calendar")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(AppTypography.system(size: 13, weight: .semibold))
                             .foregroundStyle(AppPalette.textMuted)
                     }
 
                     Text(selectedTimePreset.title(model.appLanguage))
-                        .font(.callout.weight(.medium))
+                        .font(AppTypography.bodyMedium)
                         .foregroundStyle(AppPalette.text)
                         .lineLimit(1)
 
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AppTypography.system(size: 9, weight: .bold))
                         .foregroundStyle(AppPalette.textSubtle)
                 }
                 .padding(.horizontal, 12)
-                .frame(height: 36)
-                .liquidGlassSurface(cornerRadius: 8)
+                .frame(height: 32)
+                .background(AppPalette.card)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(AppPalette.border.opacity(0.86))
                 }
             }
@@ -95,20 +109,21 @@ struct DashboardView: View {
             .help(model.text(.dateRangeHelp))
 
             Button {
-                model.statusMessage = model.uiText("暂无新的安全提醒")
+                informationPanel.show(model: model)
             } label: {
-                Image(systemName: "bell")
-                    .font(.system(size: 14, weight: .semibold))
+                Image(systemName: "newspaper")
+                    .font(AppTypography.system(size: 14, weight: .semibold))
                     .foregroundStyle(AppPalette.textMuted)
-                    .frame(width: 36, height: 36)
-                    .liquidGlassSurface(cornerRadius: 8)
+                    .frame(width: 32, height: 32)
+                    .background(AppPalette.card)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
                             .stroke(AppPalette.border.opacity(0.86))
                     }
             }
             .buttonStyle(.plain)
-            .help(model.uiText("安全提醒"))
+            .help(model.text(.navInformation))
         }
     }
 
@@ -121,11 +136,11 @@ struct DashboardView: View {
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: selectedTimePreset == preset ? "checkmark" : preset.systemImage)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(AppTypography.system(size: 12, weight: .semibold))
                             .foregroundStyle(selectedTimePreset == preset ? AppPalette.primary : AppPalette.textMuted)
                             .frame(width: 16)
                         Text(preset.title(model.appLanguage))
-                            .font(.callout.weight(.medium))
+                            .font(AppTypography.bodyMedium)
                             .foregroundStyle(AppPalette.text)
                         Spacer(minLength: 8)
                     }
@@ -148,66 +163,87 @@ struct DashboardView: View {
 
     private var metricsGrid: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 190, maximum: 260), spacing: 16)],
+            columns: Array(repeating: GridItem(.flexible(minimum: 150), spacing: 12), count: 4),
             alignment: .leading,
-            spacing: 16
+            spacing: 12
         ) {
-            DashboardMetricCard(
-                label: model.uiText("漏洞总数"),
-                value: vulnerabilityCount,
-                icon: "shield.lefthalf.filled",
-                color: AppPalette.primary,
-                detail: model.uiText("按漏洞编号聚合去重")
-            )
             DashboardMetricCard(
                 label: model.uiText("严重漏洞"),
                 value: severityCount("CRITICAL"),
-                icon: "exclamationmark.octagon.fill",
                 color: AppPalette.danger,
-                detail: shareText(for: "CRITICAL")
+                detail: sharePercentageText(for: "CRITICAL")
             )
             DashboardMetricCard(
                 label: model.uiText("高危漏洞"),
                 value: severityCount("HIGH"),
-                icon: "exclamationmark.triangle.fill",
                 color: AppPalette.warning,
-                detail: shareText(for: "HIGH")
+                detail: sharePercentageText(for: "HIGH")
             )
             DashboardMetricCard(
                 label: model.uiText("中危漏洞"),
                 value: severityCount("MEDIUM"),
-                icon: "exclamationmark.circle.fill",
                 color: AppPalette.medium,
-                detail: shareText(for: "MEDIUM")
+                detail: sharePercentageText(for: "MEDIUM")
             )
             DashboardMetricCard(
                 label: model.uiText("低危漏洞"),
                 value: severityCount("LOW"),
-                icon: "info.circle.fill",
                 color: AppPalette.success,
-                detail: shareText(for: "LOW")
+                detail: sharePercentageText(for: "LOW")
             )
         }
     }
 
-    private var dashboardCharts: some View {
-        DashboardRiskChartsPanel(
-            total: vulnerabilityCount,
-            severity: model.dashboard?.severity ?? [:]
-        )
+    private var advancedStats: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 12) {
+                DashboardRiskOverviewPanel(
+                    total: vulnerabilityCount,
+                    metrics: severityMetrics
+                )
+                .frame(minWidth: 520, maxWidth: .infinity, minHeight: 326)
+
+                VStack(spacing: 12) {
+                    DashboardPrimaryGoalCard(
+                        controlPercentage: criticalControlPercentage,
+                        criticalCount: severityCount("CRITICAL")
+                    )
+                    DashboardHighRiskSummaryCard(
+                        highRiskCount: severityCount("CRITICAL") + severityCount("HIGH"),
+                        total: vulnerabilityCount
+                    )
+                }
+                .frame(width: 318)
+            }
+
+            VStack(spacing: 12) {
+                DashboardRiskOverviewPanel(total: vulnerabilityCount, metrics: severityMetrics)
+                    .frame(minHeight: 326)
+                HStack(spacing: 12) {
+                    DashboardPrimaryGoalCard(
+                        controlPercentage: criticalControlPercentage,
+                        criticalCount: severityCount("CRITICAL")
+                    )
+                    DashboardHighRiskSummaryCard(
+                        highRiskCount: severityCount("CRITICAL") + severityCount("HIGH"),
+                        total: vulnerabilityCount
+                    )
+                }
+            }
+        }
     }
 
     private var dashboardContent: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .top, spacing: 16) {
-                RecentVulnerabilityCard(records: recentRecords, openRecords: openRecords)
+                RecentVulnerabilityCard(records: recentRecords)
                     .frame(minWidth: 560)
                 quickStatsColumn
                     .frame(width: 320)
             }
 
             VStack(spacing: 16) {
-                RecentVulnerabilityCard(records: recentRecords, openRecords: openRecords)
+                RecentVulnerabilityCard(records: recentRecords)
                 quickStatsColumn
             }
         }
@@ -239,9 +275,9 @@ struct DashboardView: View {
               let start = model.dashboard?.rangeStart,
               let end = model.dashboard?.rangeEnd
         else {
-            return model.uiText("累计漏洞风险态势，后台持续增量更新")
+            return model.uiText("累计漏洞情报风险态势，后台持续增量更新")
         }
-        return model.uiText("%@ 至 %@ 发布的漏洞风险态势", start, end)
+        return model.uiText("%@ 至 %@ 发布的漏洞情报风险态势", start, end)
     }
 
     private var catalogIsReady: Bool {
@@ -250,10 +286,12 @@ struct DashboardView: View {
 
     private var catalogStatusText: String {
         if catalogIsReady {
-            return model.uiText("本地全量目录已就绪，共 %d 条", model.dashboard?.catalogCount ?? vulnerabilityCount)
+            return model.uiText("本地漏洞情报目录已就绪，共 %d 条", model.dashboard?.catalogCount ?? vulnerabilityCount)
         }
         let progress = model.dashboard?.catalogProgress ?? 0
-        return progress > 0 ? model.uiText("正在构建本地全量目录 %d%%", progress) : model.uiText("正在准备本地全量目录")
+        return progress > 0
+            ? model.uiText("正在构建本地漏洞情报目录 %d%%", progress)
+            : model.uiText("正在准备本地漏洞情报目录")
     }
 
     private func synchronizeTimeFilter() {
@@ -276,10 +314,31 @@ struct DashboardView: View {
         model.dashboard?.severity[key] ?? 0
     }
 
+    private var severityMetrics: [DashboardSeverityMetric] {
+        [
+            DashboardSeverityMetric(key: "CRITICAL", label: model.uiText("严重"), value: severityCount("CRITICAL"), color: AppPalette.danger),
+            DashboardSeverityMetric(key: "HIGH", label: model.uiText("高危"), value: severityCount("HIGH"), color: AppPalette.warning),
+            DashboardSeverityMetric(key: "MEDIUM", label: model.uiText("中危"), value: severityCount("MEDIUM"), color: AppPalette.medium),
+            DashboardSeverityMetric(key: "LOW", label: model.uiText("低危"), value: severityCount("LOW"), color: AppPalette.success),
+        ]
+    }
+
+    private var criticalControlPercentage: Int {
+        guard vulnerabilityCount > 0 else { return 100 }
+        let criticalShare = Double(severityCount("CRITICAL")) / Double(vulnerabilityCount)
+        return max(0, min(100, Int(((1 - criticalShare) * 100).rounded())))
+    }
+
     private func shareText(for key: String) -> String {
         guard vulnerabilityCount > 0 else { return model.uiText("占全部漏洞 0%") }
         let percentage = Int((Double(severityCount(key)) / Double(vulnerabilityCount) * 100).rounded())
         return model.uiText("占全部漏洞 %d%%", percentage)
+    }
+
+    private func sharePercentageText(for key: String) -> String {
+        guard vulnerabilityCount > 0 else { return "0%" }
+        let percentage = Double(severityCount(key)) / Double(vulnerabilityCount) * 100
+        return String(format: "%.1f%%", percentage)
     }
 }
 
@@ -367,93 +426,284 @@ private enum DashboardTimePreset: String, Identifiable, Hashable {
     }
 }
 
+private struct DashboardRiskOverviewPanel: View {
+    @EnvironmentObject private var model: AppModel
+    let total: Int
+    let metrics: [DashboardSeverityMetric]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.uiText("漏洞情报风险态势"))
+                        .font(AppTypography.sectionTitle)
+                    Text(model.uiText("按已收录漏洞情报的严重等级统计"))
+                        .font(AppTypography.label)
+                        .foregroundStyle(AppPalette.textSubtle)
+                }
+
+                Spacer(minLength: 12)
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(total.formatted())
+                        .font(AppTypography.sectionTitle.monospacedDigit())
+                    Text(model.uiText("漏洞总数"))
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppPalette.textMuted)
+                }
+            }
+
+            DashboardRiskTrendChart(metrics: metrics)
+                .frame(maxWidth: .infinity, minHeight: 226)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, minHeight: 326, alignment: .topLeading)
+        .background(AppPalette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(AppPalette.border)
+        }
+    }
+}
+
+private struct DashboardRiskTrendChart: View {
+    let metrics: [DashboardSeverityMetric]
+
+    var body: some View {
+        VStack(spacing: 10) {
+            GeometryReader { geometry in
+                let points = chartPoints(in: geometry.size)
+
+                ZStack {
+                    ForEach(0..<4, id: \.self) { index in
+                        Path { path in
+                            let y = geometry.size.height * CGFloat(index) / 3
+                            path.move(to: CGPoint(x: 0, y: y))
+                            path.addLine(to: CGPoint(x: geometry.size.width, y: y))
+                        }
+                        .stroke(AppPalette.border.opacity(0.62), style: StrokeStyle(lineWidth: 1, dash: [2, 4]))
+                    }
+
+                    if let first = points.first, let last = points.last {
+                        Path { path in
+                            path.move(to: CGPoint(x: first.x, y: geometry.size.height))
+                            points.forEach { path.addLine(to: $0) }
+                            path.addLine(to: CGPoint(x: last.x, y: geometry.size.height))
+                            path.closeSubpath()
+                        }
+                        .fill(
+                            LinearGradient(
+                                colors: [AppPalette.primary.opacity(0.18), AppPalette.primary.opacity(0.01)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+
+                        Path { path in
+                            path.move(to: first)
+                            for point in points.dropFirst() {
+                                path.addLine(to: point)
+                            }
+                        }
+                        .stroke(AppPalette.primary, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+                        ForEach(Array(points.enumerated()), id: \.offset) { index, point in
+                            Circle()
+                                .fill(metrics[index].color)
+                                .frame(width: 8, height: 8)
+                                .overlay(Circle().stroke(AppPalette.card, lineWidth: 2))
+                                .position(point)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 0) {
+                ForEach(metrics) { metric in
+                    VStack(spacing: 3) {
+                        Text(metric.label)
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppPalette.textMuted)
+                        Text(metric.value.formatted())
+                            .font(AppTypography.label.monospacedDigit())
+                            .foregroundStyle(metric.color)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
+    private func chartPoints(in size: CGSize) -> [CGPoint] {
+        guard !metrics.isEmpty else { return [] }
+        let maximum = max(metrics.map(\.value).max() ?? 0, 1)
+        let horizontalInset: CGFloat = 18
+        let verticalInset: CGFloat = 16
+        let usableWidth = max(size.width - horizontalInset * 2, 1)
+        let usableHeight = max(size.height - verticalInset * 2, 1)
+
+        return metrics.enumerated().map { index, metric in
+            let xFraction = metrics.count == 1 ? 0.5 : CGFloat(index) / CGFloat(metrics.count - 1)
+            let yFraction = CGFloat(metric.value) / CGFloat(maximum)
+            return CGPoint(
+                x: horizontalInset + usableWidth * xFraction,
+                y: verticalInset + usableHeight * (1 - yFraction)
+            )
+        }
+    }
+}
+
+private struct DashboardPrimaryGoalCard: View {
+    @EnvironmentObject private var model: AppModel
+    let controlPercentage: Int
+    let criticalCount: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(model.uiText("情报关注指标"))
+                .font(AppTypography.label)
+                .foregroundStyle(Color.white.opacity(0.55))
+            Text(model.uiText("控制严重级漏洞情报占比"))
+                .font(AppTypography.sectionTitle)
+                .foregroundStyle(Color.white)
+                .padding(.top, 8)
+
+            Spacer(minLength: 12)
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(controlPercentage)%")
+                    .font(AppTypography.system(size: 34, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.white)
+                Spacer()
+                Text(model.uiText("目标：95%"))
+                    .font(AppTypography.caption)
+                    .foregroundStyle(Color.white.opacity(0.62))
+            }
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.15))
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: geometry.size.width * CGFloat(controlPercentage) / 100)
+                }
+            }
+            .frame(height: 5)
+            .padding(.top, 8)
+
+            Text(model.uiText("当前严重级漏洞情报 %d 条", criticalCount))
+                .font(AppTypography.caption)
+                .foregroundStyle(Color.white.opacity(0.55))
+                .padding(.top, 8)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, minHeight: 160, alignment: .topLeading)
+        .background(AppPalette.brandNavy)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct DashboardHighRiskSummaryCard: View {
+    @EnvironmentObject private var model: AppModel
+    let highRiskCount: Int
+    let total: Int
+
+    private var percentage: Int {
+        guard total > 0 else { return 0 }
+        return Int((Double(highRiskCount) / Double(total) * 100).rounded())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.shield")
+                    .font(AppTypography.system(size: 16, weight: .medium))
+                    .foregroundStyle(AppPalette.text)
+                Text(model.uiText("高危漏洞情报摘要"))
+                    .font(AppTypography.sectionTitle)
+            }
+
+            Text(model.uiText("已收录严重与高危漏洞情报共 %d 条，占全部情报漏洞的 %d%%。", highRiskCount, percentage))
+                .font(AppTypography.body)
+                .foregroundStyle(AppPalette.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, minHeight: 154, alignment: .topLeading)
+        .background(AppPalette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(AppPalette.border)
+        }
+    }
+}
+
 private struct DashboardMetricCard: View {
     let label: String
     let value: Int
-    let icon: String
     let color: Color
     let detail: String
 
-    @State private var isHovered = false
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(color)
-                    .frame(width: 38, height: 38)
-                    .background(color.opacity(0.11))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        VStack(alignment: .leading, spacing: 10) {
+            Text(label.uppercased())
+                .font(AppTypography.label)
+                .foregroundStyle(AppPalette.textSubtle)
+                .lineLimit(1)
 
-                Spacer()
-
-                Image(systemName: "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(color.opacity(0.75))
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(label)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(AppPalette.textMuted)
-                    .lineLimit(1)
-
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(value.formatted())
-                    .font(.system(size: 30, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(AppTypography.metric.monospacedDigit())
                     .foregroundStyle(AppPalette.text)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.62)
+                    .minimumScaleFactor(0.72)
 
+                Spacer(minLength: 4)
                 Text(detail)
-                    .font(.caption)
+                    .font(AppTypography.label.monospacedDigit())
                     .foregroundStyle(color)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
             }
         }
         .padding(18)
-        .frame(maxWidth: .infinity, minHeight: 154, alignment: .leading)
-        .liquidGlassSurface(cornerRadius: 8, tint: color)
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
+        .background(AppPalette.card)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isHovered ? color.opacity(0.32) : AppPalette.border.opacity(0.82))
+                .stroke(AppPalette.border)
         }
-        .shadow(color: color.opacity(isHovered ? 0.13 : 0.055), radius: isHovered ? 16 : 11, y: 5)
-        .offset(y: isHovered ? -1 : 0)
-        .animation(.easeOut(duration: 0.16), value: isHovered)
-        .onHover { isHovered = $0 }
     }
 }
 
 private struct RecentVulnerabilityCard: View {
     @EnvironmentObject private var model: AppModel
     let records: [IntelligenceRecord]
-    let openRecords: () -> Void
 
     var body: some View {
         Panel {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(model.uiText("最新漏洞动态"))
-                            .font(.headline)
-                        Text(model.uiText("最近一次批计算返回的漏洞记录"))
-                            .font(.caption)
+                        Text(model.uiText("最新漏洞情报"))
+                            .font(AppTypography.headline)
+                        Text(model.uiText("最近一次情报目录更新收录的漏洞记录"))
+                            .font(AppTypography.caption)
                             .foregroundStyle(AppPalette.textMuted)
                     }
                     Spacer()
-                    Button(model.uiText("查看查询日志"), action: openRecords)
-                        .buttonStyle(.plain)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(AppPalette.primary)
                 }
 
                 if records.isEmpty {
                     ContentUnavailableView(
-                        model.uiText("暂无漏洞数据"),
+                        model.uiText("暂无漏洞情报"),
                         systemImage: "shield.slash",
-                        description: Text(model.uiText("批计算完成后将在这里显示最新漏洞。"))
+                        description: Text(model.uiText("情报目录更新后将在这里显示最新漏洞。"))
                     )
                     .frame(minHeight: 310)
                 } else {
@@ -484,7 +734,7 @@ private struct VulnerabilityActivityRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: severityIcon(record.severity))
-                .font(.system(size: 15, weight: .semibold))
+                .font(AppTypography.system(size: 15, weight: .semibold))
                 .foregroundStyle(color)
                 .frame(width: 38, height: 38)
                 .background(color.opacity(0.10))
@@ -492,18 +742,18 @@ private struct VulnerabilityActivityRow: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(record.title.isEmpty ? model.uiText("未提供漏洞标题") : record.title)
-                    .font(.callout.weight(.medium))
+                    .font(AppTypography.callout.weight(.medium))
                     .foregroundStyle(AppPalette.text)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 HStack(spacing: 8) {
                     Text(record.id)
-                        .font(.caption.monospaced().weight(.semibold))
+                        .font(AppTypography.caption.monospaced().weight(.semibold))
                         .foregroundStyle(AppPalette.primary)
                     Text("·")
                         .foregroundStyle(AppPalette.textSubtle)
                     Text(model.uiText("发布于 %@", dashboardDate(record.publishedAt, language: model.appLanguage)))
-                        .font(.caption)
+                        .font(AppTypography.caption)
                         .foregroundStyle(AppPalette.textMuted)
                 }
                 .lineLimit(1)
@@ -562,9 +812,9 @@ private struct DashboardRiskChartsPanel: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(model.uiText("漏洞情报风险图表"))
-                            .font(.headline)
+                            .font(AppTypography.headline)
                         Text(model.uiText("按严重等级展示环形图与柱状图"))
-                            .font(.caption)
+                            .font(AppTypography.caption)
                             .foregroundStyle(AppPalette.textMuted)
                     }
                     Spacer()
@@ -572,7 +822,7 @@ private struct DashboardRiskChartsPanel: View {
                         Image(systemName: "chart.pie.fill")
                             .foregroundStyle(AppPalette.primary)
                         Text(total.formatted())
-                            .font(.callout.monospacedDigit().weight(.semibold))
+                            .font(AppTypography.callout.monospacedDigit().weight(.semibold))
                             .foregroundStyle(AppPalette.text)
                     }
                     .padding(.horizontal, 10)
@@ -650,12 +900,12 @@ private struct DashboardSeverityRing: View {
 
                 VStack(spacing: 2) {
                     Text(total.formatted())
-                        .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
+                        .font(AppTypography.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
                         .foregroundStyle(AppPalette.text)
                         .minimumScaleFactor(0.58)
                         .lineLimit(1)
                     Text(model.uiText("漏洞总数"))
-                        .font(.caption2.weight(.medium))
+                        .font(AppTypography.caption2.weight(.medium))
                         .foregroundStyle(AppPalette.textMuted)
                 }
                 .frame(width: 110)
@@ -669,11 +919,11 @@ private struct DashboardSeverityRing: View {
                             .fill(metric.color)
                             .frame(width: 8, height: 8)
                         Text(metric.label)
-                            .font(.caption.weight(.medium))
+                            .font(AppTypography.caption.weight(.medium))
                             .foregroundStyle(AppPalette.text)
                         Spacer(minLength: 4)
                         Text(metric.value.formatted())
-                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .font(AppTypography.caption.monospacedDigit().weight(.semibold))
                             .foregroundStyle(AppPalette.textMuted)
                     }
                 }
@@ -703,11 +953,11 @@ private struct DashboardSeverityBarChart: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text(model.uiText("风险柱状图"))
-                    .font(.callout.weight(.semibold))
+                    .font(AppTypography.callout.weight(.semibold))
                     .foregroundStyle(AppPalette.text)
                 Spacer()
                 Text(model.uiText("按漏洞数量排序"))
-                    .font(.caption)
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
             }
 
@@ -715,7 +965,7 @@ private struct DashboardSeverityBarChart: View {
                 ForEach(metrics) { metric in
                     VStack(spacing: 9) {
                         Text(metric.value.formatted())
-                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .font(AppTypography.caption.monospacedDigit().weight(.semibold))
                             .foregroundStyle(AppPalette.text)
 
                         GeometryReader { proxy in
@@ -744,7 +994,7 @@ private struct DashboardSeverityBarChart: View {
                                 .fill(metric.color)
                                 .frame(width: 7, height: 7)
                             Text(metric.label)
-                                .font(.caption.weight(.medium))
+                                .font(AppTypography.caption.weight(.medium))
                                 .foregroundStyle(AppPalette.textMuted)
                                 .lineLimit(1)
                         }
@@ -756,8 +1006,8 @@ private struct DashboardSeverityBarChart: View {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.up.right.circle.fill")
                     .foregroundStyle(AppPalette.primary)
-                Text(model.uiText("数据来自本地批计算快照，并随时间范围筛选实时更新"))
-                    .font(.caption)
+                Text(model.uiText("数据来自本地漏洞情报目录，不包含代码扫描结果，并随发布日期范围更新"))
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppPalette.textMuted)
                     .lineLimit(2)
                 Spacer(minLength: 0)
@@ -788,12 +1038,12 @@ private struct RiskProgressRow: View {
                         .fill(color)
                         .frame(width: 7, height: 7)
                     Text(label)
-                        .font(.callout)
+                        .font(AppTypography.callout)
                         .foregroundStyle(AppPalette.textMuted)
                 }
                 Spacer()
                 Text("\(value.formatted()) · \(Int((progress * 100).rounded()))%")
-                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .font(AppTypography.caption.monospacedDigit().weight(.semibold))
                     .foregroundStyle(AppPalette.text)
             }
             ProgressView(value: progress)
@@ -816,12 +1066,12 @@ private struct PriorityRiskCard: View {
     var body: some View {
         Panel {
             VStack(alignment: .leading, spacing: 14) {
-                Text(model.uiText("重点风险"))
-                    .font(.headline)
+                Text(model.uiText("重点漏洞情报"))
+                    .font(AppTypography.headline)
 
                 if priorityRecords.isEmpty {
-                    Text(model.uiText("暂无需要优先关注的漏洞"))
-                        .font(.callout)
+                    Text(model.uiText("暂无需要优先关注的漏洞情报"))
+                        .font(AppTypography.callout)
                         .foregroundStyle(AppPalette.textMuted)
                         .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
                 } else {
@@ -832,17 +1082,17 @@ private struct PriorityRiskCard: View {
                                 .frame(width: 4, height: 26)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(record.id)
-                                    .font(.caption.monospaced().weight(.semibold))
+                                    .font(AppTypography.caption.monospaced().weight(.semibold))
                                     .foregroundStyle(AppPalette.text)
                                     .lineLimit(1)
                                 Text(record.title.isEmpty ? model.uiText("未提供漏洞标题") : record.title)
-                                    .font(.caption2)
+                                    .font(AppTypography.caption2)
                                     .foregroundStyle(AppPalette.textMuted)
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 4)
                             Text(priorityValue(record))
-                                .font(.caption.monospacedDigit().weight(.semibold))
+                                .font(AppTypography.caption.monospacedDigit().weight(.semibold))
                                 .foregroundStyle(severityColor(record.severity))
                         }
                     }

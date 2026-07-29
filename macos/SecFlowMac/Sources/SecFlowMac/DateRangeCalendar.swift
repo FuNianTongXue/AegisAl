@@ -12,20 +12,20 @@ struct DashboardDateRangePicker: View {
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: "calendar")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppTypography.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppPalette.primary)
 
                 Text(calendarButtonDate(startDate))
                 Image(systemName: "arrow.right")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppTypography.system(size: 10, weight: .semibold))
                     .foregroundStyle(AppPalette.textSubtle)
                 Text(calendarButtonDate(endDate))
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(AppTypography.system(size: 9, weight: .bold))
                     .foregroundStyle(AppPalette.textSubtle)
             }
-            .font(.callout.monospacedDigit().weight(.medium))
+            .font(AppTypography.callout.monospacedDigit().weight(.medium))
             .foregroundStyle(AppPalette.text)
             .padding(.horizontal, 11)
             .frame(height: 36)
@@ -79,7 +79,7 @@ private struct RangeCalendarPopover: View {
             LazyVGrid(columns: columns, spacing: 8) {
                 ForEach(weekdaySymbols, id: \.self) { weekday in
                     Text(weekday)
-                        .font(.caption.weight(.semibold))
+                        .font(AppTypography.caption.weight(.semibold))
                         .foregroundStyle(AppPalette.textSubtle)
                         .frame(width: 40, height: 24)
                 }
@@ -261,7 +261,7 @@ private struct CalendarDayCell: View {
             }
 
             Text("\(calendar.component(.day, from: day.date))")
-                .font(.system(size: 14, weight: isEndpoint ? .semibold : .regular).monospacedDigit())
+                .font(AppTypography.system(size: 14, weight: isEndpoint ? .semibold : .regular).monospacedDigit())
                 .foregroundStyle(dayTextColor)
 
             if isToday {

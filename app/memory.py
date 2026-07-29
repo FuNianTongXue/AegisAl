@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
+
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -22,6 +24,8 @@ from app.secure_storage import decrypt_json_from_text, encrypt_json_to_text
 
 
 MEMORY_PURPOSE = "secflow-memory"
+ASSISTANT_PROJECT_ID = "assistant"
+ASSISTANT_PROJECT_NAME = "智能问答"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -84,6 +88,161 @@ class LongTermMemoryService:
         history = state.setdefault("users", {}).get(user_id, [])
         return deepcopy(history[-limit:])
 
+    def list_conversations(
+        self,
+        user_id: str = "default",
+        limit: int = 30,
+        archived: bool = False,
+    ) -> list[dict[str, Any]]:
+        history = self.get_history(user_id, limit=self.max_history)
+        metadata = self._conversation_metadata(user_id)
+        conversations: dict[str, dict[str, Any]] = {}
+        for entry in history:
+            session_id = str(entry.get("sessionId", "") or "default")
+            conversation = conversations.get(session_id)
+            if conversation is None:
+                session_metadata = metadata.get(session_id, {})
+                conversation = {
+                    "id": session_id,
+                    "title": str(entry.get("question", "") or "").strip() or "Untitled conversation",
+                    "updated_at": str(entry.get("timestamp", "") or ""),
+                    "turn_count": 0,
+                    "project_id": ASSISTANT_PROJECT_ID,
+                    "project_name": ASSISTANT_PROJECT_NAME,
+                    "archived": bool(session_metadata.get("archived", False)),
+                    "archived_at": str(session_metadata.get("archivedAt", "") or ""),
+                }
+                conversations[session_id] = conversation
+            conversation["turn_count"] += 1
+            timestamp = str(entry.get("timestamp", "") or "")
+            if timestamp >= conversation["updated_at"]:
+                conversation["updated_at"] = timestamp
+
+        filtered = [item for item in conversations.values() if bool(item["archived"]) is archived]
+        ordered = sorted(
+            filtered,
+            key=lambda item: (item["updated_at"], item["id"]),
+            reverse=True,
+        )
+        return deepcopy(ordered[: max(1, min(limit, 100))])
+
+    def get_conversation(self, user_id: str, session_id: str) -> dict[str, Any]:
+        exchanges = [
+            entry
+            for entry in self.get_history(user_id, limit=self.max_history)
+            if str(entry.get("sessionId", "") or "default") == session_id
+        ]
+        if not exchanges:
+            raise KeyError(session_id)
+        exchanges.sort(key=lambda item: (str(item.get("timestamp", "")), str(item.get("id", ""))))
+        metadata = self._conversation_metadata(user_id).get(session_id, {})
+        return {
+            "id": session_id,
+            "title": str(exchanges[0].get("question", "") or "").strip() or "Untitled conversation",
+            "updated_at": str(exchanges[-1].get("timestamp", "") or ""),
+            "turn_count": len(exchanges),
+            "project_id": ASSISTANT_PROJECT_ID,
+            "project_name": ASSISTANT_PROJECT_NAME,
+            "archived": bool(metadata.get("archived", False)),
+            "archived_at": str(metadata.get("archivedAt", "") or ""),
+            "exchanges": [
+                {
+                    "id": str(entry.get("id", "")),
+                    "question": str(entry.get("question", "") or ""),
+                    "answer": str(entry.get("answer", "") or ""),
+                    "mode": str(entry.get("mode", "") or ""),
+                    "confidence": float(entry.get("confidence", 0) or 0),
+                    "fields": deepcopy(entry.get("fields", {}) or {}),
+                    "answer_payload": deepcopy(entry.get("answerPayload", {}) or {}),
+                    "timestamp": str(entry.get("timestamp", "") or ""),
+                }
+                for entry in exchanges
+            ],
+        }
+
+    def archive_conversation(self, user_id: str, session_id: str, archived: bool) -> dict[str, Any]:
+        self.get_conversation(user_id, session_id)
+        archived_at = now_iso() if archived else ""
+        if self._use_postgres():
+            try:
+                with self._pg_connect() as conn:
+                    conn.execute(
+                        """
+                        insert into secflow_knowledge_conversations
+                            (user_id, session_id, archived, archived_at, updated_at)
+                        values (%s, %s, %s, %s, now())
+                        on conflict (user_id, session_id) do update set
+                            archived = excluded.archived,
+                            archived_at = excluded.archived_at,
+                            updated_at = now()
+                        """,
+                        (user_id, session_id, archived, archived_at or None),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._mark_postgres_failed(exc)
+                raise
+        else:
+            with self._lock:
+                state = self._read_json_state()
+                user_metadata = state.setdefault("conversationMetadata", {}).setdefault(user_id, {})
+                user_metadata[session_id] = {
+                    "archived": archived,
+                    "archivedAt": archived_at,
+                    "updatedAt": now_iso(),
+                }
+                self._write_json_state(state)
+        detail = self.get_conversation(user_id, session_id)
+        detail.pop("exchanges", None)
+        return detail
+
+    def delete_conversation(self, user_id: str, session_id: str) -> dict[str, Any]:
+        detail = self.get_conversation(user_id, session_id)
+        if self._use_postgres():
+            try:
+                with self._pg_connect() as conn:
+                    conn.execute(
+                        "delete from secflow_knowledge_conversation_exchanges where user_id = %s and session_id = %s",
+                        (user_id, session_id),
+                    )
+                    conn.execute(
+                        "delete from secflow_knowledge_conversations where user_id = %s and session_id = %s",
+                        (user_id, session_id),
+                    )
+                self._replace_postgres_profile(user_id, self.get_history(user_id, limit=self.max_history))
+            except Exception as exc:  # noqa: BLE001
+                self._mark_postgres_failed(exc)
+                raise
+        else:
+            with self._lock:
+                state = self._read_json_state()
+                users = state.setdefault("users", {})
+                history = users.get(user_id, [])
+                remaining = [
+                    entry
+                    for entry in history
+                    if str(entry.get("sessionId", "") or "default") != session_id
+                ]
+                if remaining:
+                    users[user_id] = remaining
+                else:
+                    users.pop(user_id, None)
+                user_metadata = state.setdefault("conversationMetadata", {}).get(user_id, {})
+                user_metadata.pop(session_id, None)
+                if not user_metadata:
+                    state["conversationMetadata"].pop(user_id, None)
+                profile = self._profile_from_history(user_id, remaining)
+                if remaining:
+                    state.setdefault("profiles", {})[user_id] = profile
+                else:
+                    state.setdefault("profiles", {}).pop(user_id, None)
+                self._write_json_state(state)
+        return {
+            "id": session_id,
+            "title": detail["title"],
+            "deleted": True,
+            "deleted_turn_count": detail["turn_count"],
+        }
+
     def build_context(self, user_id: str, question: str) -> dict[str, Any]:
         profile = self._get_profile(user_id)
         history = self.get_history(user_id, limit=self.max_history)
@@ -127,17 +286,81 @@ class LongTermMemoryService:
             self._json_update_profile(user_id, stored)
             return deepcopy(stored)
 
+    def update_interrupt_exchange(
+        self,
+        user_id: str,
+        session_id: str,
+        thread_id: str,
+        answer_data: dict[str, Any],
+    ) -> bool:
+        """Replace the persisted answer for the message that owns a LangGraph thread."""
+
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return False
+        if self._use_postgres():
+            try:
+                updated = self._pg_update_interrupt_exchange(
+                    user_id,
+                    session_id,
+                    clean_thread_id,
+                    answer_data,
+                )
+                if updated:
+                    self._replace_postgres_profile(user_id, self.get_history(user_id, limit=self.max_history))
+                return updated
+            except Exception as exc:  # noqa: BLE001
+                self._mark_postgres_failed(exc)
+
+        with self._lock:
+            state = self._read_json_state()
+            history = state.setdefault("users", {}).get(user_id, [])
+            target_index = next(
+                (
+                    index
+                    for index in range(len(history) - 1, -1, -1)
+                    if str(history[index].get("sessionId") or "default") == session_id
+                    and str(
+                        (((history[index].get("answerPayload") or {}).get("interrupt") or {}).get("thread_id"))
+                        or ""
+                    )
+                    == clean_thread_id
+                ),
+                None,
+            )
+            if target_index is None:
+                return False
+            previous = history[target_index]
+            replacement = self._build_entry(
+                user_id,
+                session_id,
+                str(previous.get("question") or ""),
+                answer_data,
+            )
+            replacement["id"] = str(previous.get("id") or "")
+            history[target_index] = replacement
+            state.setdefault("profiles", {})[user_id] = self._profile_from_history(user_id, history)
+            state.setdefault("conversationMetadata", {}).setdefault(user_id, {})[session_id] = {
+                "archived": False,
+                "archivedAt": "",
+                "updatedAt": replacement["timestamp"],
+            }
+            self._write_json_state(state)
+            return True
+
     def clear_history(self, user_id: str = "default") -> dict[str, Any]:
         if self._use_postgres():
             try:
                 with self._pg_connect() as conn:
                     conn.execute("delete from secflow_knowledge_conversation_exchanges where user_id = %s", (user_id,))
+                    conn.execute("delete from secflow_knowledge_conversations where user_id = %s", (user_id,))
                     conn.execute("delete from secflow_knowledge_memory_profiles where user_id = %s", (user_id,))
                 return {"status": "success", "message": f"已清除用户 {user_id} 的长期记忆。"}
             except Exception as exc:  # noqa: BLE001
                 self._mark_postgres_failed(exc)
         state = self._read_json_state()
         state.setdefault("users", {}).pop(user_id, None)
+        state.setdefault("conversationMetadata", {}).pop(user_id, None)
         state.setdefault("profiles", {}).pop(user_id, None)
         self._write_json_state(state)
         return {"status": "success", "message": f"已清除用户 {user_id} 的本地记忆。"}
@@ -184,6 +407,7 @@ class LongTermMemoryService:
                     mode text not null default '',
                     confidence double precision not null default 0,
                     fields jsonb not null default '{}'::jsonb,
+                    answer_payload jsonb not null default '{}'::jsonb,
                     sources jsonb not null default '[]'::jsonb,
                     topics jsonb not null default '[]'::jsonb,
                     importance double precision not null default 0,
@@ -194,11 +418,29 @@ class LongTermMemoryService:
             )
             conn.execute(
                 """
+                alter table secflow_knowledge_conversation_exchanges
+                add column if not exists answer_payload jsonb not null default '{}'::jsonb
+                """
+            )
+            conn.execute(
+                """
                 create table if not exists secflow_knowledge_memory_profiles (
                     user_id text primary key,
                     summary text not null default '',
                     facts jsonb not null default '[]'::jsonb,
                     updated_at timestamptz not null default now()
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists secflow_knowledge_conversations (
+                    user_id text not null,
+                    session_id text not null,
+                    archived boolean not null default false,
+                    archived_at timestamptz,
+                    updated_at timestamptz not null default now(),
+                    primary key (user_id, session_id)
                 )
                 """
             )
@@ -220,7 +462,7 @@ class LongTermMemoryService:
             rows = conn.execute(
                 """
                 select id, user_id, session_id, question, answer, mode, confidence,
-                       fields, sources, topics, importance, compressed_summary, created_at
+                       fields, answer_payload, sources, topics, importance, compressed_summary, created_at
                 from secflow_knowledge_conversation_exchanges
                 where user_id = %s
                 order by created_at desc, id desc
@@ -236,10 +478,10 @@ class LongTermMemoryService:
                 """
                 insert into secflow_knowledge_conversation_exchanges
                     (user_id, session_id, question, answer, mode, confidence,
-                     fields, sources, topics, importance, compressed_summary)
-                values (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s)
+                     fields, answer_payload, sources, topics, importance, compressed_summary)
+                values (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s)
                 returning id, user_id, session_id, question, answer, mode, confidence,
-                          fields, sources, topics, importance, compressed_summary, created_at
+                          fields, answer_payload, sources, topics, importance, compressed_summary, created_at
                 """,
                 (
                     entry["userId"],
@@ -249,13 +491,100 @@ class LongTermMemoryService:
                     entry["mode"],
                     entry["confidence"],
                     json.dumps(entry["fields"], ensure_ascii=False),
+                    json.dumps(entry["answerPayload"], ensure_ascii=False),
                     json.dumps(entry["sources"], ensure_ascii=False),
                     json.dumps(entry["topics"], ensure_ascii=False),
                     entry["importance"],
                     entry["compressedSummary"],
                 ),
             ).fetchone()
+            conn.execute(
+                """
+                insert into secflow_knowledge_conversations
+                    (user_id, session_id, archived, archived_at, updated_at)
+                values (%s, %s, false, null, now())
+                on conflict (user_id, session_id) do update set
+                    archived = false,
+                    archived_at = null,
+                    updated_at = now()
+                """,
+                (entry["userId"], entry["sessionId"]),
+            )
         return self._row_to_entry(dict(row))
+
+    def _pg_update_interrupt_exchange(
+        self,
+        user_id: str,
+        session_id: str,
+        thread_id: str,
+        answer_data: dict[str, Any],
+    ) -> bool:
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                """
+                select id, question
+                from secflow_knowledge_conversation_exchanges
+                where user_id = %s and session_id = %s
+                  and answer_payload #>> '{interrupt,thread_id}' = %s
+                order by created_at desc, id desc
+                limit 1
+                """,
+                (user_id, session_id, thread_id),
+            ).fetchone()
+            if not row:
+                return False
+            entry = self._build_entry(user_id, session_id, str(row["question"] or ""), answer_data)
+            conn.execute(
+                """
+                update secflow_knowledge_conversation_exchanges
+                set answer = %s, mode = %s, confidence = %s,
+                    fields = %s::jsonb, answer_payload = %s::jsonb,
+                    sources = %s::jsonb, topics = %s::jsonb,
+                    importance = %s, compressed_summary = %s, created_at = now()
+                where id = %s and user_id = %s and session_id = %s
+                """,
+                (
+                    entry["answer"],
+                    entry["mode"],
+                    entry["confidence"],
+                    json.dumps(entry["fields"], ensure_ascii=False),
+                    json.dumps(entry["answerPayload"], ensure_ascii=False),
+                    json.dumps(entry["sources"], ensure_ascii=False),
+                    json.dumps(entry["topics"], ensure_ascii=False),
+                    entry["importance"],
+                    entry["compressedSummary"],
+                    row["id"],
+                    user_id,
+                    session_id,
+                ),
+            )
+            conn.execute(
+                """
+                update secflow_knowledge_conversations
+                set archived = false, archived_at = null, updated_at = now()
+                where user_id = %s and session_id = %s
+                """,
+                (user_id, session_id),
+            )
+        return True
+
+    def _replace_postgres_profile(self, user_id: str, history: list[dict[str, Any]]) -> None:
+        profile = self._profile_from_history(user_id, history)
+        with self._pg_connect() as conn:
+            if not history:
+                conn.execute("delete from secflow_knowledge_memory_profiles where user_id = %s", (user_id,))
+                return
+            conn.execute(
+                """
+                insert into secflow_knowledge_memory_profiles (user_id, summary, facts, updated_at)
+                values (%s, %s, %s::jsonb, now())
+                on conflict (user_id) do update set
+                    summary = excluded.summary,
+                    facts = excluded.facts,
+                    updated_at = now()
+                """,
+                (user_id, profile["summary"], json.dumps(profile["facts"], ensure_ascii=False)),
+            )
 
     def _pg_update_profile(self, user_id: str, entry: dict[str, Any]) -> None:
         profile = self._get_profile(user_id)
@@ -299,6 +628,11 @@ class LongTermMemoryService:
         history.append(entry)
         if len(history) > self.max_history:
             users[entry["userId"]] = history[-self.max_history :]
+        state.setdefault("conversationMetadata", {}).setdefault(entry["userId"], {})[entry["sessionId"]] = {
+            "archived": False,
+            "archivedAt": "",
+            "updatedAt": now_iso(),
+        }
         self._write_json_state(state)
         return entry
 
@@ -321,12 +655,13 @@ class LongTermMemoryService:
                         raise ValueError("memory payload is not an object")
                     state.setdefault("users", {})
                     state.setdefault("profiles", {})
+                    state.setdefault("conversationMetadata", {})
                     if not raw.lstrip().startswith('{"__secflow_encrypted__"'):
                         self._write_json_state(state)
                     return state
-                except (json.JSONDecodeError, OSError, ValueError):
+                except (InvalidTag, json.JSONDecodeError, OSError, ValueError):
                     pass
-            state: dict[str, Any] = {"users": {}, "profiles": {}}
+            state: dict[str, Any] = {"users": {}, "profiles": {}, "conversationMetadata": {}}
             self._write_json_state(state)
             return state
 
@@ -348,10 +683,69 @@ class LongTermMemoryService:
         state = self._read_json_state()
         return deepcopy(state.setdefault("profiles", {}).get(user_id, {"userId": user_id, "summary": "", "facts": [], "updatedAt": ""}))
 
+    def _conversation_metadata(self, user_id: str) -> dict[str, dict[str, Any]]:
+        if self._use_postgres():
+            try:
+                with self._pg_connect() as conn:
+                    rows = conn.execute(
+                        """
+                        select session_id, archived, archived_at, updated_at
+                        from secflow_knowledge_conversations
+                        where user_id = %s
+                        """,
+                        (user_id,),
+                    ).fetchall()
+                return {
+                    str(row["session_id"]): {
+                        "archived": bool(row.get("archived", False)),
+                        "archivedAt": self._time_text(row.get("archived_at")) if row.get("archived_at") else "",
+                        "updatedAt": self._time_text(row.get("updated_at")),
+                    }
+                    for row in rows
+                }
+            except Exception as exc:  # noqa: BLE001
+                self._mark_postgres_failed(exc)
+        state = self._read_json_state()
+        value = state.setdefault("conversationMetadata", {}).get(user_id, {})
+        return deepcopy(value) if isinstance(value, dict) else {}
+
+    def _profile_from_history(self, user_id: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+        summary = ""
+        facts: list[dict[str, Any]] = []
+        for entry in history:
+            summary = self._compress_profile(summary, entry)
+            facts = self._merge_facts(facts, entry)
+        return {
+            "userId": user_id,
+            "summary": summary,
+            "facts": facts,
+            "updatedAt": now_iso(),
+        }
+
     def _build_entry(self, user_id: str, session_id: str, question: str, answer_data: dict[str, Any]) -> dict[str, Any]:
         answer = str(answer_data.get("summary", "") or answer_data.get("answer", "") or "")
         topics = self._extract_topics(f"{question}\n{answer}")
         fields = deepcopy(answer_data.get("fields", {}) or {})
+        answer_payload = {
+            key: deepcopy(answer_data[key])
+            for key in (
+                "mode",
+                "summary",
+                "fields",
+                "vulnerability_card",
+                "knowledge_graph",
+                "evidence_sources",
+                "chart_data",
+                "artifacts",
+                "report",
+                "interrupt",
+                "token_usage",
+                "confidence",
+                "trace",
+                "generated_at",
+            )
+            if key in answer_data
+        }
         sources: list[dict[str, Any]] = []
         confidence = float(answer_data.get("confidence", 0) or 0)
         mode = str(answer_data.get("mode", "") or "")
@@ -365,6 +759,7 @@ class LongTermMemoryService:
             "mode": mode,
             "confidence": confidence,
             "fields": fields,
+            "answerPayload": answer_payload,
             "sources": sources,
             "topics": topics,
             "importance": importance,
@@ -518,6 +913,7 @@ class LongTermMemoryService:
         compact["question"] = self._clip(compact.get("question", ""), 240)
         compact["answer"] = self._clip(compact.get("answer", ""), 360)
         compact["fields"] = {}
+        compact["answerPayload"] = {}
         compact["sources"] = compact.get("sources", [])[:3]
         return compact
 
@@ -531,6 +927,7 @@ class LongTermMemoryService:
             "mode": row.get("mode", ""),
             "confidence": float(row.get("confidence", 0) or 0),
             "fields": self._json_value(row.get("fields"), {}),
+            "answerPayload": self._json_value(row.get("answer_payload"), {}),
             "sources": self._json_value(row.get("sources"), []),
             "topics": self._json_value(row.get("topics"), []),
             "importance": float(row.get("importance", 0) or 0),

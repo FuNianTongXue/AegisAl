@@ -204,7 +204,7 @@ async function askAssistant(event) {
     { node: "load_memory_context", message: "正在读取长期记忆...", status: "running", time: "" },
     { node: "call_llm", message: "正在判断是否需要漏洞检索...", status: "pending", time: "" },
   ]);
-  const result = await api("/api/ask", {
+  const result = await api("/api/assistant/questions", {
     method: "POST",
     body: JSON.stringify({
       question,
@@ -219,7 +219,7 @@ async function askAssistant(event) {
 
 async function refreshRuntime() {
   try {
-    renderRuntime(await api("/api/runtime"));
+    renderRuntime(await api("/api/system/runtime"));
   } catch (error) {
     $("#runtimeStatus").textContent = error.message;
   }
@@ -347,7 +347,7 @@ function renderRecords(records = [], stats = {}) {
 }
 
 async function showGraph() {
-  const graph = await api("/api/graph");
+  const graph = await api("/api/langgraph/assistant");
   renderTrace(graph.nodes.map((node) => ({ node: node.id, message: node.label, status: "graph-node", time: graph.name })));
 }
 

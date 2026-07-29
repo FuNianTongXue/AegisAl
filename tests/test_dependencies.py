@@ -7,8 +7,10 @@ from unittest.mock import patch
 
 from app.dependencies import (
     is_allowed_attachment_name,
+    parse_c_cpp_manifest_dependencies,
     parse_code_dependencies,
     parse_gradle_dependencies,
+    parse_go_manifest_dependencies,
     parse_pom_dependencies,
     scan_dependency_attachments,
 )
@@ -26,6 +28,12 @@ class DependencyAttachmentTests(unittest.TestCase):
         self.assertTrue(is_allowed_attachment_name("gradle.properties"))
         self.assertTrue(is_allowed_attachment_name("src/main/java/Demo.java"))
         self.assertTrue(is_allowed_attachment_name("frontend/App.tsx"))
+        self.assertTrue(is_allowed_attachment_name("requirements-dev.txt"))
+        self.assertTrue(is_allowed_attachment_name("requirements/base.txt"))
+        self.assertTrue(is_allowed_attachment_name("src/App/App.csproj"))
+        self.assertTrue(is_allowed_attachment_name("Directory.Packages.props"))
+        self.assertTrue(is_allowed_attachment_name("obj/project.assets.json"))
+        self.assertTrue(is_allowed_attachment_name("compile_commands.json"))
         self.assertFalse(is_allowed_attachment_name("report.pdf"))
         self.assertFalse(is_allowed_attachment_name("advisory.json"))
 
@@ -53,6 +61,251 @@ class DependencyAttachmentTests(unittest.TestCase):
         self.assertEqual(dependencies[0].name, "org.apache.logging.log4j:log4j-core")
         self.assertEqual(dependencies[0].version, "2.14.1")
         self.assertEqual(dependencies[0].confidence, "high")
+
+    def test_go_mod_parser_only_uses_require_directives(self) -> None:
+        dependencies = parse_go_manifest_dependencies(
+            "go.mod",
+            """
+            module example.com/secflow/demo
+
+            go 1.24
+
+            require github.com/gin-gonic/gin v1.10.1
+            require (
+                golang.org/x/crypto v0.40.0
+                golang.org/x/sys v0.34.0 // indirect
+            )
+
+            replace github.com/gin-gonic/gin => ../local-gin
+            exclude golang.org/x/crypto v0.39.0
+            retract v1.0.0
+            """,
+        )
+
+        self.assertEqual(
+            [(dependency.name, dependency.version) for dependency in dependencies],
+            [
+                ("github.com/gin-gonic/gin", "v1.10.1"),
+                ("golang.org/x/crypto", "v0.40.0"),
+                ("golang.org/x/sys", "v0.34.0"),
+            ],
+        )
+        self.assertTrue(all(dependency.source_file == "go.mod" for dependency in dependencies))
+
+    def test_dotnet_manifests_resolve_central_and_locked_nuget_versions(self) -> None:
+        result = scan_dependency_attachments(
+            [
+                {
+                    "file_name": "Directory.Packages.props",
+                    "content": """
+                    <Project><ItemGroup>
+                      <PackageVersion Include="Serilog" Version="3.1.1" />
+                    </ItemGroup></Project>
+                    """,
+                },
+                {
+                    "file_name": "src/App/App.csproj",
+                    "content": """
+                    <Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+                      <PackageReference Include="Serilog" />
+                      <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+                    </ItemGroup></Project>
+                    """,
+                },
+                {
+                    "file_name": "src/App/packages.lock.json",
+                    "content": """
+                    {"version": 1, "dependencies": {"net8.0": {
+                      "Serilog": {"type": "Direct", "requested": "[3.1.1, )", "resolved": "3.1.2"},
+                      "Newtonsoft.Json": {"type": "Direct", "requested": "[13.0.1, )", "resolved": "13.0.3"}
+                    }}}
+                    """,
+                },
+            ]
+        )
+        dependencies = {(item["ecosystem"], item["name"]): item for item in result["dependencies"]}
+
+        self.assertEqual(dependencies[("NuGet", "Serilog")]["version"], "3.1.2")
+        self.assertEqual(dependencies[("NuGet", "Newtonsoft.Json")]["version"], "13.0.3")
+        self.assertEqual(len(dependencies), 2)
+        self.assertTrue(all(item["source_type"] == "dotnet_manifest" for item in dependencies.values()))
+
+    def test_dotnet_manifests_inherit_directory_build_props_versions(self) -> None:
+        result = scan_dependency_attachments(
+            [
+                {
+                    "file_name": "Directory.Build.props",
+                    "content": """
+                    <Project><PropertyGroup>
+                      <NewtonsoftJsonVersion>13.0.3</NewtonsoftJsonVersion>
+                      <SerilogVersion>3.1.1</SerilogVersion>
+                    </PropertyGroup></Project>
+                    """,
+                },
+                {
+                    "file_name": "Directory.Packages.props",
+                    "content": """
+                    <Project><ItemGroup>
+                      <PackageVersion Include="Newtonsoft.Json" Version="$(NewtonsoftJsonVersion)" />
+                    </ItemGroup></Project>
+                    """,
+                },
+                {
+                    "file_name": "src/App/App.csproj",
+                    "content": """
+                    <Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+                      <PackageReference Include="Newtonsoft.Json" />
+                      <PackageReference Include="Serilog" Version="$(SerilogVersion)" />
+                    </ItemGroup></Project>
+                    """,
+                },
+            ]
+        )
+        dependencies = {(item["ecosystem"], item["name"]): item for item in result["dependencies"]}
+
+        self.assertEqual(dependencies[("NuGet", "Newtonsoft.Json")]["version"], "13.0.3")
+        self.assertEqual(dependencies[("NuGet", "Serilog")]["version"], "3.1.1")
+        self.assertEqual(len(dependencies), 2)
+
+    def test_cmake_find_package_resolves_version_variables(self) -> None:
+        dependencies = parse_c_cpp_manifest_dependencies(
+            "CMakeLists.txt",
+            """
+            set(OPENSSL_VERSION "3.3.0")
+            find_package(OpenSSL ${OPENSSL_VERSION} REQUIRED)
+            find_package(ZLIB 1.3 REQUIRED)
+            """,
+        )
+        by_name = {dependency.name: dependency for dependency in dependencies}
+
+        self.assertEqual(by_name["OpenSSL"].ecosystem, "CMake")
+        self.assertEqual(by_name["OpenSSL"].version, "3.3.0")
+        self.assertEqual(by_name["ZLIB"].version, "1.3")
+
+    def test_go_mod_is_authoritative_for_source_imports_and_sibling_go_sum(self) -> None:
+        result = scan_dependency_attachments(
+            [
+                {
+                    "file_name": "cmd/server/main.go",
+                    "content": """
+                    package main
+                    import (
+                        "example.com/secflow/demo/internal/server"
+                        "github.com/gin-gonic/gin/binding"
+                    )
+                    """,
+                },
+                {
+                    "file_name": "go.sum",
+                    "content": """
+                    github.com/obsolete/dependency v9.9.9 h1:old
+                    github.com/gin-gonic/gin v1.9.0/go.mod h1:old
+                    """,
+                },
+                {
+                    "file_name": "go.mod",
+                    "content": """
+                    module example.com/secflow/demo
+                    go 1.24
+                    require github.com/gin-gonic/gin v1.10.1
+                    """,
+                },
+            ]
+        )
+
+        self.assertEqual(result["files"][0], {"file_name": "go.mod", "kind": "go_manifest"})
+        self.assertEqual(result["dependency_count"], 1)
+        self.assertEqual(result["dependencies"][0]["name"], "github.com/gin-gonic/gin")
+        self.assertEqual(result["dependencies"][0]["version"], "v1.10.1")
+        self.assertEqual(result["dependencies"][0]["source_file"], "go.mod")
+        self.assertNotIn("obsolete", str(result["dependencies"]))
+        self.assertNotIn("example.com/secflow/demo/internal", str(result["dependencies"]))
+
+    def test_go_mod_is_prioritized_before_attachment_limit(self) -> None:
+        attachments = [
+            {
+                "file_name": "000.go",
+                "content": 'package demo\nimport "example.com/secflow/demo/internal/first"\n',
+            },
+            {
+                "file_name": "001.go",
+                "content": 'package demo\nimport "example.com/secflow/demo/internal/second"\n',
+            },
+            {
+                "file_name": "go.mod",
+                "content": """
+                module example.com/secflow/demo
+                require github.com/gin-gonic/gin v1.10.1
+                """,
+            },
+        ]
+
+        with patch("app.dependencies.MAX_ASK_ATTACHMENTS", 2):
+            result = scan_dependency_attachments(attachments)
+
+        self.assertEqual(result["files"][0]["file_name"], "go.mod")
+        self.assertEqual(result["dependency_count"], 1)
+        self.assertEqual(result["dependencies"][0]["name"], "github.com/gin-gonic/gin")
+        self.assertEqual(result["dependencies"][0]["version"], "v1.10.1")
+
+    def test_complete_dependency_scan_ignores_attachment_and_dependency_caps(self) -> None:
+        attachments = [
+            {"file_name": "requirements.txt", "content": "requests==2.32.4\n"},
+            {
+                "file_name": "pom.xml",
+                "content": """
+                <project><dependencies><dependency>
+                  <groupId>org.example</groupId><artifactId>payments</artifactId><version>1.0.0</version>
+                </dependency></dependencies></project>
+                """,
+            },
+            {
+                "file_name": "package.json",
+                "content": '{"dependencies":{"express":"5.1.0"}}',
+            },
+        ]
+
+        with patch("app.dependencies.MAX_ASK_ATTACHMENTS", 2):
+            bounded = scan_dependency_attachments(attachments, max_dependencies=2)
+            complete = scan_dependency_attachments(
+                attachments,
+                max_dependencies=None,
+                include_all_attachments=True,
+            )
+
+        self.assertEqual(bounded["dependency_count"], 2)
+        self.assertEqual(complete["dependency_count"], 3)
+        self.assertEqual({item["name"] for item in complete["dependencies"]}, {"requests", "org.example:payments", "express"})
+
+    def test_requirements_is_authoritative_before_pyproject_and_python_imports(self) -> None:
+        result = scan_dependency_attachments(
+            [
+                {
+                    "file_name": "src/app.py",
+                    "content": "import requests\nimport flask\n",
+                },
+                {
+                    "file_name": "pyproject.toml",
+                    "content": """
+                    [project]
+                    dependencies = ["requests==9.9.9", "Flask==3.1.1"]
+                    """,
+                },
+                {
+                    "file_name": "requirements.txt",
+                    "content": "requests==2.32.4\n",
+                },
+            ]
+        )
+
+        by_name = {dependency["name"].lower(): dependency for dependency in result["dependencies"]}
+        self.assertEqual(result["files"][0], {"file_name": "requirements.txt", "kind": "python_manifest"})
+        self.assertEqual(result["dependency_count"], 2)
+        self.assertEqual(by_name["requests"]["version"], "2.32.4")
+        self.assertEqual(by_name["requests"]["source_file"], "requirements.txt")
+        self.assertEqual(by_name["flask"]["version"], "3.1.1")
+        self.assertEqual(by_name["flask"]["source_file"], "pyproject.toml")
+        self.assertNotIn("9.9.9", str(result["dependencies"]))
 
     def test_code_imports_are_mapped_to_dependency_packages(self) -> None:
         dependencies = parse_code_dependencies(

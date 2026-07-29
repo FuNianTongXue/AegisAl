@@ -1,0 +1,85 @@
+rules:
+  - id: secflow.csharp.command-injection
+    languages: [csharp]
+    severity: ERROR
+    message: ASP.NET 请求参数进入进程启动接口，可能造成命令注入。
+    metadata:
+      category: security
+      scenario: command_execution
+      cwe: [CWE-78]
+      owasp: [A03:2021]
+      confidence: HIGH
+      remediation: 使用固定可执行文件和参数列表，对每个参数实施允许列表校验，禁止拼接 shell 命令。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: Request.Query[$KEY]
+          - pattern: $CONTEXT.Request.Query[$KEY]
+          - pattern: Request.Form[$KEY]
+          - pattern: $CONTEXT.Request.Form[$KEY]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: System.Diagnostics.Process.Start($COMMAND)
+              - pattern: System.Diagnostics.Process.Start($COMMAND, ...)
+              - pattern: Process.Start($COMMAND)
+              - pattern: Process.Start($COMMAND, ...)
+          - focus-metavariable: $COMMAND
+
+  - id: secflow.csharp.sql-injection
+    languages: [csharp]
+    severity: ERROR
+    message: ASP.NET 请求参数进入原始 SQL 执行接口，可能造成 SQL 注入。
+    metadata:
+      category: security
+      scenario: sql_injection
+      cwe: [CWE-89]
+      owasp: [A03:2021]
+      confidence: HIGH
+      remediation: 使用参数化查询或安全 ORM API，禁止把请求参数拼入 SQL 文本。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: Request.Query[$KEY]
+          - pattern: $CONTEXT.Request.Query[$KEY]
+          - pattern: Request.Form[$KEY]
+          - pattern: $CONTEXT.Request.Form[$KEY]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: new System.Data.SqlClient.SqlCommand($QUERY, ...)
+              - pattern: new Microsoft.Data.SqlClient.SqlCommand($QUERY, ...)
+              - pattern: new SqlCommand($QUERY, ...)
+              - pattern: $DATABASE.ExecuteSqlRaw($QUERY, ...)
+              - pattern: $DATABASE.FromSqlRaw($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: secflow.csharp.path-traversal
+    languages: [csharp]
+    severity: ERROR
+    message: ASP.NET 请求参数直接控制文件系统路径，可能造成路径穿越。
+    metadata:
+      category: security
+      scenario: path_traversal
+      cwe: [CWE-22]
+      owasp: [A01:2021]
+      confidence: HIGH
+      remediation: 规范化路径并验证其位于固定根目录内，拒绝绝对路径和父目录跳转。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: Request.Query[$KEY]
+          - pattern: $CONTEXT.Request.Query[$KEY]
+          - pattern: Request.Form[$KEY]
+          - pattern: $CONTEXT.Request.Form[$KEY]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: System.IO.File.Open($PATH, ...)
+              - pattern: System.IO.File.ReadAllText($PATH, ...)
+              - pattern: System.IO.File.ReadAllBytes($PATH, ...)
+              - pattern: File.Open($PATH, ...)
+              - pattern: File.ReadAllText($PATH, ...)
+              - pattern: File.ReadAllBytes($PATH, ...)
+              - pattern: new FileStream($PATH, ...)
+          - focus-metavariable: $PATH

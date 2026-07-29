@@ -40,6 +40,8 @@ The packaged parser includes these MIT-licensed language grammars:
 - tree-sitter-go 0.25.0: https://github.com/tree-sitter/tree-sitter-go
 - tree-sitter-c 0.24.2: https://github.com/tree-sitter/tree-sitter-c
 - tree-sitter-cpp 0.23.4: https://github.com/tree-sitter/tree-sitter-cpp
+- tree-sitter-cuda 0.21.1: https://github.com/tree-sitter-grammars/tree-sitter-cuda
+- tree-sitter-c-sharp 0.23.5: https://github.com/tree-sitter/tree-sitter-c-sharp
 - tree-sitter-rust 0.24.2: https://github.com/tree-sitter/tree-sitter-rust
 - tree-sitter-solidity 1.2.13: https://github.com/JoranHonig/tree-sitter-solidity
 
@@ -63,3 +65,64 @@ License: BSD-3-Clause.
 Source: https://github.com/d3/d3-sankey/tree/v0.12.3
 
 The corresponding license text is distributed as D3-Sankey-BSD-3-Clause.txt.
+
+Truststore 0.10.4
+-----------------
+
+Copyright (c) 2022 Seth Michael Larson.
+License: MIT.
+Source: https://github.com/sethmlarson/truststore/tree/0.10.4
+
+The corresponding license text is distributed as Truststore-MIT.txt.
+
+XlsxWriter
+----------
+
+Copyright (c) 2013-2026 John McNamara.
+License: BSD-2-Clause.
+Source: https://github.com/jmcnamara/XlsxWriter
+
+The corresponding license text is distributed as XlsxWriter-BSD-2-Clause.txt.
+
+LangGraph Checkpoint SQLite 3.1.0
+---------------------------------
+
+Copyright (c) 2024 LangChain, Inc.
+License: MIT.
+Source: https://github.com/langchain-ai/langgraph/tree/main/libs/checkpoint-sqlite
+
+The corresponding license text is distributed as
+LangGraph-Checkpoint-SQLite-MIT.txt.
+
+python-docx 1.2.0
+-----------------
+
+Copyright (c) 2013 Steve Canny and contributors.
+License: MIT.
+Source: https://github.com/python-openxml/python-docx/tree/v1.2.0
+
+The corresponding license text is distributed as Python-docx-MIT.txt.
+
+lxml 6.1.1
+----------
+
+Copyright (c) 2004 Infrae and contributors.
+License: BSD-3-Clause and component notices described by the distribution.
+Source: https://github.com/lxml/lxml/tree/lxml-6.1.1
+
+The corresponding license texts are distributed as lxml-LICENSE.txt and
+lxml-LICENSES.txt.
+
+Chinese Security RSS subscription catalog
+-----------------------------------------
+
+Maintainer: zhengjim and project contributors.
+Source: https://github.com/zhengjim/Chinese-Security-RSS
+Bundled snapshot: Chinese-Security-RSS.opml, upstream commit f14accf
+Snapshot date: 2026-03-30
+
+The catalog contains publisher names and RSS/Atom endpoint metadata. Article
+content remains hosted by and subject to the terms of each publisher. The
+upstream repository did not declare a license file at the snapshot date; this
+notice provides attribution and does not claim additional rights in the
+catalog or publisher content.

@@ -16,7 +16,7 @@ from typing import Any, Callable, Protocol
 from app.secure_storage import decrypt_json_from_text, encrypt_json_to_text
 
 
-TRIAL_DURATION = timedelta(days=3)
+DEFAULT_TRIAL_DURATION = timedelta(days=3)
 CLOCK_ROLLBACK_TOLERANCE = timedelta(minutes=5)
 LAST_SEEN_WRITE_INTERVAL = timedelta(seconds=30)
 TRIAL_STATE_PURPOSE = "secflow-trial-v1"
@@ -33,12 +33,18 @@ class TrialMirror(Protocol):
 
 
 class WindowsRegistryTrialMirror:
+    def __init__(self) -> None:
+        self.registry_key = os.getenv("SECFLOW_TRIAL_REGISTRY_KEY", REGISTRY_KEY).strip() or REGISTRY_KEY
+        self.registry_value = (
+            os.getenv("SECFLOW_TRIAL_REGISTRY_VALUE", REGISTRY_VALUE).strip() or REGISTRY_VALUE
+        )
+
     def read(self) -> str | None:
         import winreg
 
         try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
-                value, value_type = winreg.QueryValueEx(key, REGISTRY_VALUE)
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.registry_key) as key:
+                value, value_type = winreg.QueryValueEx(key, self.registry_value)
         except FileNotFoundError:
             return None
         if value_type != winreg.REG_SZ or not isinstance(value, str):
@@ -50,11 +56,11 @@ class WindowsRegistryTrialMirror:
 
         with winreg.CreateKeyEx(
             winreg.HKEY_CURRENT_USER,
-            REGISTRY_KEY,
+            self.registry_key,
             0,
             winreg.KEY_SET_VALUE,
         ) as key:
-            winreg.SetValueEx(key, REGISTRY_VALUE, 0, winreg.REG_SZ, value)
+            winreg.SetValueEx(key, self.registry_value, 0, winreg.REG_SZ, value)
 
 
 class MacKeychainTrialMirror:
@@ -117,14 +123,14 @@ class TrialManager:
         primary_path: Path | None = None,
         *,
         mirror: TrialMirror | None = None,
-        duration: timedelta = TRIAL_DURATION,
+        duration: timedelta | None = None,
         now: Callable[[], datetime] | None = None,
         binding: str | None = None,
     ) -> None:
         data_dir = Path(os.getenv("SECFLOW_DATA_DIR", "data"))
         self.primary_path = primary_path or (data_dir / ".secflow-trial-state")
         self.mirror = mirror
-        self.duration = duration
+        self.duration = duration if duration is not None else _configured_trial_duration()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.binding = binding or machine_user_binding()
         self._lock = RLock()
@@ -144,7 +150,7 @@ class TrialManager:
                 "enabled": False,
                 "usable": True,
                 "state": "disabled",
-                "durationHours": 72,
+                "durationHours": _duration_hours(self.duration),
                 "secondsRemaining": None,
                 "message": "当前版本未启用限时试用。",
             }
@@ -190,12 +196,16 @@ class TrialManager:
                 "enabled": True,
                 "usable": not expired,
                 "state": "expired" if expired else "active",
-                "durationHours": int(self.duration.total_seconds() // 3600),
+                "durationHours": _duration_hours(self.duration),
                 "startedAt": _format_time(started_at),
                 "expiresAt": _format_time(expires_at),
                 "lastSeenAt": _format_time(last_seen_at),
                 "secondsRemaining": seconds_remaining,
-                "message": "三天试用期已结束，核心功能已停用。" if expired else "三天试用版可用。",
+                "message": (
+                    f"{_duration_label(self.duration)}试用期已结束，核心功能已停用。"
+                    if expired
+                    else f"{_duration_label(self.duration)}试用版可用。"
+                ),
             }
 
     def _load_or_create(self, now: datetime) -> dict[str, Any]:
@@ -294,7 +304,7 @@ class TrialManager:
             "enabled": True,
             "usable": False,
             "state": state,
-            "durationHours": int(self.duration.total_seconds() // 3600),
+            "durationHours": _duration_hours(self.duration),
             "secondsRemaining": 0,
             "message": message,
         }
@@ -355,6 +365,30 @@ def _parse_time(value: Any) -> datetime:
 
 def _format_time(value: datetime) -> str:
     return _as_utc(value).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _configured_trial_duration() -> timedelta:
+    raw_hours = os.getenv("SECFLOW_TRIAL_DURATION_HOURS", "").strip()
+    if not raw_hours:
+        return DEFAULT_TRIAL_DURATION
+    try:
+        hours = int(raw_hours)
+    except ValueError:
+        return DEFAULT_TRIAL_DURATION
+    if not 1 <= hours <= 24 * 365:
+        return DEFAULT_TRIAL_DURATION
+    return timedelta(hours=hours)
+
+
+def _duration_hours(duration: timedelta) -> int:
+    return int(duration.total_seconds() // 3600)
+
+
+def _duration_label(duration: timedelta) -> str:
+    hours = _duration_hours(duration)
+    if hours % 24 == 0:
+        return f"{hours // 24} 天"
+    return f"{hours} 小时"
 
 
 def _default_mirror() -> TrialMirror | None:

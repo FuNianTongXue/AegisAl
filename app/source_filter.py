@@ -3,6 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 
 
+SOURCE_STUB_CODE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".m",
+    ".mm",
+    ".java",
+    ".py",
+    ".go",
+    ".rs",
+    ".cs",
+    ".sol",
+}
+
 EXCLUDED_SOURCE_PARTS = {
     ".git",
     ".gradle",
@@ -11,6 +30,12 @@ EXCLUDED_SOURCE_PARTS = {
     "benchmark",
     "benchmarks",
     "build",
+    "doc",
+    "docs",
+    "3rd-party",
+    "3rdparty",
+    "3rd_party",
+    "archetype-resources",
     "dev-support",
     "dist",
     "examples",
@@ -25,7 +50,14 @@ EXCLUDED_SOURCE_PARTS = {
     "playground",
     "target",
     "test",
+    "testdata",
     "tests",
+    "third-party",
+    "thirdparty",
+    "third_party",
+    "vendor",
+    "vendored",
+    "vendors",
 }
 
 EXCLUDED_DEEP_PACKAGE_PARTS = {
@@ -65,6 +97,18 @@ SEMGREP_EXCLUDE_PATTERNS = [
     "**/.idea/**",
     "**/.mvn/**",
     "**/build/**",
+    "**/doc/**",
+    "**/docs/**",
+    "**/3rd-party/**",
+    "**/3rdparty/**",
+    "**/3rd_party/**",
+    "**/third-party/**",
+    "**/thirdparty/**",
+    "**/third_party/**",
+    "**/vendor/**",
+    "**/vendored/**",
+    "**/vendors/**",
+    "**/archetype-resources/**",
     "**/target/**",
     "**/generated/**",
     "**/dev-support/**",
@@ -91,6 +135,7 @@ SEMGREP_EXCLUDE_PATTERNS = [
     "**/src/*Test/**",
     "**/src/*Tests/**",
     "**/test/**",
+    "**/testdata/**",
     "**/tests/**",
     "**/*_test.go",
     "**/*_fuzz.go",
@@ -128,6 +173,47 @@ def is_excluded_source_path(path: str | Path) -> bool:
 
 def is_analyzable_source_path(path: str | Path) -> bool:
     return not is_excluded_source_path(path)
+
+
+def is_symlink_like_source_stub(path: str | Path, content: str) -> bool:
+    """Return true for archive/raw materialized symlink target stubs.
+
+    GitHub raw/archive materialization can expose symlinks as a regular text
+    file whose whole content is just the target path, for example a ``.cc`` file
+    containing ``../../sherpa-onnx/csrc/alsa.cc``. Those files are not source
+    translation units and should not count as parser errors or Semgrep targets.
+    """
+    suffix = Path(str(path).replace("\\", "/")).suffix.lower()
+    if suffix not in SOURCE_STUB_CODE_SUFFIXES:
+        return False
+    stripped = content.strip()
+    if not stripped or len(stripped) > 512 or "\n" in stripped or "\r" in stripped:
+        return False
+    if any(character.isspace() for character in stripped):
+        return False
+    if any(marker in stripped for marker in (";", "{", "}", "(", ")", "#", '"', "'")):
+        return False
+    normalized = stripped.replace("\\", "/")
+    if "/" not in normalized:
+        return False
+    if normalized.startswith(("/", "http://", "https://")):
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    first_non_relative = 0
+    while first_non_relative < len(parts) and parts[first_non_relative] in {".", ".."}:
+        first_non_relative += 1
+    if any(part in {".", ".."} for part in parts[first_non_relative:]):
+        return False
+    if any(part.startswith(".git") for part in parts):
+        return False
+    if not all(_safe_stub_path_part(part) for part in parts):
+        return False
+    target_suffix = Path(parts[-1]).suffix.lower()
+    if target_suffix not in SOURCE_STUB_CODE_SUFFIXES:
+        return False
+    return normalized.startswith(("./", "../")) or all(part not in {".", ".."} for part in parts[:-1])
 
 
 def _normalized_parts(path: str | Path) -> list[str]:
@@ -168,3 +254,9 @@ def _java_source_root_index(parts: list[str]) -> int:
         if parts[index : index + 3] == ["src", "main", "java"]:
             return index + 2
     return -1
+
+
+def _safe_stub_path_part(part: str) -> bool:
+    if part in {"", ".", ".."}:
+        return True
+    return all(character.isalnum() or character in {"_", "-", ".", "+", "@"} for character in part)

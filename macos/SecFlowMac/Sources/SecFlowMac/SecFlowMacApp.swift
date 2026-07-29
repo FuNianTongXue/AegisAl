@@ -10,7 +10,7 @@ private enum WeChatLikeWindowMetrics {
 @MainActor
 final class SecFlowAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.appearance = NSAppearance(named: .aqua)
+        NSApp.appearance = nil
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -22,31 +22,80 @@ final class SecFlowAppDelegate: NSObject, NSApplicationDelegate {
 struct SecFlowMacApp: App {
     @NSApplicationDelegateAdaptor(SecFlowAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    @StateObject private var informationPanel = InformationPanelPresenter()
+    @StateObject private var workspaceNavigation = WorkspaceNavigationModel()
+    @StateObject private var dashboardWindow = DashboardWindowPresenter()
 
     var body: some Scene {
         WindowGroup("") {
             RootView()
                 .environmentObject(model)
-                .preferredColorScheme(.light)
-                .environment(\.colorScheme, .light)
+                .environmentObject(informationPanel)
+                .environmentObject(workspaceNavigation)
+                .appAppearance(model: model)
                 .environment(\.locale, model.appLanguage.locale)
+                .appTypography()
                 .tint(AppPalette.primary)
                 .frame(
                     minWidth: WeChatLikeWindowMetrics.minSize.width,
                     minHeight: WeChatLikeWindowMetrics.minSize.height
                 )
                 .background(WeChatLikeWindowConfigurator())
+                .onAppear {
+                    informationPanel.configure(model: model)
+                    synchronizeInformationPanel(authenticated: model.isAuthenticated)
+                }
+                .onChange(of: model.isAuthenticated) { _, authenticated in
+                    synchronizeInformationPanel(authenticated: authenticated)
+                }
         }
         .defaultSize(
             width: WeChatLikeWindowMetrics.defaultSize.width,
             height: WeChatLikeWindowMetrics.defaultSize.height
         )
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
+            CommandGroup(replacing: .newItem) {
+                Button {
+                    model.startNewAssistantConversation()
+                    workspaceNavigation.startNewTask()
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Label(
+                        WorkspaceSidebarItem.newTask.title(model.appLanguage),
+                        systemImage: WorkspaceSidebarItem.newTask.icon
+                    )
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(!model.isAuthenticated)
+            }
+
             CommandGroup(after: .appInfo) {
+                Button {
+                    informationPanel.show(model: model)
+                } label: {
+                    Label(model.text(.navInformation), systemImage: "newspaper")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(!model.isAuthenticated)
+
+                Divider()
+
                 Button(model.text(.refreshData)) {
                     Task { await model.refreshAll() }
                 }
                 .keyboardShortcut("r", modifiers: .command)
+            }
+
+            CommandGroup(before: .appSettings) {
+                Button {
+                    dashboardWindow.show(model: model, informationPanel: informationPanel)
+                } label: {
+                    Label(model.text(.navOverview), systemImage: "square.grid.2x2")
+                }
+                .keyboardShortcut("1", modifiers: .command)
+                .disabled(!model.isAuthenticated)
             }
         }
 
@@ -56,20 +105,37 @@ struct SecFlowMacApp: App {
                 .overlay {
                     TrialStatusBlocker(status: model.trialStatus)
                 }
-                .preferredColorScheme(.light)
-                .environment(\.colorScheme, .light)
+                .appAppearance(model: model)
                 .environment(\.locale, model.appLanguage.locale)
+                .appTypography()
                 .tint(AppPalette.primary)
-                .frame(width: 1080, height: 760)
+                .frame(
+                    width: SettingsWindowMetrics.defaultSize.width,
+                    height: SettingsWindowMetrics.defaultSize.height
+                )
+        }
+    }
+
+    private func synchronizeInformationPanel(authenticated: Bool) {
+        if authenticated {
+            informationPanel.show(model: model)
+        } else {
+            informationPanel.close()
+            dashboardWindow.close()
         }
     }
 }
 
 private struct WeChatLikeWindowConfigurator: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
             configure(view.window)
+            context.coordinator.observeTitleChanges(in: view.window)
         }
         return view
     }
@@ -77,6 +143,7 @@ private struct WeChatLikeWindowConfigurator: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
             configure(nsView.window)
+            context.coordinator.observeTitleChanges(in: nsView.window)
         }
     }
 
@@ -87,6 +154,7 @@ private struct WeChatLikeWindowConfigurator: NSViewRepresentable {
         clearNativeWindowTitle(window)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -110,12 +178,29 @@ private struct WeChatLikeWindowConfigurator: NSViewRepresentable {
             clearNativeWindowTitle(window)
         }
     }
+
+    final class Coordinator {
+        private weak var observedWindow: NSWindow?
+        private var titleObservation: NSKeyValueObservation?
+
+        func observeTitleChanges(in window: NSWindow?) {
+            guard let window, observedWindow !== window else { return }
+            observedWindow = window
+            titleObservation = window.observe(\.title, options: [.new]) { window, change in
+                guard !(change.newValue ?? "").isEmpty else { return }
+                DispatchQueue.main.async {
+                    clearNativeWindowTitle(window)
+                }
+            }
+        }
+    }
 }
 
-private func clearNativeWindowTitle(_ window: NSWindow) {
+func clearNativeWindowTitle(_ window: NSWindow) {
     window.title = ""
     window.subtitle = ""
     window.representedURL = nil
+    window.titleVisibility = .hidden
 
     if let titlebarView = window.standardWindowButton(.closeButton)?.superview {
         hideTitleTextFields(in: titlebarView)

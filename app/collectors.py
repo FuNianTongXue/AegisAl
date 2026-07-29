@@ -334,6 +334,7 @@ def _nvd_record(cve: dict[str, Any], config: dict[str, Any], year: int | None) -
         "title": summary[:160] or cve_id,
         "severity": _nvd_severity(cve),
         "cvss_score": _nvd_cvss_score(cve),
+        "cvss_vector": _nvd_cvss_vector(cve),
         "source": "fixed-api",
         "summary": summary,
         "affected_versions": _nvd_affected_versions(cve),
@@ -376,6 +377,18 @@ def _nvd_cvss_score(cve: dict[str, Any]) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _nvd_cvss_vector(cve: dict[str, Any]) -> str:
+    metrics = cve.get("metrics", {})
+    for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        values = metrics.get(key) or []
+        if not values:
+            continue
+        vector = str((values[0].get("cvssData") or {}).get("vectorString") or "").strip()
+        if vector.startswith("CVSS:"):
+            return vector
+    return ""
 
 
 def _nvd_affected_versions(cve: dict[str, Any]) -> list[str]:
@@ -706,6 +719,6 @@ collector_service = CollectorService()
 
 # Import after the adapters are defined so the graph can reuse them without a
 # module import cycle.
-from app.collector_graph import CollectorGraph  # noqa: E402
+from app.langgraph.collector_graph import CollectorGraph  # noqa: E402
 
 collector_graph = CollectorGraph(collector_service)

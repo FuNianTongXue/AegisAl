@@ -24,10 +24,10 @@ final class FirstRunSecurityTests: XCTestCase {
     }
 
     @MainActor
-    func testFirstRunWizardRendersProviderStep() throws {
+    func testPostLoginWizardRendersProfileStep() throws {
         let size = NSSize(width: 1100, height: 720)
         let hostingView = NSHostingView(
-            rootView: LLMOnboardingView()
+            rootView: PostLoginSetupView()
                 .environmentObject(AppModel())
                 .frame(width: size.width, height: size.height)
         )
@@ -41,6 +41,89 @@ final class FirstRunSecurityTests: XCTestCase {
         if let snapshotPath = ProcessInfo.processInfo.environment["SECFLOW_ONBOARDING_SNAPSHOT"] {
             try png.write(to: URL(fileURLWithPath: snapshotPath), options: .atomic)
         }
+    }
+
+    func testSetupStartsWithProfileForANewAccount() {
+        let profile = makeProfile(email: "other@example.com", updatedAt: "2026-07-28T10:00:00Z")
+        XCTAssertEqual(
+            PostLoginSetupRules.firstIncompleteStep(
+                profile: profile,
+                userID: "analyst@example.com",
+                llmConfig: makeLLMConfig(configured: true, hasApiKey: true)
+            ),
+            1
+        )
+    }
+
+    func testSetupRequiresExplicitlySavedProfileAndRole() {
+        let unsavedProfile = makeProfile(email: "analyst@example.com", updatedAt: "")
+        let missingRole = makeProfile(email: "analyst@example.com", role: "", updatedAt: "2026-07-28T10:00:00Z")
+
+        XCTAssertFalse(PostLoginSetupRules.isProfileComplete(unsavedProfile, userID: "analyst@example.com"))
+        XCTAssertFalse(PostLoginSetupRules.isProfileComplete(missingRole, userID: "analyst@example.com"))
+    }
+
+    func testCompletedProfileResumesAtModelConfiguration() {
+        let profile = makeProfile(email: "analyst@example.com", updatedAt: "2026-07-28T10:00:00Z")
+        XCTAssertEqual(
+            PostLoginSetupRules.firstIncompleteStep(
+                profile: profile,
+                userID: "ANALYST@example.com",
+                llmConfig: makeLLMConfig(configured: false, hasApiKey: false)
+            ),
+            3
+        )
+    }
+
+    func testCompletedProfileAndModelSkipSetup() {
+        let profile = makeProfile(email: "analyst@example.com", updatedAt: "2026-07-28T10:00:00Z")
+        XCTAssertNil(
+            PostLoginSetupRules.firstIncompleteStep(
+                profile: profile,
+                userID: "analyst@example.com",
+                llmConfig: makeLLMConfig(configured: true, hasApiKey: true)
+            )
+        )
+    }
+
+    private func makeProfile(
+        email: String,
+        role: String = "安全分析师",
+        updatedAt: String
+    ) -> UserProfileSettingsSnapshot {
+        UserProfileSettingsSnapshot(
+            displayName: "小安",
+            email: email,
+            phone: "",
+            department: "安全研发部",
+            role: role,
+            employeeId: "",
+            bio: "",
+            avatarFileName: "",
+            avatarContentType: "",
+            avatarUpdatedAt: "",
+            updatedAt: updatedAt,
+            avatarAvailable: false
+        )
+    }
+
+    private func makeLLMConfig(configured: Bool, hasApiKey: Bool) -> LLMConfigSnapshot {
+        LLMConfigSnapshot(
+            name: nil,
+            provider: "openai",
+            catalogProvider: "openai",
+            model: "gpt-5.4",
+            endpoint: "https://api.openai.com/v1",
+            wireApi: nil,
+            reasoningEffort: nil,
+            disableResponseStorage: nil,
+            enabled: configured,
+            configured: configured,
+            hasApiKey: hasApiKey,
+            apiKeyMasked: nil,
+            message: nil,
+            updatedAt: nil
+        )
     }
 
     private func nonWhitePixelCount(_ bitmap: NSBitmapImageRep) -> Int {

@@ -5,7 +5,7 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -77,7 +77,14 @@ GRADLE_VERSION_CATALOG_NAMES = {"libs.versions.toml"}
 GRADLE_PROPERTIES_NAMES = {"gradle.properties"}
 PYTHON_MANIFEST_NAMES = {"requirements.txt", "pyproject.toml", "pipfile", "poetry.lock"}
 GO_MANIFEST_NAMES = {"go.mod", "go.sum"}
-C_CPP_MANIFEST_NAMES = {"cmakelists.txt", "conanfile.txt", "conanfile.py", "vcpkg.json"}
+C_CPP_MANIFEST_NAMES = {"cmakelists.txt", "compile_commands.json", "conanfile.txt", "conanfile.py", "vcpkg.json"}
+DOTNET_MANIFEST_NAMES = {
+    "directory.packages.props",
+    "directory.build.props",
+    "packages.lock.json",
+    "packages.config",
+    "project.assets.json",
+}
 RUST_MANIFEST_NAMES = {"cargo.toml", "cargo.lock"}
 SOLIDITY_MANIFEST_NAMES = {
     "foundry.toml",
@@ -91,6 +98,7 @@ PROJECT_MANIFEST_NAMES = (
     PYTHON_MANIFEST_NAMES
     | GO_MANIFEST_NAMES
     | C_CPP_MANIFEST_NAMES
+    | DOTNET_MANIFEST_NAMES
     | RUST_MANIFEST_NAMES
     | SOLIDITY_MANIFEST_NAMES
 )
@@ -100,6 +108,7 @@ BUILD_MANIFEST_SOURCE_TYPES = {
     "python_manifest",
     "go_manifest",
     "c_cpp_manifest",
+    "dotnet_manifest",
     "rust_manifest",
     "solidity_manifest",
 }
@@ -179,18 +188,31 @@ def is_allowed_attachment_name(file_name: str) -> bool:
         or is_gradle_build_file_name(file_name)
         or is_gradle_version_catalog_name(file_name)
         or is_gradle_properties_name(file_name)
+        or is_python_requirements_name(file_name)
+        or is_dotnet_manifest_name(file_name)
         or path.name.lower() in PROJECT_MANIFEST_NAMES
         or path.suffix.lower() in CODE_EXTENSIONS
     )
 
 
-def scan_dependency_attachments(attachments: list[dict[str, Any]], max_dependencies: int = 80) -> dict[str, Any]:
+def scan_dependency_attachments(
+    attachments: list[dict[str, Any]],
+    max_dependencies: int | None = 80,
+    *,
+    include_all_attachments: bool = False,
+) -> dict[str, Any]:
     dependencies: dict[str, DependencyFact] = {}
     files: list[dict[str, str]] = []
     rejected: list[str] = []
     accepted: list[tuple[str, str, str]] = []
 
-    for attachment in attachments[:MAX_ASK_ATTACHMENTS]:
+    prioritized_attachments = sorted(attachments, key=raw_dependency_attachment_priority)
+    selected_attachments = (
+        prioritized_attachments
+        if include_all_attachments
+        else prioritized_attachments[:MAX_ASK_ATTACHMENTS]
+    )
+    for attachment in selected_attachments:
         file_name = str(attachment.get("file_name") or attachment.get("fileName") or "").strip()
         content = str(attachment.get("content") or "")
         if not file_name or not is_allowed_attachment_name(file_name):
@@ -201,8 +223,13 @@ def scan_dependency_attachments(attachments: list[dict[str, Any]], max_dependenc
         files.append({"file_name": file_name, "kind": kind})
         accepted.append((file_name, content, kind))
 
+    accepted.sort(key=lambda item: dependency_attachment_priority(item[0], item[2]))
+    files.sort(key=lambda item: dependency_attachment_priority(item["file_name"], item["kind"]))
     inherited_properties, managed_versions = collect_attachment_pom_context(accepted)
     gradle_context = collect_attachment_gradle_context(accepted)
+    go_contexts = collect_go_module_contexts(accepted)
+    python_contexts = collect_python_requirements_contexts(accepted)
+    dotnet_context = collect_dotnet_dependency_context(accepted)
     for file_name, content, kind in accepted:
         if kind == "pom":
             extracted = parse_pom_dependencies(
@@ -215,16 +242,27 @@ def scan_dependency_attachments(attachments: list[dict[str, Any]], max_dependenc
             extracted = parse_gradle_dependencies(file_name, content, context=gradle_context)
         elif kind == "python_manifest":
             extracted = parse_python_manifest_dependencies(file_name, content)
+            if not is_python_requirements_name(file_name):
+                extracted = supplement_python_manifest_dependencies(file_name, extracted, python_contexts)
         elif kind == "go_manifest":
-            extracted = parse_go_manifest_dependencies(file_name, content)
+            if Path(file_name).name.lower() == "go.sum" and has_sibling_go_mod(file_name, go_contexts):
+                extracted = []
+            else:
+                extracted = parse_go_manifest_dependencies(file_name, content)
         elif kind == "c_cpp_manifest":
             extracted = parse_c_cpp_manifest_dependencies(file_name, content)
+        elif kind == "dotnet_manifest":
+            extracted = parse_dotnet_manifest_dependencies(file_name, content, context=dotnet_context)
         elif kind == "rust_manifest":
             extracted = parse_rust_manifest_dependencies(file_name, content)
         elif kind == "solidity_manifest":
             extracted = parse_solidity_manifest_dependencies(file_name, content)
         else:
             extracted = parse_code_dependencies(file_name, content)
+            if Path(file_name).suffix.lower() == ".go":
+                extracted = normalize_go_import_dependencies(file_name, extracted, go_contexts)
+            elif Path(file_name).suffix.lower() == ".py":
+                extracted = normalize_python_import_dependencies(file_name, extracted, python_contexts)
         for dependency in extracted:
             component_key = f"{dependency.ecosystem}|{dependency.name}".lower()
             existing = [key for key, item in dependencies.items() if f"{item.ecosystem}|{item.name}".lower() == component_key]
@@ -235,7 +273,7 @@ def scan_dependency_attachments(attachments: list[dict[str, Any]], max_dependenc
                     if dependencies[key].source_type == "code":
                         dependencies.pop(key, None)
             dependencies.setdefault(dependency.key, dependency)
-            if len(dependencies) >= max_dependencies:
+            if max_dependencies is not None and len(dependencies) >= max_dependencies:
                 break
 
     return {
@@ -244,6 +282,187 @@ def scan_dependency_attachments(attachments: list[dict[str, Any]], max_dependenc
         "dependency_count": len(dependencies),
         "rejected_files": rejected,
     }
+
+
+def raw_dependency_attachment_priority(attachment: dict[str, Any]) -> tuple[int, str]:
+    file_name = str(attachment.get("file_name") or attachment.get("fileName") or "").strip()
+    kind = attachment_kind(file_name) if file_name and is_allowed_attachment_name(file_name) else "code"
+    return dependency_attachment_priority(file_name, kind)
+
+
+def dependency_attachment_priority(file_name: str, kind: str) -> tuple[int, str]:
+    normalized = file_name.replace("\\", "/").lower()
+    basename = PurePosixPath(normalized).name
+    if basename == "go.mod" or is_python_requirements_name(normalized):
+        return (0, normalized)
+    if kind != "code" and basename != "go.sum":
+        return (1, normalized)
+    if basename == "go.sum":
+        return (2, normalized)
+    return (3, normalized)
+
+
+def is_python_requirements_name(file_name: str) -> bool:
+    normalized = file_name.replace("\\", "/").lower()
+    path = PurePosixPath(normalized)
+    name = path.name
+    return (
+        name == "requirements.txt"
+        or (name.startswith("requirements-") and name.endswith(".txt"))
+        or ("requirements" in path.parts[:-1] and name.endswith(".txt"))
+    )
+
+
+def collect_python_requirements_contexts(accepted: list[tuple[str, str, str]]) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    for file_name, content, kind in accepted:
+        if kind != "python_manifest" or not is_python_requirements_name(file_name):
+            continue
+        normalized = file_name.replace("\\", "/")
+        contexts.append(
+            {
+                "directory": PurePosixPath(normalized).parent,
+                "file_name": normalized,
+                "requirements": parse_python_manifest_dependencies(normalized, content),
+            }
+        )
+    return sorted(contexts, key=lambda item: len(item["directory"].parts), reverse=True)
+
+
+def supplement_python_manifest_dependencies(
+    file_name: str,
+    dependencies: list[DependencyFact],
+    contexts: list[dict[str, Any]],
+) -> list[DependencyFact]:
+    directory = PurePosixPath(file_name.replace("\\", "/")).parent
+    requirements = [
+        dependency
+        for context in contexts
+        if context["directory"] == directory
+        for dependency in context["requirements"]
+    ]
+    authoritative_names = {canonical_python_package_name(item.name) for item in requirements}
+    return [
+        dependency
+        for dependency in dependencies
+        if canonical_python_package_name(dependency.name) not in authoritative_names
+    ]
+
+
+def normalize_python_import_dependencies(
+    file_name: str,
+    dependencies: list[DependencyFact],
+    contexts: list[dict[str, Any]],
+) -> list[DependencyFact]:
+    source_path = PurePosixPath(file_name.replace("\\", "/"))
+    context = next(
+        (
+            item
+            for item in contexts
+            if source_path.parent == item["directory"] or item["directory"] in source_path.parents
+        ),
+        None,
+    )
+    if context is None:
+        return dependencies
+
+    requirements: list[DependencyFact] = list(context.get("requirements") or [])
+    by_name = {canonical_python_package_name(item.name): item for item in requirements}
+    normalized: list[DependencyFact] = []
+    for dependency in dependencies:
+        requirement = by_name.get(canonical_python_package_name(dependency.name))
+        if requirement is None:
+            normalized.append(dependency)
+            continue
+        normalized.append(
+            DependencyFact(
+                ecosystem=requirement.ecosystem,
+                name=requirement.name,
+                version=requirement.version,
+                source_file=requirement.source_file,
+                source_type=requirement.source_type,
+                declaration=f"{requirement.declaration} (imported by {file_name})",
+                confidence="high",
+            )
+        )
+    return _dedupe_manifest_facts(normalized)
+
+
+def canonical_python_package_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value.strip().lower())
+
+
+def collect_go_module_contexts(accepted: list[tuple[str, str, str]]) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    for file_name, content, kind in accepted:
+        if kind != "go_manifest" or Path(file_name).name.lower() != "go.mod":
+            continue
+        normalized = file_name.replace("\\", "/")
+        module_match = re.search(r"(?m)^\s*module\s+([^\s]+)\s*$", content)
+        contexts.append(
+            {
+                "directory": PurePosixPath(normalized).parent,
+                "file_name": normalized,
+                "module_path": module_match.group(1).strip() if module_match else "",
+                "requirements": parse_go_manifest_dependencies(normalized, content),
+            }
+        )
+    return sorted(contexts, key=lambda item: len(item["directory"].parts), reverse=True)
+
+
+def has_sibling_go_mod(file_name: str, contexts: list[dict[str, Any]]) -> bool:
+    directory = PurePosixPath(file_name.replace("\\", "/")).parent
+    return any(context["directory"] == directory for context in contexts)
+
+
+def normalize_go_import_dependencies(
+    file_name: str,
+    dependencies: list[DependencyFact],
+    contexts: list[dict[str, Any]],
+) -> list[DependencyFact]:
+    source_path = PurePosixPath(file_name.replace("\\", "/"))
+    context = next(
+        (
+            item
+            for item in contexts
+            if source_path.parent == item["directory"] or item["directory"] in source_path.parents
+        ),
+        None,
+    )
+    if context is None:
+        return dependencies
+
+    module_path = str(context.get("module_path") or "")
+    requirements: list[DependencyFact] = list(context.get("requirements") or [])
+    normalized: list[DependencyFact] = []
+    for dependency in dependencies:
+        import_path = dependency.name
+        if module_path and (import_path == module_path or import_path.startswith(f"{module_path}/")):
+            continue
+        requirement = max(
+            (
+                item
+                for item in requirements
+                if import_path == item.name or import_path.startswith(f"{item.name}/")
+            ),
+            key=lambda item: len(item.name),
+            default=None,
+        )
+        if requirement is None:
+            normalized.append(dependency)
+            continue
+        normalized.append(
+            DependencyFact(
+                ecosystem=requirement.ecosystem,
+                name=requirement.name,
+                version=requirement.version,
+                source_file=requirement.source_file,
+                source_type=requirement.source_type,
+                declaration=f"{requirement.declaration} (imported by {file_name})",
+                confidence="high",
+            )
+        )
+    return _dedupe_manifest_facts(normalized)
 
 
 def attachment_kind(file_name: str) -> str:
@@ -256,17 +475,24 @@ def attachment_kind(file_name: str) -> str:
         return "gradle_properties"
     if is_gradle_build_file_name(file_name):
         return "gradle"
-    if lowered in PYTHON_MANIFEST_NAMES:
+    if is_python_requirements_name(file_name) or lowered in PYTHON_MANIFEST_NAMES:
         return "python_manifest"
     if lowered in GO_MANIFEST_NAMES:
         return "go_manifest"
     if lowered in C_CPP_MANIFEST_NAMES:
         return "c_cpp_manifest"
+    if is_dotnet_manifest_name(file_name):
+        return "dotnet_manifest"
     if lowered in RUST_MANIFEST_NAMES:
         return "rust_manifest"
     if lowered in SOLIDITY_MANIFEST_NAMES:
         return "solidity_manifest"
     return "code"
+
+
+def is_dotnet_manifest_name(file_name: str) -> bool:
+    name = Path(file_name.replace("\\", "/")).name.lower()
+    return name.endswith(".csproj") or name in DOTNET_MANIFEST_NAMES
 
 
 def is_gradle_build_file_name(file_name: str) -> bool:
@@ -1021,7 +1247,7 @@ def unescape_gradle_string(value: str) -> str:
 def parse_python_manifest_dependencies(file_name: str, content: str) -> list[DependencyFact]:
     name = Path(file_name).name.lower()
     result: list[DependencyFact] = []
-    if name == "requirements.txt":
+    if is_python_requirements_name(file_name):
         for raw_line in content.splitlines():
             line = raw_line.split("#", 1)[0].strip()
             if not line or line.startswith(("-", "http://", "https://", "git+")):
@@ -1070,17 +1296,41 @@ def parse_python_manifest_dependencies(file_name: str, content: str) -> list[Dep
 
 
 def parse_go_manifest_dependencies(file_name: str, content: str) -> list[DependencyFact]:
+    if Path(file_name).name.lower() == "go.sum":
+        return parse_go_sum_dependencies(file_name, content)
+
     result: list[DependencyFact] = []
+    in_require_block = False
     for raw_line in content.splitlines():
+        declaration = raw_line.strip()
         line = raw_line.split("//", 1)[0].strip()
-        if not line or line in {"require (", ")"} or line.startswith(("module ", "go ", "toolchain ", "replace ", "exclude ")):
+        if not line:
             continue
-        if line.startswith("require "):
+        if line == "require (":
+            in_require_block = True
+            continue
+        if in_require_block and line == ")":
+            in_require_block = False
+            continue
+        if not in_require_block:
+            if not line.startswith("require "):
+                continue
             line = line.removeprefix("require ").strip()
         match = re.match(r"^([^\s()]+)\s+(v[^\s]+)", line)
         if not match:
             continue
-        result.append(_manifest_fact("Go", match.group(1), match.group(2), file_name, "go_manifest", line))
+        result.append(_manifest_fact("Go", match.group(1), match.group(2), file_name, "go_manifest", declaration))
+    return _dedupe_manifest_facts(result)
+
+
+def parse_go_sum_dependencies(file_name: str, content: str) -> list[DependencyFact]:
+    result: list[DependencyFact] = []
+    for raw_line in content.splitlines():
+        fields = raw_line.strip().split()
+        if len(fields) < 2 or not fields[1].startswith("v"):
+            continue
+        version = fields[1].removesuffix("/go.mod")
+        result.append(_manifest_fact("Go", fields[0], version, file_name, "go_manifest", raw_line.strip()))
     return _dedupe_manifest_facts(result)
 
 
@@ -1114,8 +1364,241 @@ def parse_c_cpp_manifest_dependencies(file_name: str, content: str) -> list[Depe
                 if match:
                     result.append(_manifest_fact("Conan", match.group(1), match.group(2), file_name, "c_cpp_manifest", candidate))
         return _dedupe_manifest_facts(result)
-    for match in re.finditer(r"find_package\s*\(\s*([A-Za-z0-9_.+-]+)(?:\s+([0-9][^\s)]*))?", content, flags=re.IGNORECASE):
-        result.append(_manifest_fact("CMake", match.group(1), match.group(2) or "", file_name, "c_cpp_manifest", match.group(0)))
+    cmake_variables = extract_cmake_variables(content)
+    for match in re.finditer(
+        r"find_package\s*\(\s*([A-Za-z0-9_.+-]+)(?:\s+([0-9][^\s)]*|\$\{[A-Za-z_][\w.:-]*\}))?",
+        content,
+        flags=re.IGNORECASE,
+    ):
+        version = resolve_cmake_value(match.group(2) or "", cmake_variables)
+        result.append(_manifest_fact("CMake", match.group(1), version, file_name, "c_cpp_manifest", match.group(0)))
+    return _dedupe_manifest_facts(result)
+
+
+def collect_dotnet_dependency_context(accepted: list[tuple[str, str, str]]) -> dict[str, list[dict[str, Any]]]:
+    property_contexts: list[dict[str, Any]] = []
+    for file_name, content, kind in accepted:
+        if kind != "dotnet_manifest":
+            continue
+        name = Path(file_name).name.lower()
+        if name not in {"directory.build.props", "directory.packages.props"}:
+            continue
+        root = _parse_xml(content)
+        if root is None:
+            continue
+        properties = _dotnet_properties(root)
+        if properties:
+            property_contexts.append({"directory": _manifest_directory(file_name), "properties": properties})
+
+    central_contexts: list[dict[str, Any]] = []
+    resolved_contexts: list[dict[str, Any]] = []
+    for file_name, content, kind in accepted:
+        if kind != "dotnet_manifest":
+            continue
+        name = Path(file_name).name.lower()
+        if name == "directory.packages.props":
+            root = _parse_xml(content)
+            if root is None:
+                continue
+            properties = _dotnet_context_properties(file_name, property_contexts)
+            properties.update(_dotnet_properties(root))
+            versions: dict[str, str] = {}
+            for item in elements_by_local_name(root, "PackageVersion"):
+                package = str(item.attrib.get("Include") or item.attrib.get("Update") or "").strip()
+                version = _dotnet_item_version(item, properties)
+                if package and version:
+                    versions.setdefault(package.casefold(), version)
+            central_contexts.append({"directory": _manifest_directory(file_name), "versions": versions})
+        elif name in {"packages.lock.json", "project.assets.json"}:
+            versions = {}
+            for dependency in _parse_dotnet_json_dependencies(file_name, content):
+                if dependency.version:
+                    versions.setdefault(dependency.name.casefold(), dependency.version)
+            directory = _manifest_directory(file_name)
+            if name == "project.assets.json" and directory.name.casefold() == "obj":
+                directory = directory.parent
+            resolved_contexts.append({"directory": directory, "versions": versions})
+    return {"central": central_contexts, "resolved": resolved_contexts, "properties": property_contexts}
+
+
+def parse_dotnet_manifest_dependencies(
+    file_name: str,
+    content: str,
+    *,
+    context: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[DependencyFact]:
+    name = Path(file_name).name.lower()
+    if name in {"packages.lock.json", "project.assets.json"}:
+        return _parse_dotnet_json_dependencies(file_name, content)
+
+    root = _parse_xml(content)
+    if root is None:
+        return []
+    result: list[DependencyFact] = []
+    if name == "packages.config":
+        for item in elements_by_local_name(root, "package"):
+            package = str(item.attrib.get("id") or "").strip()
+            version = str(item.attrib.get("version") or "").strip()
+            if package:
+                result.append(
+                    _manifest_fact("NuGet", package, version, file_name, "dotnet_manifest", ET.tostring(item, encoding="unicode"))
+                )
+        return _dedupe_manifest_facts(result)
+
+    properties = _dotnet_context_properties(file_name, (context or {}).get("properties") or [])
+    properties.update(_dotnet_properties(root))
+    for item in elements_by_local_name(root, "PackageReference"):
+        package = str(item.attrib.get("Include") or item.attrib.get("Update") or "").strip()
+        if not package:
+            continue
+        declared_version = _dotnet_item_version(item, properties)
+        version = (
+            _dotnet_context_version(file_name, package, (context or {}).get("resolved") or [], exact_directory=True)
+            or declared_version
+            or _dotnet_context_version(file_name, package, (context or {}).get("central") or [])
+        )
+        result.append(
+            _manifest_fact("NuGet", package, version, file_name, "dotnet_manifest", ET.tostring(item, encoding="unicode"))
+        )
+    return _dedupe_manifest_facts(result)
+
+
+def _manifest_directory(file_name: str) -> PurePosixPath:
+    return PurePosixPath(file_name.replace("\\", "/")).parent
+
+
+def _dotnet_context_version(
+    file_name: str,
+    package: str,
+    contexts: list[dict[str, Any]],
+    *,
+    exact_directory: bool = False,
+) -> str:
+    source_directory = _manifest_directory(file_name)
+    candidates = sorted(contexts, key=lambda item: len(PurePosixPath(item["directory"]).parts), reverse=True)
+    for item in candidates:
+        directory = PurePosixPath(item["directory"])
+        applies = source_directory == directory if exact_directory else (
+            source_directory == directory or directory in source_directory.parents
+        )
+        if not applies:
+            continue
+        version = str((item.get("versions") or {}).get(package.casefold()) or "")
+        if version:
+            return version
+    return ""
+
+
+def _dotnet_context_properties(file_name: str, contexts: list[dict[str, Any]]) -> dict[str, str]:
+    source_directory = _manifest_directory(file_name)
+    merged: dict[str, str] = {}
+    candidates = sorted(contexts, key=lambda item: len(PurePosixPath(item["directory"]).parts))
+    for item in candidates:
+        directory = PurePosixPath(item["directory"])
+        if source_directory == directory or directory in source_directory.parents:
+            merged.update({str(key): str(value) for key, value in (item.get("properties") or {}).items()})
+    return merged
+
+
+def extract_cmake_variables(content: str) -> dict[str, str]:
+    variables: dict[str, str] = {}
+    pattern = re.compile(
+        r"""(?im)^\s*set\s*\(\s*(?P<name>[A-Za-z_][\w.]*)\s+(?P<value>"[^"]+"|'[^']+'|[^\s)]+)"""
+    )
+    for match in pattern.finditer(content):
+        value = match.group("value").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if value:
+            variables[match.group("name")] = value.strip()
+    return variables
+
+
+def resolve_cmake_value(value: str, variables: dict[str, str]) -> str:
+    value = (value or "").strip()
+    for _ in range(8):
+        match = re.fullmatch(r"\$\{([^}]+)\}", value)
+        if match is None:
+            break
+        replacement = variables.get(match.group(1), "")
+        if not replacement or replacement == value:
+            break
+        value = replacement.strip()
+    return value
+
+
+def _parse_xml(content: str) -> ET.Element | None:
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError:
+        return None
+
+
+def _dotnet_properties(root: ET.Element) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for group in elements_by_local_name(root, "PropertyGroup"):
+        for item in list(group):
+            value = (item.text or "").strip()
+            if value:
+                properties.setdefault(local_name(item.tag), value)
+    return properties
+
+
+def _dotnet_item_version(item: ET.Element, properties: dict[str, str]) -> str:
+    version = str(item.attrib.get("VersionOverride") or item.attrib.get("Version") or "").strip()
+    if not version:
+        for child_name in ("VersionOverride", "Version"):
+            child = next(iter(direct_children(item, child_name)), None)
+            if child is not None and child.text:
+                version = child.text.strip()
+                break
+    for _ in range(8):
+        match = re.fullmatch(r"\$\(([^)]+)\)", version)
+        if match is None or match.group(1) not in properties:
+            break
+        resolved = properties[match.group(1)]
+        if resolved == version:
+            break
+        version = resolved
+    return version
+
+
+def _parse_dotnet_json_dependencies(file_name: str, content: str) -> list[DependencyFact]:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    name = Path(file_name).name.lower()
+    result: list[DependencyFact] = []
+    if name == "packages.lock.json":
+        frameworks = payload.get("dependencies") or {}
+        if not isinstance(frameworks, dict):
+            return []
+        for framework_dependencies in frameworks.values():
+            if not isinstance(framework_dependencies, dict):
+                continue
+            for package, metadata in framework_dependencies.items():
+                if not isinstance(metadata, dict):
+                    continue
+                version = str(metadata.get("resolved") or metadata.get("requested") or "")
+                result.append(
+                    _manifest_fact("NuGet", str(package), version, file_name, "dotnet_manifest", json.dumps(metadata, sort_keys=True))
+                )
+    elif name == "project.assets.json":
+        libraries = payload.get("libraries") or {}
+        if not isinstance(libraries, dict):
+            return []
+        for coordinate, metadata in libraries.items():
+            if not isinstance(metadata, dict) or str(metadata.get("type") or "").casefold() != "package":
+                continue
+            package, separator, version = str(coordinate).partition("/")
+            if package and separator:
+                result.append(
+                    _manifest_fact("NuGet", package, version, file_name, "dotnet_manifest", str(coordinate))
+                )
     return _dedupe_manifest_facts(result)
 
 
