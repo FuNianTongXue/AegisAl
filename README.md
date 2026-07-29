@@ -10,7 +10,7 @@
   <a href="https://github.com/langchain-ai/langgraph"><img src="https://img.shields.io/badge/LangGraph-Agent-1C3C3C?style=flat-square" alt="LangGraph" /></a>
   <a href="https://developer.apple.com/xcode/swiftui/"><img src="https://img.shields.io/badge/SwiftUI-Native_macOS-F05138?style=flat-square&amp;logo=swift&amp;logoColor=white" alt="SwiftUI" /></a>
   <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/macOS-14%2B-000000?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="macOS 14+" /></a>
-  <a href="https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.2.0-macos-agent-trial"><img src="https://img.shields.io/badge/Release-v1.2.0-2EA44F?style=flat-square" alt="Release v1.2.0" /></a>
+  <a href="https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.2.0-trial-7days"><img src="https://img.shields.io/badge/Release-v1.2.0_7--Day_Trial-2EA44F?style=flat-square" alt="Release v1.2.0 7-Day Trial" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Source--Available-D73A49?style=flat-square" alt="Source-Available License" /></a>
   <a href="https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/stargazers"><img src="https://img.shields.io/github/stars/FuNianTongXue/secflow-knowledge-security-assistant?style=flat-square" alt="GitHub stars" /></a>
 </p>
@@ -82,16 +82,18 @@ SecFlow Knowledge Security Assistant 是从 SecFlow AI 平台中独立出来的 
 
 <a id="download"></a>
 
-## 📦 macOS 双架构下载
+## 📦 7 天试用版下载
 
-版本 `v1.2.0` 提供 Apple Silicon 与 Intel 两个三天试用包。试用期从首次启动开始连续计算 72 小时。
+版本 `v1.2.0` 提供 macOS Apple Silicon、macOS Intel 与 Windows x64 安装包。试用期从首次启动开始连续计算 168 小时。
 
 | 平台 | 下载 | 适用设备 |
 | --- | --- | --- |
-| Apple Silicon `arm64` | [下载 SecFlow-Trial-3Days-macOS-arm64.zip](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-macos-agent-trial/SecFlow-Trial-3Days-macOS-arm64.zip) | M1 / M2 / M3 / M4 系列 Mac |
-| Intel `x86_64` | [下载 SecFlow-Trial-3Days-macOS-x86_64.zip](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-macos-agent-trial/SecFlow-Trial-3Days-macOS-x86_64.zip) | Intel Mac；Apple Silicon 可通过 Rosetta 运行 |
+| macOS Apple Silicon `arm64` | [下载 ZIP](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-trial-7days/SecFlow-Trial-7Days-macOS-arm64.zip) | M1 / M2 / M3 / M4 系列 Mac，macOS 14+ |
+| macOS Intel `x86_64` | [下载 ZIP](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-trial-7days/SecFlow-Trial-7Days-macOS-x86_64.zip) | Intel Mac，macOS 14+ |
+| Windows `x64` | [下载安装器](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-trial-7days/SecFlow-Windows-x64-Trial-7Days-Setup.exe) | Windows 10 / 11 x64 |
+| Windows `x64` 便携版 | [下载 ZIP](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-trial-7days/SecFlow-Windows-x64-Trial-7Days.zip) | Windows 10 / 11 x64，无需安装 |
 
-最低系统版本为 macOS 14。当前发布包采用 ad-hoc 签名，未经过 Apple Developer ID 公证；首次打开时可能需要在 Finder 中右键应用并选择“打开”。校验值、完整变更与已知限制见 [v1.2.0 Release](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.2.0-macos-agent-trial)。
+macOS 包采用 ad-hoc 签名，未经过 Apple Developer ID 公证；首次打开时可能需要在 Finder 中右键应用并选择“打开”。完整校验值、变更与已知限制见 [v1.2.0 7 天试用版 Release](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.2.0-trial-7days) 和 [SHA256SUMS.txt](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.2.0-trial-7days/SHA256SUMS.txt)。
 
 试用状态由本地后端统一校验。到期、检测到系统时间回拨或状态损坏后，客户端界面将锁定，核心 API 返回 `403`。离线限时机制无法做到绝对不可破解，但删除单一状态副本或普通卸载重装不会重置试用期。
 
@@ -159,12 +161,13 @@ classify_query
 
 ## 🚀 快速开始
 
-### 直接体验 macOS 应用
+### 直接体验桌面应用
 
-从[发布页](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.2.0-macos-agent-trial)下载与当前 Mac 架构对应的压缩包，解压后打开 `SecFlow.app`。应用会启动自己的回环后端，运行数据写入：
+从[发布页](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.2.0-trial-7days)下载对应平台的安装包。macOS 解压后打开 `SecFlow-Trial-7Days.app`；Windows 可运行安装器，或解压便携版后启动 `SecFlow.exe`。应用会启动自己的回环后端，试用数据分别写入：
 
 ```text
-~/Library/Application Support/SecFlow
+macOS:   ~/Library/Application Support/SecFlow-Trial-7Days
+Windows: %LOCALAPPDATA%\SecFlow\SecurityAI-Trial-7Days
 ```
 
 ### 从源码运行
@@ -221,7 +224,7 @@ PYTHON_BIN=/path/to/x86_64/venv/bin/python \
 bash scripts/build_macos_trial_app.sh
 ```
 
-产物分别写入 `dist-macos-trial/SecFlow-Trial-7Days-macOS-arm64.zip` 与 `dist-macos-trial/SecFlow-Trial-7Days-macOS-x86_64.zip`，不会互相覆盖。上方 `v1.2.0` 下载链接仍是已发布的历史三天试用包；当前源码构建脚本使用独立标识和数据目录生成 7 天试用包。详细说明见 [macOS 构建文档](./macos/SecFlowMac/README.md)。
+产物分别写入 `dist-macos-trial/SecFlow-Trial-7Days-macOS-arm64.zip` 与 `dist-macos-trial/SecFlow-Trial-7Days-macOS-x86_64.zip`，不会互相覆盖。7 天试用包使用独立标识和数据目录，不会覆盖历史三天试用版或无限期版本。详细说明见 [macOS 构建文档](./macos/SecFlowMac/README.md)。
 
 ## 🛡️ 能力清单
 
