@@ -9,12 +9,14 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, RunEvent, TitleBarStyle,
-    WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, RunEvent, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
@@ -210,7 +212,7 @@ fn validate_project_directory(path: String) -> Result<String, String> {
 fn open_task_window(app: AppHandle) -> Result<String, String> {
     let sequence = TASK_WINDOW_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let label = format!("task-{sequence}");
-    WebviewWindowBuilder::new(
+    let builder = WebviewWindowBuilder::new(
         &app,
         &label,
         WebviewUrl::App(format!("index.html?secflowWindow=task&taskWindowId={sequence}").into()),
@@ -218,12 +220,15 @@ fn open_task_window(app: AppHandle) -> Result<String, String> {
     .title("新建安全任务")
     .inner_size(1280.0, 820.0)
     .min_inner_size(960.0, 640.0)
-    .decorations(true)
-    .hidden_title(true)
-    .title_bar_style(TitleBarStyle::Overlay)
-    .center()
-    .build()
-    .map_err(|error| error.to_string())?;
+    .decorations(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .hidden_title(true)
+        .title_bar_style(TitleBarStyle::Overlay);
+    builder
+        .center()
+        .build()
+        .map_err(|error| error.to_string())?;
     Ok(label)
 }
 
@@ -349,13 +354,16 @@ fn show_main_window(app: &AppHandle) {
 }
 
 fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("安全智脑")
         .inner_size(1280.0, 820.0)
         .min_inner_size(960.0, 640.0)
-        .decorations(true)
+        .decorations(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .hidden_title(true)
-        .title_bar_style(TitleBarStyle::Overlay)
+        .title_bar_style(TitleBarStyle::Overlay);
+    builder
         .center()
         .build()
 }

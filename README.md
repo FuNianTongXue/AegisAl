@@ -27,7 +27,7 @@
 | macOS `arm64` | [下载 DMG](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.1-trial-7days/SecFlow-v1.3.1-macOS-ARM64-Trial-7Days.dmg) | Apple Silicon Mac |
 | macOS `x86_64` | [下载 DMG](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.1-trial-7days/SecFlow-v1.3.1-macOS-x86_64-Trial-7Days.dmg) | Intel Mac |
 
-正式版与试用版使用不同应用标识和本地端口，可以并存。GitHub Release 仅提供 7 天试用版；无限期正式版不上传公开仓库。完整变更与验证结果见 [v1.3.1 发行说明](docs/RELEASE_NOTES_v1.3.1.md)。
+正式版与试用版使用不同应用标识和本地端口，可以并存。GitHub Release 仅提供 7 天试用版；无限期正式版不上传公开仓库。完整变更与验证结果见 [v1.3.1 发行说明](docs/RELEASE_NOTES_v1.3.1.md)，安装包校验值见 [SHA-256 清单](docs/RELEASE_CHECKSUMS_v1.3.1.md)。
 
 ### 新版界面
 

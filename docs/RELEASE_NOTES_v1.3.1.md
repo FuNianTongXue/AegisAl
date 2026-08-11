@@ -43,7 +43,11 @@ Scanner -> Analysis Agent -> RAG Agent -> Report Planner
 - Vite 生产构建通过。
 - 4,552 条组件漏洞 Excel 离线生成：0.604 秒。
 - macOS ARM 应用签名、Bundle ID、试用版独立应用标识与 sidecar 完整性校验通过。
-- Windows x86_64 与 macOS x86_64 由 GitHub Actions 原生平台构建，构建制品通过 SHA-256 清单复核。
+- macOS arm64 在 Apple Silicon 主机构建；macOS x86_64 使用 Rosetta 与独立 Intel Python sidecar 本地构建，并复核主程序与 sidecar 架构。
+- Windows x86_64 使用 `cargo-xwin` + MSVC SDK + NSIS 交叉构建；已验证宿主程序为 PE32+ x86-64，安装包为 NSIS 自解压归档。因当前为 macOS 构建主机，最终安装/启动验收需在 Windows 10/11 x64 真机执行。
+- 六个本地安装包全部生成 SHA-256 清单；GitHub 仅发布三个七天试用制品。
+
+> GitHub Actions 原生 Windows/macOS Intel 备用工作流已提交，但本次运行因 GitHub 账户 billing lock 在 job 启动前被平台拒绝，与源码和构建步骤无关。本次发布改由本地双架构/交叉构建完成。
 
 ## 发布范围
 
