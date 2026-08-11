@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from app.llm import (
     _fetch_provider_models,
+    active_model_from_env,
     diagnose_chat_completion,
     list_llm_models,
     llm_public_config,
@@ -16,6 +17,247 @@ from app.storage import StateStore, default_state
 
 
 class LLMConfigTests(unittest.TestCase):
+    def test_public_config_exposes_only_reasoning_levels_supported_by_the_selected_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                openai = save_llm_config(
+                    {
+                        "provider": "openai",
+                        "model": "gpt-5.6-sol",
+                        "endpoint": "https://api.openai.com/v1",
+                        "api_key": "test-key",
+                        "enabled": True,
+                    }
+                )
+                self.assertEqual(
+                    [option["value"] for option in openai["reasoning_options"]],
+                    ["none", "low", "medium", "high", "xhigh", "max"],
+                )
+
+                deepseek_chat = save_llm_config(
+                    {
+                        "provider": "deepseek",
+                        "model": "deepseek-chat",
+                        "endpoint": "https://api.deepseek.com/v1",
+                        "api_key": "test-key",
+                        "enabled": True,
+                    }
+                )
+                self.assertEqual(deepseek_chat["reasoning_options"], [{"value": "none", "fixed": True}])
+
+                deepseek_reasoner = save_llm_config({"model": "deepseek-reasoner"})
+                self.assertEqual(deepseek_reasoner["reasoning_options"], [{"value": "high", "fixed": True}])
+
+    def test_responses_api_streams_real_output_text_deltas(self) -> None:
+        captured: dict = {}
+        deltas: list[str] = []
+
+        class FakeStreamResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_lines(self):
+                return iter(
+                    [
+                        'event: response.output_text.delta',
+                        'data: {"type":"response.output_text.delta","delta":"第一段"}',
+                        'data: {"type":"response.output_text.delta","delta":"第二段"}',
+                        'data: {"type":"response.completed","response":{"usage":{"total_tokens":12}}}',
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def stream(self, method: str, url: str, *, json: dict, headers: dict):
+                captured.update(method=method, url=url, body=json, headers=headers)
+                return FakeStreamResponse()
+
+        with patch("app.llm.httpx.Client", FakeClient):
+            result = diagnose_chat_completion(
+                {
+                    "provider": "custom",
+                    "model": "gpt-5.6-sol",
+                    "endpoint": "https://carpool.example",
+                    "apiKey": "test-key",
+                    "maxTokens": 256,
+                    "timeoutMs": 1000,
+                    "wireApi": "responses",
+                    "reasoningEffort": "xhigh",
+                    "disableResponseStorage": True,
+                },
+                [{"role": "user", "content": "流式回答"}],
+                on_delta=deltas.append,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["streamed"])
+        self.assertEqual(result["answer"], "第一段第二段")
+        self.assertEqual(deltas, ["第一段", "第二段"])
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["url"], "https://carpool.example/responses")
+        self.assertTrue(captured["body"]["stream"])
+        self.assertEqual(captured["body"]["reasoning"], {"effort": "xhigh"})
+        self.assertFalse(captured["body"]["store"])
+
+    def test_chat_stream_does_not_emit_reasoning_content(self) -> None:
+        deltas: list[str] = []
+
+        class FakeStreamResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_lines(self):
+                return iter(
+                    [
+                        'data: {"choices":[{"delta":{"reasoning_content":"private reasoning"}}]}',
+                        'data: {"choices":[{"delta":{"content":"公开回答"}}]}',
+                        'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}',
+                        "data: [DONE]",
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def stream(self, *_args, **_kwargs):
+                return FakeStreamResponse()
+
+        with patch("app.llm.httpx.Client", FakeClient):
+            result = diagnose_chat_completion(
+                {
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "endpoint": "https://api.deepseek.com/v1",
+                    "apiKey": "test-key",
+                    "timeoutMs": 1000,
+                },
+                [{"role": "user", "content": "回答"}],
+                on_delta=deltas.append,
+            )
+
+        self.assertEqual(result["answer"], "公开回答")
+        self.assertEqual(deltas, ["公开回答"])
+        self.assertEqual(result["data"]["usage"]["completion_tokens"], 2)
+        self.assertNotIn("private reasoning", str(result))
+
+    def test_anthropic_stream_emits_only_text_blocks(self) -> None:
+        deltas: list[str] = []
+
+        class FakeStreamResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_lines(self):
+                return iter(
+                    [
+                        'data: {"type":"message_start","message":{"id":"msg-1","usage":{"input_tokens":5}}}',
+                        'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"private"}}',
+                        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"公开文本"}}',
+                        'data: {"type":"message_delta","usage":{"output_tokens":3}}',
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def stream(self, *_args, **_kwargs):
+                return FakeStreamResponse()
+
+        with patch("app.llm.httpx.Client", FakeClient):
+            result = diagnose_chat_completion(
+                {
+                    "provider": "claude",
+                    "model": "claude-sonnet-5",
+                    "endpoint": "https://api.anthropic.com/v1",
+                    "apiKey": "test-key",
+                    "timeoutMs": 1000,
+                },
+                [{"role": "user", "content": "回答"}],
+                on_delta=deltas.append,
+            )
+
+        self.assertEqual(result["answer"], "公开文本")
+        self.assertEqual(deltas, ["公开文本"])
+        self.assertEqual(result["data"]["usage"], {"input_tokens": 5, "output_tokens": 3})
+        self.assertNotIn("private", str(result))
+
+    def test_llm_config_and_api_key_are_isolated_by_user_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                save_llm_config(
+                    {
+                        "provider": "openai",
+                        "model": "gpt-alice",
+                        "endpoint": "https://api.openai.com/v1",
+                        "api_key": "sk-alice-secret",
+                        "enabled": True,
+                    },
+                    user_id="alice@example.com",
+                )
+                save_llm_config(
+                    {
+                        "provider": "deepseek",
+                        "model": "deepseek-bob",
+                        "endpoint": "https://api.deepseek.com/v1",
+                        "api_key": "sk-bob-secret",
+                        "enabled": True,
+                    },
+                    user_id="bob@example.com",
+                )
+                alice = active_model_from_env("alice@example.com")
+                bob = active_model_from_env("bob@example.com")
+                alice_public = llm_public_config("alice@example.com")
+                bob_public = llm_public_config("bob@example.com")
+
+        self.assertEqual(alice["model"], "gpt-alice")
+        self.assertEqual(alice["apiKey"], "sk-alice-secret")
+        self.assertEqual(bob["model"], "deepseek-bob")
+        self.assertEqual(bob["apiKey"], "sk-bob-secret")
+        self.assertNotEqual(alice_public["api_key_masked"], bob_public["api_key_masked"])
+        self.assertNotIn("sk-bob-secret", str(alice_public))
+        self.assertNotIn("sk-alice-secret", str(bob_public))
     def test_deepseek_json_mode_uses_vendor_response_format(self) -> None:
         captured: dict = {}
 
@@ -134,6 +376,10 @@ class LLMConfigTests(unittest.TestCase):
                         "wire_api": "responses",
                         "reasoning_effort": "xhigh",
                         "disable_response_storage": True,
+                        "max_tokens": 4096,
+                        "temperature": 0.4,
+                        "top_p": 0.8,
+                        "timeout_ms": 90000,
                         "enabled": True,
                     }
                 )
@@ -141,6 +387,11 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["name"], "Sub2API")
         self.assertEqual(config["wire_api"], "responses")
         self.assertEqual(config["reasoning_effort"], "xhigh")
+        self.assertEqual(config["max_tokens"], 4096)
+        self.assertEqual(config["temperature"], 0.4)
+        self.assertEqual(config["top_p"], 0.8)
+        self.assertEqual(config["timeout_ms"], 90000)
+        self.assertNotIn("api_key", config)
         self.assertTrue(config["disable_response_storage"])
         self.assertFalse(config["has_api_key"])
         self.assertNotIn("api_key", config)

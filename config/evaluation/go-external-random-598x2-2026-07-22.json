@@ -7,6 +7,8 @@
     "qualification_negative": 598,
     "deduplication": "gosec normalized multi-file SHA-256; semgrep unique source path and target line",
     "label_matching": "external rule CWE must intersect the SecFlow finding CWE",
+    "negative_label_scope": "external_rule_specific",
+    "negative_label_warning": "A non-match for one upstream rule does not prove that the sample is safe for every rule mapped to the same CWE; negative cases require CWE-level adjudication before qualification use.",
     "leakage_policy": "diagnostic cases may guide tuning; qualification cases remain sealed until rules are frozen",
     "independence_note": "Cases are unique published labels from two independently maintained repositories; observations remain clustered by upstream suite and are not claimed to be IID real-world vulnerabilities."
   },

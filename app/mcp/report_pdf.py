@@ -26,7 +26,7 @@ report_pdf_mcp = FastMCP(
     "SecFlow PDF MCP",
     instructions=(
         "Render verified SecFlow report JSON into a PDF. Preserve evidence code line breaks and line "
-        "numbers, remediation, charts, Mermaid source, Chinese labels, and China Standard Time."
+        "numbers, remediation, native chart summaries, Chinese labels, and China Standard Time."
     ),
 )
 

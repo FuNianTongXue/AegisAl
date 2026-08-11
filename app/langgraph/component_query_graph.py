@@ -47,6 +47,7 @@ _ECOSYSTEM_ALIASES = (
 
 class ComponentQueryState(TypedDict, total=False):
     question: str
+    user_id: str
     response_language: str
     component_query: dict[str, Any]
     component_result: dict[str, Any]
@@ -56,6 +57,7 @@ class ComponentQueryState(TypedDict, total=False):
     knowledge_graph: dict[str, Any]
     chart_data: dict[str, Any]
     artifacts: list[dict[str, Any]]
+    catalog_translation_ready: bool
     trace: list[dict[str, Any]]
     event_sink: Callable[[dict[str, Any]], None]
 
@@ -175,10 +177,15 @@ class ComponentQuerySubgraph:
                 str(query.get("version") or ""),
                 ecosystem=str(query.get("ecosystem") or ""),
                 include_realtime=bool(query.get("include_realtime", True)),
+                response_language=str(state.get("response_language") or "zh-Hans"),
+                user_id=str(state.get("user_id") or "default"),
             )
             state["component_result"] = result
             state["records"] = list(result.get("records") or [])
             state["knowledge_graph"] = dict(result.get("graph") or {})
+            state["catalog_translation_ready"] = (
+                str((result.get("catalog_translation") or {}).get("status") or "") == "completed"
+            )
             state["component_error"] = ""
             return _add_trace(
                 state,

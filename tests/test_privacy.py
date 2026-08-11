@@ -63,6 +63,12 @@ class KnowledgeAnswerPrivacyTests(unittest.TestCase):
         self.assertNotIn("NVD 查询", text)
         self.assertIn("https://nvd.nist.gov/vuln/detail/CVE-2026-55576", text)
 
+    def test_public_text_does_not_replace_rag_inside_normal_words(self) -> None:
+        text = sanitize_public_text("ActiveRecord::Tenanted::Storage::DiskService and paragraph")
+
+        self.assertEqual(text, "ActiveRecord::Tenanted::Storage::DiskService and paragraph")
+        self.assertEqual(sanitize_public_text("RAG 查询完成"), "内部安全知识 查询完成")
+
     def test_public_payload_removes_intelligence_provenance(self) -> None:
         payload = public_answer_payload(
             {
@@ -86,6 +92,8 @@ class KnowledgeAnswerPrivacyTests(unittest.TestCase):
         self.assertEqual(severity_cn("HIGH"), "高危")
         self.assertEqual(severity_cn("medium"), "中危")
         self.assertEqual(severity_cn("low"), "低危")
+        self.assertEqual(severity_cn("info"), "提示")
+        self.assertEqual(severity_cn("none"), "无风险")
 
     def test_empty_card_stays_empty_for_non_vulnerability_answer(self) -> None:
         payload = public_answer_payload({"mode": "security_knowledge", "vulnerability_card": {}})

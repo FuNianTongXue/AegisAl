@@ -3,137 +3,114 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>安全智脑</title>
+    <title>SecFlow</title>
     <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
-    <main class="shell">
-      <header class="hero">
-        <div class="hero-brand">
-          <div class="brand-logo" aria-hidden="true">
-            <svg viewBox="0 0 64 64" role="img">
-              <path d="M32 11l18 7v13c0 11.9-7.2 19.4-18 23-10.8-3.6-18-11.1-18-23V18l18-7z" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/>
-              <path d="M32 23.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8 2.6-5.3z" fill="currentColor"/>
-            </svg>
-          </div>
-          <div>
-            <span id="brandVersion" class="eyebrow">安全智脑 · v1.2.0 内测版</span>
-            <h1 id="brandName">安全智脑</h1>
-            <p id="brandSubtitle">Security AI Assistant</p>
-            <p>LangGraph 安全问答，支持中文结构化漏洞卡片与客户可见信息脱敏。</p>
-          </div>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="sidebar-brand">
+          <span class="brand-mark" aria-hidden="true">S</span>
+          <div><strong>SecFlow</strong><small id="releaseChannel">7 天试用版</small></div>
         </div>
-        <div class="license-badge">
-          <b>商业许可</b>
-          <span>禁止再分发</span>
-        </div>
-      </header>
-      <section id="trialBanner" class="trial-banner hidden" aria-live="polite">
-        <div>
-          <b>三天试用版</b>
-          <span id="trialMessage">正在读取试用状态...</span>
-        </div>
-        <strong id="trialCountdown">--:--:--</strong>
-      </section>
-      <div id="runtimeStatus" class="runtime-status"></div>
 
-      <section class="grid">
-        <article class="panel assistant-panel">
-          <div class="panel-head">
-            <div>
-              <h2>安全知识问答</h2>
-              <p>具体漏洞优先核验内部安全知识，再生成中文结构化处置卡片。</p>
-            </div>
-            <button id="refreshGraph" class="ghost">流程</button>
-          </div>
-          <form id="askForm" class="ask-form">
-            <textarea id="question" placeholder="请输入 CVE、GHSA、供应链风险、代码审计或 AI 安全问题..." required></textarea>
-            <div class="form-actions">
-              <label>召回数 <input id="topK" type="number" min="1" max="20" value="5" /></label>
-              <button type="submit">发送问题</button>
-            </div>
-          </form>
-          <div id="answer" class="answer empty">暂无回答。</div>
-        </article>
+        <nav class="primary-nav">
+          <button class="nav-item active" data-view="assistant"><span aria-hidden="true">+</span><b>新建任务</b></button>
+          <button class="nav-item" data-view="tasks"><span aria-hidden="true">&#9633;</span><b>任务</b><em id="taskCount">0</em></button>
+          <button class="nav-item" data-view="settings"><span aria-hidden="true">&#9881;</span><b>设置</b></button>
+        </nav>
 
-        <aside class="panel">
-          <div class="panel-head">
-            <div>
-              <h2>LangGraph 执行过程</h2>
-              <p>展示本次问答经过的节点。</p>
+        <section class="sidebar-section">
+          <div class="sidebar-heading"><span>项目</span><button id="refreshTasks" title="刷新任务" aria-label="刷新任务">&#8635;</button></div>
+          <div id="projectList" class="sidebar-list empty-list">暂无项目</div>
+        </section>
+        <section class="sidebar-section history-section">
+          <div class="sidebar-heading"><span id="conversationHeading">历史对话</span><span class="heading-actions"><button id="toggleArchivedConversations" title="查看已归档对话" aria-label="查看已归档对话">&#9633;</button><button id="newConversation" title="新建对话" aria-label="新建对话">+</button></span></div>
+          <div id="conversationList" class="sidebar-list empty-list">暂无对话</div>
+        </section>
+
+        <footer class="sidebar-footer">
+          <button id="themeToggle" class="icon-button" title="切换显示模式" aria-label="切换显示模式">&#9680;</button>
+          <div class="user-summary"><span id="userAvatar">用</span><div><b id="userName">本机用户</b><small id="activeModel">模型未配置</small></div></div>
+        </footer>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div><h1 id="viewTitle">新建任务</h1><p id="viewSubtitle">安全分析、代码扫描、组件查询和报告生成由模型按语义选择能力。</p></div>
+          <div class="topbar-status"><span id="runtimeStatus">正在读取本机配置</span><span id="trialCountdown" class="trial-chip">--</span></div>
+        </header>
+
+        <section id="trialBanner" class="trial-banner hidden" aria-live="polite">
+          <b>7 天试用版</b><span id="trialMessage">正在读取试用状态...</span>
+        </section>
+
+        <section id="assistantView" class="view active">
+          <div id="conversation" class="conversation" aria-live="polite">
+            <div class="empty-state">
+              <span class="empty-mark">S</span>
+              <h2>今天需要分析什么？</h2>
+              <p>可以直接提问，也可以选择一个代码项目后描述扫描、SBOM 或报告目标。</p>
             </div>
           </div>
-          <div id="trace" class="trace"></div>
-        </aside>
-      </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>采集配置</h2>
-            <p>固定情报接口由内部服务托管，页面仅保留兼容入口。</p>
+          <div class="composer-wrap">
+            <div id="workspaceChip" class="workspace-chip hidden"><span id="workspaceName"></span><button id="clearWorkspace" aria-label="移除项目">&#215;</button></div>
+            <form id="askForm" class="composer">
+              <textarea id="question" rows="3" maxlength="4000" placeholder="向 SecFlow 描述任务" required></textarea>
+              <div class="composer-actions">
+                <div>
+                  <button id="chooseWorkspace" class="icon-button" type="button" title="选择代码项目" aria-label="选择代码项目">&#128206;</button>
+                  <span id="composerHint">普通问答</span>
+                </div>
+                <button id="sendButton" class="send-button" type="submit" aria-label="发送">&#8593;</button>
+              </div>
+            </form>
           </div>
-          <button id="reloadConfig" class="ghost">刷新</button>
-        </div>
-        <div class="collector-grid">
-          <form class="collector-card" data-collector="cve">
-            <h3>固定情报接口 1</h3>
-            <label><span>启用</span><input name="enabled" type="checkbox" /></label>
-            <label><span>内部接口 URL</span><input name="api_url" /></label>
-            <label><span>接口密钥</span><input name="api_key" type="password" placeholder="留空则使用内部配置" /></label>
-            <label><span>集合</span><input name="collection_name" /></label>
-            <label><span>等级过滤</span><input name="severity_filter" placeholder="CRITICAL,HIGH,MEDIUM" /></label>
-            <label><span>采集数量</span><input name="max_results" type="number" min="1" max="5000" /></label>
-            <label><span>间隔分钟</span><input name="sync_interval_minutes" type="number" min="5" max="10080" /></label>
-            <div class="card-actions">
-              <button type="submit">保存</button>
-              <button type="button" data-action="test">测试</button>
-              <button type="button" data-action="collect">采集</button>
-            </div>
-            <small class="status"></small>
-          </form>
+        </section>
 
-          <form class="collector-card" data-collector="github_advisory">
-            <h3>固定情报接口 2</h3>
-            <label><span>启用</span><input name="enabled" type="checkbox" /></label>
-            <label><span>内部接口 URL</span><input name="api_url" /></label>
-            <label><span>接口令牌</span><input name="token" type="password" placeholder="留空则使用内部配置" /></label>
-            <label><span>集合</span><input name="collection_name" /></label>
-            <label><span>等级过滤</span><input name="severity_filter" placeholder="critical,high,medium" /></label>
-            <label><span>生态</span><input name="ecosystem" placeholder="npm, pip, maven..." /></label>
-            <label><span>采集数量</span><input name="max_results" type="number" min="1" max="5000" /></label>
-            <label><span>间隔分钟</span><input name="sync_interval_minutes" type="number" min="5" max="10080" /></label>
-            <div class="card-actions">
-              <button type="submit">保存</button>
-              <button type="button" data-action="test">测试</button>
-              <button type="button" data-action="collect">采集</button>
-            </div>
-            <small class="status"></small>
-          </form>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>知识记录</h2>
-            <p>来自内部查询链路的本地漏洞记录。</p>
+        <section id="tasksView" class="view">
+          <div class="section-toolbar">
+            <div class="segmented" role="tablist"><button class="active" data-task-filter="active">进行中与最近</button><button data-task-filter="archived">已归档</button></div>
+            <button id="reloadTaskCenter" class="secondary-button">刷新</button>
           </div>
-          <span id="recordStats" class="stat-pill">0 条记录</span>
-        </div>
-        <div id="records" class="records"></div>
-      </section>
-    </main>
-    <div id="trialBlocked" class="trial-blocked hidden" role="alertdialog" aria-modal="true" aria-labelledby="trialBlockedTitle">
-      <section class="trial-blocked__dialog">
-        <span class="trial-blocked__label">安全智脑 · 三天试用版</span>
-        <h2 id="trialBlockedTitle">试用功能已停用</h2>
-        <p id="trialBlockedMessage">三天试用期已结束。</p>
-        <dl>
-          <div><dt>首次启动</dt><dd id="trialStartedAt">-</dd></div>
-          <div><dt>到期时间</dt><dd id="trialExpiresAt">-</dd></div>
-        </dl>
-      </section>
+          <div id="taskCenter" class="task-center empty-list">暂无任务</div>
+        </section>
+
+        <section id="settingsView" class="view settings-view">
+          <div class="settings-band">
+            <div class="settings-copy"><h2>用户资料</h2><p>资料按本机用户隔离保存。</p></div>
+            <form id="profileForm" class="settings-form profile-grid">
+              <label>显示名称<input name="display_name" required maxlength="80" /></label>
+              <label>邮箱<input name="email" type="email" required maxlength="160" /></label>
+              <label>部门<input name="department" maxlength="120" /></label>
+              <label>角色<select name="role"><option value="">请选择</option><option>安全工程师</option><option>研发工程师</option><option>安全负责人</option><option>审计人员</option></select></label>
+              <label>手机号<input name="phone" maxlength="80" /></label>
+              <label>员工编号<input name="employee_id" maxlength="80" /></label>
+              <label class="wide">个人简介<textarea name="bio" rows="2" maxlength="200"></textarea></label>
+              <div class="form-footer wide"><span id="profileStatus"></span><button type="submit">保存资料</button></div>
+            </form>
+          </div>
+
+          <div class="settings-band">
+            <div class="settings-copy"><h2>模型配置</h2><p>从模型厂商接口获取可用模型，并按当前用户单独保存密钥。</p></div>
+            <form id="llmForm" class="settings-form model-grid">
+              <label>模型厂商<select name="provider"><option value="openai">OpenAI</option><option value="claude">Anthropic Claude</option><option value="deepseek">DeepSeek</option><option value="custom">OpenAI 兼容接口</option></select></label>
+              <label>接口地址<input name="endpoint" placeholder="使用厂商官方默认地址" /></label>
+              <label>API Key<input name="api_key" type="password" autocomplete="off" placeholder="留空保留现有密钥" /></label>
+              <label>模型<div class="input-action"><select name="model" required><option value="gpt-5.6">gpt-5.6</option></select><button id="loadModels" type="button" class="secondary-button">获取</button></div></label>
+              <label>最大输出<input name="max_tokens" type="number" min="128" max="8192" value="1800" /></label>
+              <label>超时毫秒<input name="timeout_ms" type="number" min="1000" max="180000" value="60000" /></label>
+              <div class="form-footer wide"><span id="llmStatus"></span><button id="testModel" type="button" class="secondary-button">测试连接</button><button type="submit">保存模型</button></div>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+    <div id="trialBlocked" class="modal hidden" role="alertdialog" aria-modal="true">
+      <div class="modal-dialog"><span>7 天试用版</span><h2>试用功能已停用</h2><p id="trialBlockedMessage">试用期已结束。</p></div>
     </div>
     <script src="/static/app.js" type="module"></script>
   </body>

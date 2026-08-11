@@ -74,6 +74,36 @@ def fake_artifact() -> dict:
     }
 
 
+def fake_license_scan(_workspace_path: str) -> dict:
+    return {
+        "schema_version": 1,
+        "coverage_status": "complete",
+        "license_count": 1,
+        "licenses": [
+            {
+                "spdx_id": "Apache-2.0",
+                "name": "Apache License 2.0",
+                "confidence": 0.95,
+                "source_files": ["LICENSE"],
+                "detection_methods": ["license-text-signature"],
+                "declarations": [],
+                "osi": {
+                    "listed": True,
+                    "approved": True,
+                    "approval_status": "approved",
+                    "official_url": "https://opensource.org/license/apache-2-0",
+                },
+            }
+        ],
+        "registry": {"status": "completed", "url": "https://opensource.org/api/licenses"},
+        "_license_mcp": {
+            "server": "SecFlow License MCP",
+            "tool": "identify_project_licenses",
+            "transport": "in-process",
+        },
+    }
+
+
 class AlwaysUsableTrial:
     @staticmethod
     def status() -> dict:
@@ -109,7 +139,12 @@ class SBOMDocumentTests(unittest.TestCase):
         }
 
     def test_cyclonedx_json_preserves_source_facts_and_purls(self) -> None:
-        sbom = build_cyclonedx_sbom(self.scan, project_name="payments", workspace_path="/private/project")
+        sbom = build_cyclonedx_sbom(
+            self.scan,
+            project_name="payments",
+            workspace_path="/private/project",
+            license_scan=fake_license_scan(""),
+        )
 
         self.assertEqual(sbom["bomFormat"], "CycloneDX")
         self.assertEqual(sbom["specVersion"], "1.6")
@@ -118,10 +153,38 @@ class SBOMDocumentTests(unittest.TestCase):
         self.assertEqual(maven["group"], "org.apache.logging.log4j")
         self.assertEqual(maven["name"], "log4j-core")
         self.assertEqual(maven["purl"], "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1")
+        self.assertEqual(sbom["metadata"]["component"]["licenses"][0]["license"]["id"], "Apache-2.0")
+        self.assertTrue(
+            any(item["name"] == "secflow:licenseAnalysisSha256" for item in sbom["metadata"]["properties"])
+        )
         self.assertNotIn("/private/project", canonical_sbom_json(sbom))
 
+    def test_dependency_extraction_layers_source_imports_without_manifests(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("import requests\n", encoding="utf-8")
+
+            state = ProjectSBOMSubgraph._extract_dependencies({"workspace_path": str(root), "trace": []})
+
+        scan = state["dependency_scan"]
+        # SBOM 口径不变：无清单即无声明组件。
+        self.assertEqual(scan["dependency_count"], 0)
+        self.assertEqual(scan["dependencies"], [])
+        # 源码 import 进入独立的 inferred 观察层，版本未知、不纳入 SBOM。
+        self.assertEqual(scan["inferred_count"], 1)
+        self.assertEqual(scan["inferred_dependencies"][0]["name"], "requests")
+        self.assertEqual(scan["inferred_dependencies"][0]["layer"], "inferred")
+        self.assertEqual(scan["inventory"]["manifest_files"], 0)
+        self.assertEqual(scan["inventory"]["source_files"], 1)
+        self.assertTrue(any("未发现支持的依赖清单" in item for item in scan["warnings"]))
+        self.assertTrue(any("未纳入 SBOM" in item for item in scan["warnings"]))
+
     def test_vulnerability_matching_attaches_findings_to_component_bom_refs(self) -> None:
-        sbom = build_cyclonedx_sbom(self.scan, project_name="payments")
+        sbom = build_cyclonedx_sbom(
+            self.scan,
+            project_name="payments",
+            license_scan=fake_license_scan(""),
+        )
         with patch("app.sbom.intelligence_service.query_dependencies", return_value=fake_match_result()):
             enriched, matching = match_sbom_vulnerabilities(sbom, self.scan)
 
@@ -151,7 +214,11 @@ class SBOMDocumentTests(unittest.TestCase):
         )
 
     def test_workbook_has_required_sheets_wrapping_filters_and_audit_json(self) -> None:
-        sbom = build_cyclonedx_sbom(self.scan, project_name="payments")
+        sbom = build_cyclonedx_sbom(
+            self.scan,
+            project_name="payments",
+            license_scan=fake_license_scan(""),
+        )
         with patch("app.sbom.intelligence_service.query_dependencies", return_value=fake_match_result()):
             sbom, matching = match_sbom_vulnerabilities(sbom, self.scan)
         content = build_sbom_workbook(sbom, matching)
@@ -162,14 +229,21 @@ class SBOMDocumentTests(unittest.TestCase):
             workbook_xml = ElementTree.fromstring(archive.read("xl/workbook.xml"))
             namespace = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
             sheet_names = [item.attrib["name"] for item in workbook_xml.findall("m:sheets/m:sheet", namespace)]
-            self.assertEqual(sheet_names, ["摘要", "SBOM 组件", "漏洞匹配", "来源与审计"])
+            self.assertEqual(sheet_names, ["摘要", "SBOM 组件", "项目许可", "漏洞匹配", "来源与审计"])
             summary_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
             component_xml = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
             styles_xml = archive.read("xl/styles.xml").decode("utf-8")
             shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
             shared_root = ElementTree.fromstring(shared_strings)
             shared_values = ["".join(item.itertext()) for item in shared_root.findall("m:si", namespace)]
-            vulnerability_root = ElementTree.fromstring(archive.read("xl/worksheets/sheet3.xml"))
+            license_root = ElementTree.fromstring(archive.read("xl/worksheets/sheet3.xml"))
+            license_string_indexes = [
+                int(value.text or "0")
+                for cell in license_root.findall(".//m:c[@t='s']", namespace)
+                for value in cell.findall("m:v", namespace)
+            ]
+            license_sheet_text = "\n".join(shared_values[index] for index in license_string_indexes)
+            vulnerability_root = ElementTree.fromstring(archive.read("xl/worksheets/sheet4.xml"))
             vulnerability_string_indexes = [
                 int(value.text or "0")
                 for cell in vulnerability_root.findall(".//m:c[@t='s']", namespace)
@@ -181,6 +255,11 @@ class SBOMDocumentTests(unittest.TestCase):
             self.assertIn('wrapText="1"', styles_xml)
             self.assertIn("SBOM JSON SHA-256", shared_strings)
             self.assertIn("CVE-2021-44228", shared_strings)
+            self.assertIn("SPDX 标识", license_sheet_text)
+            self.assertIn("Apache-2.0", license_sheet_text)
+            self.assertIn("风险等级", vulnerability_sheet_text)
+            self.assertIn("严重", vulnerability_sheet_text)
+            self.assertNotIn("CRITICAL", vulnerability_sheet_text)
             self.assertIn("严重漏洞", vulnerability_sheet_text)
             self.assertIn("OSV 开源漏洞数据库", vulnerability_sheet_text)
             self.assertNotIn("JNDI lookup injection in vulnerable Log4j versions.", vulnerability_sheet_text)
@@ -204,7 +283,7 @@ class SBOMSubgraphTests(unittest.TestCase):
     def test_three_interrupts_preserve_fixed_project_facts_and_desktop_hint(self) -> None:
         with TemporaryDirectory() as directory:
             Path(directory, "pom.xml").write_text(POM, encoding="utf-8")
-            graph = ProjectSBOMSubgraph()
+            graph = ProjectSBOMSubgraph(license_scanner=fake_license_scan)
             with (
                 patch("app.langgraph.sbom_graph.match_sbom_vulnerabilities") as matcher,
                 patch("app.langgraph.sbom_graph.invoke_sbom_excel_mcp", return_value=fake_artifact()) as excel,
@@ -224,11 +303,16 @@ class SBOMSubgraphTests(unittest.TestCase):
                 )
                 matched = graph.resume(started["thread_id"], decision="confirm", user_id="sbom-user", session_id="sbom-session")
                 generated = graph.resume(started["thread_id"], decision="confirm", user_id="sbom-user", session_id="sbom-session")
+                inspected = graph.inspect(started["thread_id"], user_id="sbom-user")
+                with self.assertRaises(KeyError):
+                    graph.inspect(started["thread_id"], user_id="another-user")
                 completed = graph.resume(started["thread_id"], decision="confirm", user_id="sbom-user", session_id="sbom-session")
 
         self.assertEqual(started["interrupt"]["kind"], "sbom_vulnerability_match_confirmation")
         self.assertEqual(matched["interrupt"]["kind"], "sbom_excel_generation_confirmation")
         self.assertEqual(generated["interrupt"]["kind"], "sbom_excel_download_confirmation")
+        self.assertEqual(inspected["interrupt"]["kind"], "sbom_excel_download_confirmation")
+        self.assertEqual(inspected["matching"]["vulnerability_count"], 1)
         self.assertEqual(generated["interrupt"]["destination_hint"], "desktop")
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(matcher.call_count, 1)
@@ -237,7 +321,7 @@ class SBOMSubgraphTests(unittest.TestCase):
     def test_declining_vulnerability_matching_still_allows_excel_generation(self) -> None:
         with TemporaryDirectory() as directory:
             Path(directory, "pom.xml").write_text(POM, encoding="utf-8")
-            graph = ProjectSBOMSubgraph()
+            graph = ProjectSBOMSubgraph(license_scanner=fake_license_scan)
             with patch("app.langgraph.sbom_graph.invoke_sbom_excel_mcp", return_value=fake_artifact()):
                 started = graph.start(
                     {"question": "导出 SBOM", "workspace_path": directory, "user_id": "u", "session_id": "s"}
@@ -252,7 +336,7 @@ class SBOMSubgraphTests(unittest.TestCase):
     def test_resume_enforces_user_and_session_ownership(self) -> None:
         with TemporaryDirectory() as directory:
             Path(directory, "pom.xml").write_text(POM, encoding="utf-8")
-            graph = ProjectSBOMSubgraph()
+            graph = ProjectSBOMSubgraph(license_scanner=fake_license_scan)
             started = graph.start(
                 {"question": "导出 SBOM", "workspace_path": directory, "user_id": "u", "session_id": "s"}
             )
@@ -264,14 +348,14 @@ class SBOMSubgraphTests(unittest.TestCase):
             Path(directory, "pom.xml").write_text(POM, encoding="utf-8")
             checkpoint_path = Path(directory, "sbom-checkpoints.sqlite3")
             first_connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
-            first_graph = ProjectSBOMSubgraph(checkpointer=SqliteSaver(first_connection))
+            first_graph = ProjectSBOMSubgraph(checkpointer=SqliteSaver(first_connection), license_scanner=fake_license_scan)
             started = first_graph.start(
                 {"question": "导出 SBOM", "workspace_path": directory, "user_id": "u", "session_id": "s"}
             )
             first_connection.close()
 
             second_connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
-            second_graph = ProjectSBOMSubgraph(checkpointer=SqliteSaver(second_connection))
+            second_graph = ProjectSBOMSubgraph(checkpointer=SqliteSaver(second_connection), license_scanner=fake_license_scan)
             resumed = second_graph.resume(
                 started["thread_id"],
                 decision="cancel",
@@ -287,7 +371,7 @@ class SBOMSubgraphTests(unittest.TestCase):
     def test_resume_rejects_an_old_interrupt_card(self) -> None:
         with TemporaryDirectory() as directory:
             Path(directory, "pom.xml").write_text(POM, encoding="utf-8")
-            graph = ProjectSBOMSubgraph()
+            graph = ProjectSBOMSubgraph(license_scanner=fake_license_scan)
             started = graph.start(
                 {"question": "导出 SBOM", "workspace_path": directory, "user_id": "u", "session_id": "s"}
             )
@@ -317,7 +401,7 @@ class SBOMIntentAndAPITests(unittest.TestCase):
         fake_task = {"id": "task-1", "workspace_name": "payments", "status": "queued"}
         with (
             patch.object(application, "trial_manager", AlwaysUsableTrial()),
-            patch.object(application, "plan_assistant_intent", return_value={"intent": "llm_direct", "planner": "llm"}),
+            patch.object(application, "plan_assistant_intent", return_value={"intent": "project_scan", "planner": "llm"}),
             patch.object(application.task_agent_service, "create", return_value=fake_task) as create,
             TestClient(application.app) as client,
         ):

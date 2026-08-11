@@ -10,6 +10,7 @@ except Exception:  # noqa: BLE001
     StateGraph = None
 
 from app.storage import now_iso, store
+from app.catalog_translation import translate_records_for_storage
 
 
 class CollectorState(TypedDict, total=False):
@@ -21,6 +22,7 @@ class CollectorState(TypedDict, total=False):
     errors: list[str]
     skip_reason: str
     inserted: int
+    catalog_translation: dict[str, Any]
     trace: list[dict[str, Any]]
     result: dict[str, Any]
 
@@ -48,6 +50,7 @@ class CollectorGraph:
             "errors": [],
             "skip_reason": "",
             "inserted": 0,
+            "catalog_translation": {},
             "trace": [],
             "result": {},
         }
@@ -56,6 +59,7 @@ class CollectorGraph:
             if not state.get("skip_reason"):
                 state = self._fetch_records(state)
                 state = self._normalize_records(state)
+                state = self._translate_records(state)
                 state = self._persist_records(state)
             state = self._compose_result(state)
             return state["result"]
@@ -70,6 +74,7 @@ class CollectorGraph:
                 {"id": "validate_config", "label": "校验采集配置"},
                 {"id": "fetch_records", "label": "拉取情报记录"},
                 {"id": "normalize_records", "label": "规范化与去重"},
+                {"id": "translate_records", "label": "入库前翻译情报文本"},
                 {"id": "persist_records", "label": "持久化知识记录"},
                 {"id": "compose_result", "label": "汇总采集结果"},
             ],
@@ -77,7 +82,8 @@ class CollectorGraph:
                 {"source": "validate_config", "target": "fetch_records", "label": "配置可用"},
                 {"source": "validate_config", "target": "compose_result", "label": "禁用或凭证缺失"},
                 {"source": "fetch_records", "target": "normalize_records", "label": "完成拉取"},
-                {"source": "normalize_records", "target": "persist_records", "label": "完成去重"},
+                {"source": "normalize_records", "target": "translate_records", "label": "完成去重"},
+                {"source": "translate_records", "target": "persist_records", "label": "中文译文已就绪"},
                 {"source": "persist_records", "target": "compose_result", "label": "完成写入"},
             ],
         }
@@ -89,6 +95,7 @@ class CollectorGraph:
         graph.add_node("validate_config", self._validate_config)
         graph.add_node("fetch_records", self._fetch_records)
         graph.add_node("normalize_records", self._normalize_records)
+        graph.add_node("translate_records", self._translate_records)
         graph.add_node("persist_records", self._persist_records)
         graph.add_node("compose_result", self._compose_result)
         graph.set_entry_point("validate_config")
@@ -98,7 +105,8 @@ class CollectorGraph:
             {"fetch_records": "fetch_records", "compose_result": "compose_result"},
         )
         graph.add_edge("fetch_records", "normalize_records")
-        graph.add_edge("normalize_records", "persist_records")
+        graph.add_edge("normalize_records", "translate_records")
+        graph.add_edge("translate_records", "persist_records")
         graph.add_edge("persist_records", "compose_result")
         graph.add_edge("compose_result", END)
         return graph.compile()
@@ -166,6 +174,23 @@ class CollectorGraph:
         return _add_trace(state, "normalize_records", f"规范化后保留 {len(normalized)} 条唯一记录。")
 
     @staticmethod
+    def _translate_records(state: CollectorState) -> CollectorState:
+        records, audit = translate_records_for_storage(state.get("records", []))
+        state["records"] = records
+        state["catalog_translation"] = audit
+        pending = int(audit.get("pending_records") or 0)
+        status = "completed" if pending == 0 else "warning"
+        return _add_trace(
+            state,
+            "translate_records",
+            (
+                f"入库前已准备 {int(audit.get('ready_records') or 0)} 条中文情报"
+                + (f"，{pending} 条等待后续重试。" if pending else "。")
+            ),
+            status,
+        )
+
+    @staticmethod
     def _persist_records(state: CollectorState) -> CollectorState:
         persisted_state = store.read()
         collector_id = state["collector_id"]
@@ -220,6 +245,7 @@ class CollectorGraph:
             "records": state.get("records", []),
             "years": state.get("years", []),
             "errors": errors,
+            "catalog_translation": dict(state.get("catalog_translation") or {}),
             "trace": state.get("trace", []),
         }
         return state

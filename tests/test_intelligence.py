@@ -1,31 +1,49 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import Mock, patch
 
 from app.intelligence import (
     RealtimeIntelligenceService,
+    _default_catalog_path,
     _github_record,
     _merge_records,
     _osv_record,
     _patch_snippets_from_commit_payload,
+    _public_source_status,
     _version_in_affected_range,
     build_knowledge_graph,
 )
+from app.langgraph.assistant_graph import runtime_status
 from app.secure_storage import is_encrypted_text, secure_metadata_key
 from app.memory import LongTermMemoryService
 from app.storage import StateStore, default_state
 
 
 class RealtimeIntelligenceTests(unittest.TestCase):
+    def test_runtime_status_counts_memory_for_requested_user(self) -> None:
+        with (
+            patch("app.langgraph.assistant_graph.llm_status", return_value={}),
+            patch("app.langgraph.assistant_graph.storage_crypto_status", return_value={}),
+            patch(
+                "app.langgraph.assistant_graph.memory_service.status",
+                return_value={"historyCount": 7},
+            ) as memory_status,
+        ):
+            result = runtime_status("analyst@example.com")
+
+        memory_status.assert_called_once_with("analyst@example.com")
+        self.assertEqual(result["memory"]["historyCount"], 7)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = StateStore(Path(self.temp_dir.name) / "state.json")
@@ -37,7 +55,93 @@ class RealtimeIntelligenceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_multi_source_query_enriches_graph_without_persisting(self) -> None:
+    def test_scheduler_bootstraps_full_historical_catalog_by_default(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("app.intelligence.Thread") as thread_type,
+            patch.object(self.service._catalog, "encryption_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "metadata", return_value="false"),
+        ):
+            os.environ.pop("SECFLOW_ENABLE_FULL_CATALOG_BOOTSTRAP", None)
+            self.service.start_batch_scheduler()
+
+        thread_names = [call.kwargs.get("name") for call in thread_type.call_args_list]
+        self.assertIn("secflow-intelligence-batch-refresh", thread_names)
+        self.assertIn("secflow-vulnerability-catalog-bootstrap", thread_names)
+
+    def test_scheduler_allows_explicit_full_historical_catalog_bootstrap_opt_out(self) -> None:
+        with (
+            patch.dict(os.environ, {"SECFLOW_ENABLE_FULL_CATALOG_BOOTSTRAP": "0"}),
+            patch("app.intelligence.Thread") as thread_type,
+            patch.object(self.service._catalog, "encryption_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "metadata", return_value="false"),
+        ):
+            self.service.start_batch_scheduler()
+
+        thread_names = [call.kwargs.get("name") for call in thread_type.call_args_list]
+        self.assertNotIn("secflow-vulnerability-catalog-bootstrap", thread_names)
+
+    def test_scheduler_defers_background_model_work_during_desktop_startup(self) -> None:
+        with (
+            patch.dict(os.environ, {"SECFLOW_BACKGROUND_STARTUP_DELAY_SECONDS": "12"}),
+            patch("app.intelligence.Thread") as thread_type,
+            patch.object(self.service._catalog, "encryption_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "metrics_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "translation_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "metadata", return_value="true"),
+        ):
+            self.service.start_batch_scheduler()
+
+        scheduler = next(
+            call for call in thread_type.call_args_list
+            if call.kwargs.get("name") == "secflow-intelligence-batch-refresh"
+        )
+        self.assertEqual(scheduler.kwargs["args"][2], 12.0)
+
+    def test_tauri_data_directory_reuses_more_complete_legacy_catalog(self) -> None:
+        current_dir = Path(self.temp_dir.name) / "tauri"
+        legacy_dir = Path(self.temp_dir.name) / "legacy"
+        current_dir.mkdir()
+        legacy_dir.mkdir()
+
+        def create_catalog(path: Path, count: int) -> None:
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("CREATE TABLE vulnerabilities (canonical_id TEXT PRIMARY KEY)")
+                connection.executemany(
+                    "INSERT INTO vulnerabilities(canonical_id) VALUES (?)",
+                    [(f"CVE-2026-{index:04d}",) for index in range(count)],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+        create_catalog(current_dir / "vulnerability_catalog.sqlite3", 10)
+        create_catalog(legacy_dir / "vulnerability_catalog.sqlite3", 1_100)
+        with (
+            patch("app.intelligence.DATA_DIR", current_dir),
+            patch("app.intelligence.sys.platform", "linux"),
+            patch.dict(os.environ, {"SECFLOW_LEGACY_DATA_DIR": str(legacy_dir)}, clear=False),
+        ):
+            os.environ.pop("SECFLOW_VULNERABILITY_CATALOG_PATH", None)
+            selected = _default_catalog_path()
+
+        self.assertEqual(selected, legacy_dir / "vulnerability_catalog.sqlite3")
+
+    def test_public_vulnerability_sources_are_explicit_and_not_consultation_feeds(self) -> None:
+        sources = _public_source_status(
+            [
+                {"id": "nvd", "status": "success", "count": 8},
+                {"id": "github_advisory", "status": "success", "count": 5},
+                {"id": "osv", "status": "ready", "count": 0},
+            ]
+        )
+
+        self.assertEqual([source["id"] for source in sources], ["nvd", "github_advisory", "osv"])
+        self.assertEqual([source["name"] for source in sources], ["NVD 漏洞数据库", "GitHub 安全公告", "OSV 开源漏洞库"])
+        self.assertTrue(all("咨询" not in source["name"] for source in sources))
+
+    def test_multi_source_query_persists_catalog_record_for_translation_reuse(self) -> None:
         nvd = {
             "id": "CVE-2026-1000",
             "title": "Example remote execution",
@@ -87,7 +191,7 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertNotIn("provenance", result["records"][0])
         self.assertNotIn("references", result["records"][0])
         self.assertEqual(result["records"][0]["reference_links"], ["https://example.test/advisory/CVE-2026-1000"])
-        self.assertEqual(result["persisted"]["inserted"], 0)
+        self.assertEqual(result["persisted"]["inserted"], 1)
         self.assertEqual(second["persisted"]["inserted"], 0)
         self.assertEqual(len(self.store.read()["records"]), 0)
         self.assertIn("GHSA-1111-2222-3333", result["records"][0]["aliases"])
@@ -101,11 +205,12 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(vulnerability_node["metadata"]["fixed_versions"], ["npm / demo-server: 2.0.0"])
         self.assertIn("建议优先升级", vulnerability_node["metadata"]["remediation_zh"])
         self.assertIn("临时降低攻击面", vulnerability_node["metadata"]["mitigation_zh"])
-        self.assertEqual(result["persistence"], "api-only")
+        self.assertEqual(result["persistence"], "local-catalog-written")
+        self.assertEqual(second["persistence"], "local-catalog")
         dashboard = self.service.dashboard()
-        self.assertEqual(dashboard["vulnerability_count"], 0)
-        self.assertEqual(dashboard["query_count"], 0)
-        self.assertEqual(dashboard["severity"]["CRITICAL"], 0)
+        self.assertEqual(dashboard["vulnerability_count"], 1)
+        self.assertEqual(dashboard["query_count"], 1)
+        self.assertEqual(dashboard["severity"]["CRITICAL"], 1)
 
     def test_identifier_query_uses_local_catalog_before_api(self) -> None:
         self.service._catalog.upsert(
@@ -131,6 +236,105 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(result["records"][0]["id"], "CVE-2026-7777")
         self.assertEqual(result["persistence"], "local-catalog")
         self.assertIn("本地漏洞 catalog 命中", result["trace"][1]["message"])
+
+    def test_catalog_stores_chinese_translation_and_keeps_english_original(self) -> None:
+        def fake_translate(payload, **_kwargs):
+            translated = json.loads(json.dumps(payload))
+            translated["records"][0]["title"] = "远程代码执行漏洞"
+            translated["records"][0]["summary"] = "该漏洞可导致远程代码执行。"
+            return Mock(
+                payload=translated,
+                translation_status="translated",
+                candidate_fields=2,
+                translated_fields=2,
+                batch_count=1,
+                model_used=True,
+                input_sha256="input",
+                output_sha256="output",
+                errors=[],
+            )
+
+        record = {
+            "id": "CVE-2026-7788",
+            "title": "Remote code execution vulnerability",
+            "severity": "HIGH",
+            "cvss_score": 8.8,
+            "summary": "The vulnerability may allow remote code execution.",
+            "aliases": ["CVE-2026-7788"],
+            "components": [{"name": "demo", "ecosystem": "npm", "affected": ["< 2.0.0"], "fixed": ["2.0.0"]}],
+            "references": ["https://example.test/CVE-2026-7788"],
+            "published_at": "2026-07-17T00:00:00+00:00",
+            "updated_at": "2026-07-17T00:00:00+00:00",
+        }
+        with patch("app.mcp.translation.translate_json_payload", side_effect=fake_translate) as translator:
+            stored = self.service._catalog.upsert([record])
+
+        self.assertEqual(stored[0]["summary_zh"], "该漏洞可导致远程代码执行。")
+        self.assertEqual(stored[0]["summary_original"], record["summary"])
+        self.assertEqual(stored[0]["catalog_translation"]["status"], "translated")
+        translator.assert_called_once()
+
+        with patch.object(self.service, "_query_source", side_effect=AssertionError("should use translated catalog")):
+            chinese = self.service.query("CVE-2026-7788", response_language="zh-Hans")
+            english = self.service.query("CVE-2026-7788", response_language="en")
+
+        self.assertEqual(chinese["records"][0]["summary"], "该漏洞可导致远程代码执行。")
+        self.assertEqual(chinese["catalog_translation"]["status"], "completed")
+        self.assertEqual(english["records"][0]["summary"], record["summary"])
+
+    def test_pending_legacy_catalog_translation_is_backfilled_once(self) -> None:
+        record = {
+            "id": "CVE-2026-7799",
+            "title": "Legacy command injection",
+            "severity": "HIGH",
+            "cvss_score": 8.2,
+            "summary": "The legacy record permits command injection.",
+            "aliases": ["CVE-2026-7799"],
+            "components": [],
+            "references": ["https://example.test/CVE-2026-7799"],
+            "published_at": "2026-07-17T00:00:00+00:00",
+            "updated_at": "2026-07-17T00:00:00+00:00",
+        }
+        fallback = Mock(
+            payload={"records": [{"record_key": record["id"], "title": record["title"], "summary": record["summary"]}]},
+            translation_status="fallback",
+            candidate_fields=2,
+            translated_fields=0,
+            batch_count=0,
+            model_used=False,
+            input_sha256="input",
+            output_sha256="input",
+            errors=["model unavailable"],
+        )
+        with patch("app.mcp.translation.translate_json_payload", return_value=fallback):
+            stored = self.service._catalog.upsert([record])
+
+        self.assertEqual(stored[0]["catalog_translation"]["status"], "pending")
+        self.assertTrue(self.service._catalog.translation_migration_pending())
+
+        def translated(payload, **_kwargs):
+            localized = json.loads(json.dumps(payload))
+            localized["records"][0]["title"] = "历史命令注入漏洞"
+            localized["records"][0]["summary"] = "该历史记录存在命令注入风险。"
+            return Mock(
+                payload=localized,
+                translation_status="translated",
+                candidate_fields=2,
+                translated_fields=2,
+                batch_count=1,
+                model_used=True,
+                input_sha256="input",
+                output_sha256="output",
+                errors=[],
+            )
+
+        with patch("app.mcp.translation.translate_json_payload", side_effect=translated) as translator:
+            self.service._catalog.migrate_catalog_translations_incrementally(Event(), batch_size=1, pause_seconds=0)
+
+        migrated = self.service._catalog.find_by_identifier(record["id"])[0]
+        self.assertEqual(migrated["summary_zh"], "该历史记录存在命令注入风险。")
+        self.assertFalse(self.service._catalog.translation_migration_pending())
+        translator.assert_called_once()
 
     def test_catalog_reads_do_not_wait_for_background_writer_lock(self) -> None:
         self.service._catalog.upsert(
@@ -253,6 +457,126 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(result["records"][0]["id"], "CVE-2026-8888")
         self.assertIn("本地漏洞 catalog 按组件命中", [item["message"] for item in result["trace"]][1])
         self.assertEqual(result["records"][0]["matched_dependencies"][0]["source_file"], "pom.xml")
+
+    def test_dependency_match_prioritizes_severity_over_recency(self) -> None:
+        log4shell = {
+            "id": "CVE-2021-44228",
+            "title": "Apache Log4j2 JNDI remote code execution",
+            "severity": "CRITICAL",
+            "cvss_score": 10.0,
+            "summary": "Log4Shell 远程代码执行漏洞。",
+            "aliases": ["CVE-2021-44228"],
+            "components": [
+                {
+                    "name": "org.apache.logging.log4j:log4j-core",
+                    "ecosystem": "Maven",
+                    "affected": [">= 2.0.0, < 2.15.0"],
+                    "fixed": ["2.15.0"],
+                }
+            ],
+            "published_at": "2021-12-10T00:00:00+00:00",
+            "updated_at": "2021-12-10T00:00:00+00:00",
+        }
+        noisy_records = [
+            {
+                "id": f"CVE-2026-90{index:02d}",
+                "title": f"jackson-databind issue {index}",
+                "severity": "MEDIUM",
+                "cvss_score": 5.5,
+                "aliases": [f"CVE-2026-90{index:02d}"],
+                "components": [
+                    {
+                        "name": "com.fasterxml.jackson.core:jackson-databind",
+                        "ecosystem": "Maven",
+                        "affected": ["<= 2.9.10"],
+                        "fixed": ["2.10.0"],
+                    }
+                ],
+                "published_at": f"2026-{index:02d}-15T00:00:00+00:00",
+                "updated_at": f"2026-{index:02d}-15T00:00:00+00:00",
+            }
+            for index in range(1, 13)
+        ]
+        self.service._catalog.upsert([log4shell, *noisy_records])
+        dependencies = [
+            {"ecosystem": "Maven", "name": "org.apache.logging.log4j:log4j-core", "version": "2.14.1"},
+            {"ecosystem": "Maven", "name": "com.fasterxml.jackson.core:jackson-databind", "version": "2.9.10"},
+        ]
+
+        records = self.service._catalog.find_by_dependencies(dependencies, limit=10)
+
+        self.assertEqual(len(records), 10)
+        self.assertEqual(records[0]["id"], "CVE-2021-44228")
+        self.assertEqual(
+            records[0]["matched_dependencies"][0]["name"],
+            "org.apache.logging.log4j:log4j-core",
+        )
+        owners = {
+            str(record["matched_dependencies"][0]["name"])
+            for record in records
+            if record.get("matched_dependencies")
+        }
+        self.assertIn("org.apache.logging.log4j:log4j-core", owners)
+        self.assertIn("com.fasterxml.jackson.core:jackson-databind", owners)
+
+    def test_dependency_match_keeps_per_dependency_share_for_quiet_components(self) -> None:
+        quiet = [
+            {
+                "id": f"CVE-2024-10{index:02d}",
+                "title": f"log4j low issue {index}",
+                "severity": "LOW",
+                "aliases": [f"CVE-2024-10{index:02d}"],
+                "components": [
+                    {
+                        "name": "org.apache.logging.log4j:log4j-core",
+                        "ecosystem": "Maven",
+                        "affected": [">= 2.0.0, < 2.15.0"],
+                        "fixed": ["2.15.0"],
+                    }
+                ],
+                "published_at": f"2024-01-{index:02d}T00:00:00+00:00",
+                "updated_at": f"2024-01-{index:02d}T00:00:00+00:00",
+            }
+            for index in range(1, 4)
+        ]
+        noisy = [
+            {
+                "id": f"CVE-2026-80{index:02d}",
+                "title": f"jackson high issue {index}",
+                "severity": "HIGH",
+                "aliases": [f"CVE-2026-80{index:02d}"],
+                "components": [
+                    {
+                        "name": "com.fasterxml.jackson.core:jackson-databind",
+                        "ecosystem": "Maven",
+                        "affected": ["<= 2.9.10"],
+                        "fixed": ["2.10.0"],
+                    }
+                ],
+                "published_at": f"2026-03-{index:02d}T00:00:00+00:00",
+                "updated_at": f"2026-03-{index:02d}T00:00:00+00:00",
+            }
+            for index in range(1, 13)
+        ]
+        self.service._catalog.upsert([*quiet, *noisy])
+        dependencies = [
+            {"ecosystem": "Maven", "name": "org.apache.logging.log4j:log4j-core", "version": "2.14.1"},
+            {"ecosystem": "Maven", "name": "com.fasterxml.jackson.core:jackson-databind", "version": "2.9.10"},
+        ]
+
+        records = self.service._catalog.find_by_dependencies(dependencies, limit=10)
+
+        self.assertEqual(len(records), 10)
+        log4j_hits = [
+            record
+            for record in records
+            if any(
+                str(item.get("name") or "") == "org.apache.logging.log4j:log4j-core"
+                for item in record.get("matched_dependencies") or []
+            )
+        ]
+        self.assertEqual(len(log4j_hits), 3)
+        self.assertTrue(all(str(record.get("severity")) == "LOW" for record in log4j_hits))
 
     def test_dependency_query_returns_when_realtime_lookup_exceeds_budget(self) -> None:
         dependencies = [
@@ -385,6 +709,24 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertFalse(migrated._catalog.encryption_migration_pending())
         self.assertEqual(migrated._catalog.find_by_identifier("CVE-2026-9090")[0]["id"], "CVE-2026-9090")
 
+    def test_catalog_migration_populates_poc_metrics_before_encrypting_legacy_rows(self) -> None:
+        calls: list[str] = []
+        with (
+            patch.object(
+                self.service._catalog,
+                "migrate_poc_metrics_incrementally",
+                side_effect=lambda _stop: calls.append("poc"),
+            ),
+            patch.object(
+                self.service._catalog,
+                "migrate_encrypted_catalog_incrementally",
+                side_effect=lambda _stop: calls.append("encryption"),
+            ),
+        ):
+            self.service._catalog.migrate_catalog_incrementally(Event())
+
+        self.assertEqual(calls, ["poc", "encryption"])
+
     def test_graph_uses_immediate_chinese_summary_without_per_record_llm_calls(self) -> None:
         record = {
             "id": "CVE-2026-9191",
@@ -450,6 +792,7 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         with (
             patch.object(self.service, "_query_nvd_batch", return_value=[critical]),
             patch.object(self.service, "_query_github_batch", return_value=[high]),
+            patch.object(self.service, "_query_cisa_kev", return_value=[]),
             patch.object(self.service, "_query_osv_batch", return_value=[duplicate]),
             patch.object(self.service, "_query_osv_modified_identifiers", return_value=[]),
         ):
@@ -461,6 +804,27 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(dashboard["severity"]["HIGH"], 1)
         self.assertEqual(len(dashboard["recent_records"]), 2)
         self.assertNotIn("provenance", dashboard["recent_records"][0])
+
+    def test_refresh_during_poc_backfill_syncs_kev_without_competing_catalog_writes(self) -> None:
+        kev_entries = [{"cve_id": "CVE-2026-7777", "date_added": "2026-08-01"}]
+        with (
+            patch.object(self.service._catalog, "metrics_migration_pending", return_value=True),
+            patch.object(self.service, "_query_cisa_kev", return_value=kev_entries),
+            patch.object(self.service, "_query_nvd_batch") as query_nvd,
+        ):
+            dashboard = self.service.refresh_dashboard_batch()
+
+        query_nvd.assert_not_called()
+        self.assertEqual(dashboard["known_exploited_count"], 1)
+
+    def test_catalog_bootstrap_stops_before_writes_when_metric_migration_is_cancelled(self) -> None:
+        with (
+            patch.object(self.service, "_wait_for_metrics_migration", return_value=False),
+            patch.object(self.service, "_cleanup_plaintext_feed_archives") as cleanup,
+        ):
+            self.service._bootstrap_catalog(Event())
+
+        cleanup.assert_not_called()
 
     def test_github_batch_stops_when_an_upstream_repeats_a_full_page(self) -> None:
         items = [
@@ -538,6 +902,7 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         with (
             patch.object(self.service, "_query_nvd_batch", return_value=[january, july, missing_publication]),
             patch.object(self.service, "_query_github_batch", return_value=[]),
+            patch.object(self.service, "_query_cisa_kev", return_value=[]),
             patch.object(self.service, "_query_osv_batch", return_value=[]),
             patch.object(self.service, "_query_osv_modified_identifiers", return_value=[]),
         ):
@@ -552,6 +917,73 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(filtered["scope"], "range")
         self.assertEqual(filtered["range_start"], "2026-07-01")
         self.assertEqual(filtered["range_end"], "2026-07-31")
+
+    def test_dashboard_uses_cisa_kev_poc_and_last_seven_update_days(self) -> None:
+        today = datetime.now(timezone.utc).date()
+        records = [
+            {
+                "id": "CVE-2026-6100",
+                "title": "Explicit PoC flag",
+                "severity": "CRITICAL",
+                "aliases": ["CVE-2026-6100"],
+                "has_poc": True,
+                "published_at": (today - timedelta(days=20)).isoformat(),
+                "updated_at": f"{today.isoformat()}T08:00:00+00:00",
+            },
+            {
+                "id": "CVE-2026-6101",
+                "title": "Exploit reference",
+                "severity": "HIGH",
+                "aliases": ["CVE-2026-6101"],
+                "references": ["https://www.exploit-db.com/exploits/52001"],
+                "published_at": (today - timedelta(days=30)).isoformat(),
+                "updated_at": f"{(today - timedelta(days=1)).isoformat()}T09:00:00+00:00",
+            },
+            {
+                "id": "CVE-2026-6102",
+                "title": "Older intelligence update",
+                "severity": "MEDIUM",
+                "aliases": ["CVE-2026-6102"],
+                "published_at": (today - timedelta(days=40)).isoformat(),
+                "updated_at": f"{(today - timedelta(days=8)).isoformat()}T10:00:00+00:00",
+            },
+        ]
+        self.service._catalog.upsert(records)
+        self.service._catalog.replace_known_exploited(
+            [
+                {"cve_id": "CVE-2026-6100", "date_added": today.isoformat()},
+                {"cve_id": "CVE-2026-6109", "date_added": today.isoformat()},
+            ]
+        )
+
+        dashboard = self.service.dashboard()
+
+        self.assertEqual(dashboard["known_exploited_count"], 2)
+        self.assertEqual(dashboard["kev_count"], 2)
+        self.assertEqual(dashboard["poc_count"], 2)
+        self.assertEqual(dashboard["exploited_count"], 2)
+        self.assertEqual(len(dashboard["recent_update_trend"]), 7)
+        self.assertEqual(dashboard["recent_update_trend"][-1], {"date": today.isoformat(), "count": 1})
+        self.assertEqual(sum(item["count"] for item in dashboard["recent_update_trend"]), 2)
+
+    def test_cisa_kev_query_reads_the_complete_official_catalog(self) -> None:
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.json.return_value = {
+            "dateReleased": "2026-08-01T01:00:00Z",
+            "vulnerabilities": [
+                {"cveID": "CVE-2026-6200", "dateAdded": "2026-08-01"},
+                {"cveID": "CVE-2026-6201", "dateAdded": "2026-07-31"},
+                {"cveID": "invalid", "dateAdded": "2026-07-30"},
+            ],
+        }
+
+        with patch("app.intelligence.httpx.get", return_value=response) as get:
+            entries = self.service._query_cisa_kev()
+
+        self.assertEqual([entry["cve_id"] for entry in entries], ["CVE-2026-6200", "CVE-2026-6201"])
+        self.assertTrue(all(entry["updated_at"] == "2026-08-01T01:00:00Z" for entry in entries))
+        get.assert_called_once()
 
     def test_dashboard_recent_records_skip_unknown_severity_echo_items(self) -> None:
         unknown_recent = {
@@ -574,6 +1006,7 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         with (
             patch.object(self.service, "_query_nvd_batch", return_value=[unknown_recent, known_older]),
             patch.object(self.service, "_query_github_batch", return_value=[]),
+            patch.object(self.service, "_query_cisa_kev", return_value=[]),
             patch.object(self.service, "_query_osv_batch", return_value=[]),
             patch.object(self.service, "_query_osv_modified_identifiers", return_value=[]),
         ):

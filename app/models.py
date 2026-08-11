@@ -38,6 +38,11 @@ class AskRequest(BaseModel):
     user_id: str = Field(default="default", min_length=1, max_length=120)
     session_id: str = Field(default="default", min_length=1, max_length=120)
     response_language: str = Field(default="zh-Hans", max_length=24)
+    intent_hint: Literal[
+        "component_vulnerability_catalog",
+        "recent_high_vulnerability_lookup",
+        "information_consultation",
+    ] | None = None
     attachments: list["AskAttachment"] = Field(default_factory=list, max_length=MAX_ASK_ATTACHMENTS)
 
 
@@ -102,12 +107,13 @@ class AssistantTaskActionRequest(BaseModel):
 
 class AgentTaskReportDecisionRequest(BaseModel):
     generate: bool
+    response_language: str = Field(default="zh-Hans", max_length=24)
 
 
 class ReportActionRequest(BaseModel):
     action: Literal["generate", "download_report", "download_report_all_formats", "download_all"]
     report_ids: list[str] = Field(default_factory=list, max_length=100)
-    formats: list[Literal["md", "html", "docx", "pdf"]] = Field(default_factory=list, max_length=4)
+    formats: list[Literal["md", "html", "docx", "xlsx", "pdf"]] = Field(default_factory=list, max_length=5)
     user_id: str = Field(default="default", min_length=1, max_length=120)
     session_id: str = Field(default="default", min_length=1, max_length=120)
     response_language: str = Field(default="zh-Hans", max_length=24)
@@ -117,9 +123,10 @@ class ReportActionResumeRequest(BaseModel):
     thread_id: str = Field(min_length=8, max_length=160)
     interrupt_id: str = Field(default="", max_length=160)
     decision: Literal["confirm", "cancel"]
-    format: Literal["md", "html", "docx", "pdf"] | None = None
+    format: Literal["md", "html", "docx", "xlsx", "pdf", "all"] | None = None
     user_id: str = Field(default="default", min_length=1, max_length=120)
     session_id: str = Field(default="default", min_length=1, max_length=120)
+    response_language: str = Field(default="zh-Hans", max_length=24)
 
 
 class AssistantInterruptResumeRequest(ReportActionResumeRequest):
@@ -128,7 +135,7 @@ class AssistantInterruptResumeRequest(ReportActionResumeRequest):
 
 class AgentTaskReportDownloadDecisionRequest(BaseModel):
     confirm: bool
-    format: Literal["md", "html", "docx", "pdf"] = "pdf"
+    format: Literal["md", "html", "docx", "xlsx", "pdf", "all"] = "pdf"
 
 
 class AgentTaskArchiveRequest(BaseModel):

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("SECFLOW_DISABLE_BATCH_SCHEDULER", "1")
 
@@ -13,15 +15,20 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.language_support import language_for_file
-from app.reports import ReportStore, build_agent_task_markdown_report
-from app.secure_storage import is_encrypted_text
+from app.memory import LongTermMemoryService
+from app.reports import ReportStore, build_agent_task_markdown_report, build_scan_result_json
+from app.secure_storage import encrypt_json_to_text, is_encrypted_text
 from app.task_agent import (
     TaskAgentGraph,
     TaskAgentService,
+    agent_task_report_metrics,
     agent_task_report_ready,
     collect_workspace_inventory,
     compact_task_finding,
     read_workspace_attachments,
+    remember_project_submission,
+    task_assistant_context,
+    task_finding_fingerprint,
 )
 from app.task_store import AgentTaskStore
 
@@ -33,6 +40,40 @@ class AlwaysUsableTrial:
 
 
 class TaskReportReadinessTests(unittest.TestCase):
+    def test_same_rule_findings_keep_distinct_stable_evidence_fingerprints(self) -> None:
+        first = {
+            "finding_fingerprint": "legacy-collision",
+            "rule_id": "secflow.java.unsafe-deserialization",
+            "path": "src/App.java",
+            "line": 30,
+            "source": {"file": "src/App.java", "kind": "source", "snippet": "parseYaml(yamlText)"},
+            "sink": {"file": "src/App.java", "kind": "sink", "snippet": "yaml.load(yamlText)"},
+        }
+        second = {
+            "finding_fingerprint": "legacy-collision",
+            "rule_id": "secflow.java.unsafe-deserialization",
+            "path": "src/App.java",
+            "line": 40,
+            "source": {"file": "src/App.java", "kind": "source", "snippet": "parseJson(jsonText)"},
+            "sink": {"file": "src/App.java", "kind": "sink", "snippet": "mapper.readValue(jsonText)"},
+        }
+        moved = {**first, "line": 130, "source": {**first["source"], "line": 127}, "sink": {**first["sink"], "line": 130}}
+        task = {
+            "id": "task-two-paths",
+            "status": "completed",
+            "result": {
+                "total_findings": 2,
+                "language_results": {"java": {"findings": [first, second]}},
+            },
+        }
+
+        context = task_assistant_context(task)
+
+        self.assertEqual(len(context["findings"]), 2)
+        self.assertTrue(all(item["engine_finding_fingerprint"] == "legacy-collision" for item in context["findings"]))
+        self.assertNotEqual(task_finding_fingerprint(first), task_finding_fingerprint(second))
+        self.assertEqual(task_finding_fingerprint(first), task_finding_fingerprint(moved))
+
     def test_report_readiness_requires_terminal_plan_and_completion_event(self) -> None:
         task = {
             "status": "completed",
@@ -44,6 +85,27 @@ class TaskReportReadinessTests(unittest.TestCase):
 
         task["plan"][0]["status"] = "completed"
         self.assertTrue(agent_task_report_ready(task))
+
+    def test_report_readiness_rejects_degraded_language_scan(self) -> None:
+        task = {
+            "status": "completed",
+            "result": {
+                "summary": "scan returned fallback data",
+                "languages": ["python"],
+                "language_results": {
+                    "python": {
+                        "status": "warning",
+                        "mode": "internal-fallback",
+                        "file_count": 1,
+                        "diagnostics": ["静态分析 CLI 未返回 JSON"],
+                    }
+                },
+            },
+            "plan": [{"id": "scan", "status": "completed"}],
+            "events": [{"type": "task.completed", "status": "completed"}],
+        }
+
+        self.assertFalse(agent_task_report_ready(task))
 
     def test_report_events_do_not_replace_scan_current_node(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -69,6 +131,92 @@ class TaskReportReadinessTests(unittest.TestCase):
             )
 
             self.assertEqual(store.get("task-current-node")["current_node"], "compose_result")
+
+
+class ProjectMemoryAndLicenseReportTests(unittest.TestCase):
+    def test_project_submission_is_persisted_only_for_the_owning_user(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "project-memory-user-isolation-key"},
+        ):
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            with patch("app.memory.memory_service", service):
+                remember_project_submission(
+                    {
+                        "id": "task-a",
+                        "objective": "完整扫描支付服务",
+                        "workspace_path": "/tmp/payments-a",
+                        "workspace_name": "payments-a",
+                        "user_id": "user-a",
+                        "session_id": "session-a",
+                        "run_number": 1,
+                    }
+                )
+                remember_project_submission(
+                    {
+                        "id": "task-b",
+                        "objective": "完整扫描结算服务",
+                        "workspace_path": "/tmp/settlement-b",
+                        "workspace_name": "settlement-b",
+                        "user_id": "user-b",
+                        "session_id": "session-b",
+                        "run_number": 1,
+                    }
+                )
+
+            user_a = service.get_history("user-a")
+            user_b = service.get_history("user-b")
+
+        self.assertEqual(len(user_a), 1)
+        self.assertEqual(len(user_b), 1)
+        self.assertEqual(user_a[0]["sessionId"], "session-a")
+        self.assertEqual(user_a[0]["answerPayload"]["mode"], "project_submission")
+        self.assertIn("payments-a", user_a[0]["answer"])
+        self.assertNotIn("settlement-b", user_a[0]["answer"])
+        self.assertIn("settlement-b", user_b[0]["answer"])
+
+    def test_code_scan_report_and_canonical_json_include_project_license_facts(self) -> None:
+        license_fact = {
+            "spdx_id": "Apache-2.0",
+            "name": "Apache License 2.0",
+            "confidence": 0.95,
+            "source_files": ["LICENSE"],
+            "detection_methods": ["license-text-signature"],
+            "osi": {
+                "listed": True,
+                "approval_status": "approved",
+                "official_url": "https://opensource.org/license/apache-2-0",
+            },
+        }
+        task = {
+            "id": "task-license-report",
+            "workspace_name": "payments",
+            "workspace_path": "/tmp/payments",
+            "workspace_type": "directory",
+            "objective": "扫描支付项目",
+            "events": [],
+            "result": {
+                "languages": [],
+                "language_results": {},
+                "licenses": [license_fact],
+                "license_count": 1,
+                "license_scan": {
+                    "coverage_status": "complete",
+                    "license_count": 1,
+                    "licenses": [license_fact],
+                    "registry": {"status": "completed"},
+                },
+            },
+        }
+
+        report = build_agent_task_markdown_report(task)
+        scan_json = build_scan_result_json(task, source_kind="agent_task")
+
+        self.assertIn("### 5.1 项目许可识别", report)
+        self.assertIn("Apache-2.0", report)
+        self.assertIn("不构成法律意见", report)
+        self.assertEqual(scan_json["counts"]["licenses"], 1)
+        self.assertEqual(scan_json["facts"]["licenses"][0]["spdx_id"], "Apache-2.0")
 
 
 def fake_language_scanner(language, attachments, _dependency_scan, rules, cancelled):
@@ -108,6 +256,47 @@ def fake_language_scanner(language, attachments, _dependency_scan, rules, cancel
 
 
 class TaskAgentTests(unittest.TestCase):
+    def test_task_service_marks_degraded_language_scan_failed_and_disables_report(self) -> None:
+        def degraded_scanner(language, attachments, dependency_scan, rules, cancelled):
+            return {
+                "status": "warning",
+                "mode": "internal-fallback",
+                "syntax_summary": {"languages": [language], "parsed_files": 0},
+                "findings": [],
+                "finding_count": 0,
+                "diagnostics": ["静态分析 CLI 未返回 JSON"],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "workspace"
+            root.mkdir()
+            (root / "app.py").write_text("print('scan me')\n", encoding="utf-8")
+            service = TaskAgentService(
+                AgentTaskStore(Path(temp_dir) / "tasks.json"),
+                max_workers=1,
+                language_scanner=degraded_scanner,
+            )
+            try:
+                task = service.create(
+                    objective="scan uploaded project",
+                    workspace_path=str(root),
+                    user_id="analyst",
+                )
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    task = service.get(task["id"])
+                    if task["status"] in {"completed", "failed", "cancelled"}:
+                        break
+                    time.sleep(0.01)
+            finally:
+                service.shutdown(wait=True)
+
+        self.assertEqual(task["status"], "failed")
+        self.assertFalse(task["report_ready"])
+        self.assertEqual(task["report_decision"], "unavailable")
+        self.assertTrue(any(event["type"] == "verification.failed" for event in task["events"]))
+        self.assertNotIn("task.completed", {event["type"] for event in task["events"]})
+
     def test_compact_finding_uses_enriched_file_and_risk_line(self) -> None:
         finding = compact_task_finding(
             {"id": "f1", "title": "risk", "file": "src/app.c", "risk_line": 42},
@@ -116,6 +305,57 @@ class TaskAgentTests(unittest.TestCase):
 
         self.assertEqual(finding["file_name"], "src/app.c")
         self.assertEqual(finding["line"], 42)
+
+    def test_compact_finding_keeps_taint_path_separate_from_file_location(self) -> None:
+        taint_path = [
+            {"kind": "source", "file": "app.py", "line": 7},
+            {"kind": "sink", "file": "app.py", "line": 8},
+        ]
+        finding = compact_task_finding(
+            {
+                "id": "f1",
+                "title": "command injection",
+                "scenario": "command_execution",
+                "path": taint_path,
+                "source": taint_path[0],
+                "sink": taint_path[1],
+            },
+            1,
+        )
+
+        self.assertEqual(finding["file_name"], "app.py")
+        self.assertEqual(finding["path"], "app.py")
+        self.assertEqual(finding["taint_path"], taint_path)
+        self.assertEqual(finding["scenario"], "command_execution")
+
+    def test_compact_finding_preserves_long_taint_path_as_structured_nodes(self) -> None:
+        taint_path = [
+            {
+                "kind": "source" if index == 0 else "sink" if index == 39 else "propagation",
+                "file": "src/flow.py",
+                "line": index + 1,
+                "label": f"taint-node-{index}",
+                "snippet": f"value_{index} = transform(value_{index - 1})" if index else "value_0 = request.args['q']",
+            }
+            for index in range(40)
+        ]
+        self.assertGreater(len(str(taint_path)), 1_600)
+
+        finding = compact_task_finding(
+            {
+                "id": "long-flow",
+                "title": "long flow",
+                "path": taint_path,
+                "source": taint_path[0],
+                "sink": taint_path[-1],
+            },
+            1,
+        )
+
+        self.assertIsInstance(finding["taint_path"], list)
+        self.assertEqual(len(finding["taint_path"]), 40)
+        self.assertEqual(finding["taint_path"][-1]["label"], "taint-node-39")
+        self.assertEqual(finding["taint_path"][-1]["snippet"], "value_39 = transform(value_38)")
 
     def test_agent_report_renders_severity_levels_in_chinese(self) -> None:
         content = build_agent_task_markdown_report(
@@ -613,12 +853,200 @@ class TaskAgentTests(unittest.TestCase):
                 }
             )
 
-            raw = path.read_text(encoding="utf-8")
+            with closing(sqlite3.connect(store.path)) as connection:
+                raw = str(connection.execute("SELECT payload FROM tasks WHERE id = 'task-1'").fetchone()[0])
+                journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
             loaded = store.get("task-1")
 
         self.assertTrue(is_encrypted_text(raw))
         self.assertNotIn("inspect secret project", raw)
+        self.assertEqual(journal_mode.casefold(), "wal")
         self.assertEqual(loaded["objective"], "inspect secret project")
+
+    def test_task_store_migrates_encrypted_legacy_json_into_separate_event_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "task-agent-migration-key"},
+        ):
+            path = Path(temp_dir) / "tasks.json"
+            path.write_text(
+                encrypt_json_to_text(
+                    {
+                        "version": 1,
+                        "tasks": [
+                            {
+                                "id": "legacy-task",
+                                "user_id": "analyst",
+                                "objective": "legacy sensitive objective",
+                                "status": "completed",
+                                "archived": False,
+                                "events": [
+                                    {
+                                        "sequence": 7,
+                                        "type": "task.completed",
+                                        "node": "compose_result",
+                                        "status": "completed",
+                                        "message": "legacy sensitive event",
+                                        "data": {},
+                                        "time": "2026-07-31T00:00:00+00:00",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "secflow-agent-tasks",
+                    compact=True,
+                ),
+                encoding="utf-8",
+            )
+
+            store = AgentTaskStore(path)
+            loaded = store.get("legacy-task")
+            resumed_events = store.events("legacy-task", after=6)
+            with closing(sqlite3.connect(store.path)) as connection:
+                task_payload = str(connection.execute("SELECT payload FROM tasks").fetchone()[0])
+                event_payload = str(connection.execute("SELECT payload FROM task_events").fetchone()[0])
+
+        self.assertEqual(loaded["events"][0]["sequence"], 7)
+        self.assertEqual(resumed_events[0]["type"], "task.completed")
+        self.assertTrue(is_encrypted_text(task_payload))
+        self.assertTrue(is_encrypted_text(event_payload))
+        self.assertNotIn("legacy sensitive objective", task_payload)
+        self.assertNotIn("legacy sensitive event", event_payload)
+
+    def test_task_store_leases_one_durable_job_and_recovers_expired_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "task-job-lease-key"},
+        ):
+            store = AgentTaskStore(Path(temp_dir) / "tasks.sqlite3")
+            store.create(
+                {
+                    "id": "task-leased",
+                    "user_id": "analyst",
+                    "status": "queued",
+                    "created_at": "2026-08-01T08:00:00+08:00",
+                    "updated_at": "2026-08-01T08:00:00+08:00",
+                    "events": [],
+                }
+            )
+            store.enqueue("task-leased")
+
+            first = store.claim("worker-a", lease_seconds=30)
+            blocked = store.claim("worker-b", lease_seconds=30)
+            renewed = store.renew_lease("task-leased", "worker-a", lease_seconds=30)
+            with closing(sqlite3.connect(store.path)) as connection:
+                connection.execute(
+                    "UPDATE task_jobs SET lease_expires_at = 0 WHERE task_id = 'task-leased'"
+                )
+                connection.commit()
+            recovered = store.claim("worker-b", lease_seconds=30)
+            completed = store.finish_job("task-leased", "worker-b", state="completed")
+
+        self.assertEqual(first["lease_owner"], "worker-a")
+        self.assertIsNone(blocked)
+        self.assertTrue(renewed)
+        self.assertTrue(recovered["recovered"])
+        self.assertEqual(recovered["attempts"], 2)
+        self.assertEqual(completed["state"], "completed")
+
+    def test_task_store_requeues_active_legacy_task_without_a_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "task-job-reconcile-key"},
+        ):
+            store = AgentTaskStore(Path(temp_dir) / "tasks.sqlite3")
+            store.create(
+                {
+                    "id": "task-orphaned",
+                    "user_id": "analyst",
+                    "status": "running",
+                    "report_ready": False,
+                    "created_at": "2026-08-01T08:00:00+08:00",
+                    "updated_at": "2026-08-01T08:00:00+08:00",
+                    "events": [],
+                }
+            )
+
+            recovered = store.reconcile_pending_jobs()
+            task = store.get("task-orphaned")
+            job = store.job("task-orphaned")
+            has_runnable_jobs = store.has_runnable_jobs()
+
+        self.assertEqual(recovered, ["task-orphaned"])
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(job["state"], "queued")
+        self.assertTrue(has_runnable_jobs)
+
+    def test_task_store_finishes_expired_cancellation_and_clears_partial_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "task-job-expired-cancel-key"},
+        ):
+            store = AgentTaskStore(Path(temp_dir) / "tasks.sqlite3")
+            store.create(
+                {
+                    "id": "task-expired-cancel",
+                    "user_id": "analyst",
+                    "status": "cancelling",
+                    "languages": ["python"],
+                    "plan": [{"node": "scan_python", "status": "running"}],
+                    "result": {"finding_count": 3},
+                    "report_ready": True,
+                    "report": {"id": "stale"},
+                    "created_at": "2026-08-02T08:00:00+08:00",
+                    "updated_at": "2026-08-02T08:00:00+08:00",
+                    "events": [],
+                }
+            )
+            store.enqueue("task-expired-cancel")
+            store.claim("dead-worker", lease_seconds=30)
+            with closing(sqlite3.connect(store.path)) as connection:
+                connection.execute(
+                    "UPDATE task_jobs SET lease_expires_at = 0 WHERE task_id = 'task-expired-cancel'"
+                )
+                connection.commit()
+
+            recovered = store.reconcile_pending_jobs()
+            task = store.get("task-expired-cancel")
+            job = store.job("task-expired-cancel")
+
+        self.assertEqual(recovered, [])
+        self.assertEqual(task["status"], "cancelled")
+        self.assertIsNone(task["result"])
+        self.assertEqual(task["languages"], [])
+        self.assertEqual(task["plan"], [])
+        self.assertFalse(task["report_ready"])
+        self.assertIsNone(task["report"])
+        self.assertEqual(job["state"], "cancelled")
+
+    def test_external_service_starts_dedicated_workers_with_an_empty_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "task-agent-external-worker-key"},
+        ):
+            store = AgentTaskStore(Path(temp_dir) / "tasks.sqlite3")
+            service = TaskAgentService(store, max_workers=2, execution_mode="external")
+            with patch("app.agent.task_worker.TaskWorkerProcessSupervisor") as supervisor_type:
+                supervisor = supervisor_type.return_value
+                supervisor.snapshot.return_value = {
+                    "mode": "external-process",
+                    "configured_workers": 2,
+                    "running_workers": 2,
+                    "store_path": str(store.path),
+                }
+
+                service.start()
+                service.start()
+                status = service.execution_status()
+                service.shutdown(wait=True)
+
+            supervisor_type.assert_called_once_with(store_path=store.path, worker_count=2)
+            supervisor.start.assert_called_once_with()
+            supervisor.stop.assert_called_once_with(wait=True)
+
+        self.assertEqual(status["mode"], "external-process")
+        self.assertEqual(status["running_workers"], 2)
 
     def test_task_store_filters_archived_tasks_and_deletes_permanently(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -640,7 +1068,13 @@ class TaskAgentTests(unittest.TestCase):
             self.assertEqual(removed["id"], "archived")
             with self.assertRaises(KeyError):
                 store.get("archived")
-            self.assertNotIn("archived", path.read_text(encoding="utf-8"))
+            with closing(sqlite3.connect(store.path)) as connection:
+                task_row = connection.execute("SELECT id FROM tasks WHERE id = 'archived'").fetchone()
+                event_rows = connection.execute(
+                    "SELECT COUNT(*) FROM task_events WHERE task_id = 'archived'"
+                ).fetchone()[0]
+            self.assertIsNone(task_row)
+            self.assertEqual(event_rows, 0)
 
     def test_task_api_runs_persistent_task_and_streams_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -679,6 +1113,12 @@ class TaskAgentTests(unittest.TestCase):
                     f"/api/tasks/{task_id}/events",
                     params={"user_id": "analyst"},
                 )
+                last_sequence = max(int(event["sequence"]) for event in task["events"])
+                resumed_events = client.get(
+                    f"/api/tasks/{task_id}/events",
+                    params={"user_id": "analyst", "after": 0},
+                    headers={"Last-Event-ID": str(last_sequence - 1)},
+                )
 
             service.shutdown(wait=True)
             persisted = AgentTaskStore(Path(temp_dir) / "tasks.json").get(task_id)
@@ -689,6 +1129,8 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(task["report_decision"], "pending")
         self.assertIn("event: languages.detected", events.text)
         self.assertIn("event: task.completed", events.text)
+        self.assertIn(f"id: {last_sequence}", resumed_events.text)
+        self.assertNotIn(f"id: {last_sequence - 1}\n", resumed_events.text)
         self.assertEqual(persisted["status"], "completed")
 
     def test_task_action_creates_a_new_rescan_with_an_immutable_baseline_diff(self) -> None:
@@ -869,7 +1311,7 @@ class TaskAgentTests(unittest.TestCase):
                 downloaded = client.post(
                     f"/api/tasks/{generated_task_id}/report-download-decision",
                     params={"user_id": "analyst"},
-                    json={"confirm": True, "format": "html"},
+                    json={"confirm": True, "format": "all"},
                 )
 
             service.shutdown(wait=True)
@@ -883,11 +1325,23 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(generated.status_code, 200, generated.text)
         self.assertEqual(repeated.status_code, 200, repeated.text)
         self.assertEqual(downloaded.status_code, 200, downloaded.text)
-        self.assertEqual(downloaded.json()["data"]["artifact"]["media_type"], "text/html; charset=utf-8")
+        self.assertEqual(downloaded.json()["data"]["artifact"]["media_type"], "application/zip")
+        self.assertTrue(downloaded.json()["data"]["artifact"]["file_name"].endswith(".zip"))
         self.assertEqual(generated_task["report_decision"], "generated")
+        self.assertEqual(generated_task["report_orchestration"]["final_agent"], "report_agent")
+        report_event_nodes = {
+            str(event.get("node") or "")
+            for event in generated_task.get("events") or []
+            if str(event.get("type") or "").startswith("report.")
+        }
+        self.assertIn("supervisor_agent", report_event_nodes)
+        self.assertIn("report_agent", report_event_nodes)
+        self.assertIn("report.sarif_mcp", report_event_nodes)
+        self.assertIn("report.pdf_mcp", report_event_nodes)
+        self.assertIn("report.persist", report_event_nodes)
         self.assertEqual(repeated_task["report"]["id"], generated_task["report"]["id"])
         self.assertEqual(len(saved_reports), 1)
-        self.assertEqual(set(saved_reports[0]["available_formats"]), {"md", "html", "docx", "pdf"})
+        self.assertEqual(set(saved_reports[0]["available_formats"]), {"md", "html", "docx", "xlsx", "pdf"})
         self.assertIn("requests", report_detail["content"])
         self.assertIn("requirements.txt", report_detail["content"])
         self.assertIn("app.py:1", report_detail["content"])
@@ -895,7 +1349,7 @@ class TaskAgentTests(unittest.TestCase):
         self.assertIn("1 | def run(value):", report_detail["content"])
         self.assertEqual(report_detail["metadata"]["report_mcp"]["status"], "completed")
         self.assertTrue(report_detail["metadata"]["report_mcp"]["output_sha256"])
-        self.assertEqual(report_detail["metadata"]["report_schema_version"], 4)
+        self.assertEqual(report_detail["metadata"]["report_schema_version"], 5)
         self.assertEqual(report_json["source"]["counts"]["dependencies"], 1)
         self.assertEqual(report_json["source"]["counts"]["code_findings"], 1)
         self.assertIn(
@@ -1027,6 +1481,172 @@ class TaskAgentTests(unittest.TestCase):
                 service.decide_report("task-pending", generate=False, report_store=ReportStore(Path(temp_dir) / "reports"))
             service.shutdown(wait=True)
 
+    def test_full_scan_matches_dependency_vulnerabilities_into_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pom.xml").write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.demo</groupId>
+  <artifactId>log4shell-demo</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>2.14.1</version>
+    </dependency>
+  </dependencies>
+</project>
+""",
+                encoding="utf-8",
+            )
+            (root / "App.java").write_text("class App {}\n", encoding="utf-8")
+            events: list[dict] = []
+            matched_payloads: list[dict] = []
+
+            def event_sink(_task_id, event_type, node, status, message, data):
+                events.append(
+                    {"type": event_type, "node": node, "status": status, "message": message, "data": data or {}}
+                )
+
+            matching = {
+                "vulnerability_count": 1,
+                "matched_component_count": 1,
+                "coverage_status": "complete",
+                "errors": [],
+                "records": [
+                    {
+                        "id": "CVE-2021-44228",
+                        "aliases": ["CVE-2021-44228"],
+                        "severity": "CRITICAL",
+                        "cvss_score": 10.0,
+                        "summary": "Apache Log4j2 JNDI 远程代码执行（Log4Shell）。",
+                        "known_exploited": True,
+                        "affected_versions": [">= 2.0.0, < 2.15.0"],
+                        "fixed_versions": ["2.15.0"],
+                        "matched_dependencies": [
+                            {
+                                "ecosystem": "Maven",
+                                "name": "org.apache.logging.log4j:log4j-core",
+                                "version": "2.14.1",
+                                "source_file": "pom.xml",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            def fake_match(sbom, dependency_scan, **_kwargs):
+                matched_payloads.append(dependency_scan)
+                enriched = dict(sbom)
+                enriched["vulnerabilities"] = [{"id": "CVE-2021-44228"}]
+                return enriched, matching
+
+            with patch("app.agent.task_agent.match_sbom_vulnerabilities", side_effect=fake_match):
+                state = TaskAgentGraph(language_scanner=fake_language_scanner, event_sink=event_sink).invoke(
+                    task_id="task-vuln-match",
+                    objective="scan java project",
+                    workspace_path=str(root),
+                    user_id="analyst",
+                )
+
+        result = state["result"]
+        self.assertEqual(result["vulnerability_count"], 1)
+        self.assertEqual(
+            result["vulnerability_severities"],
+            {"CRITICAL": 1, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
+        )
+        self.assertIn("命中 1 个组件已知漏洞", result["summary"])
+        self.assertIn("严重 1", result["summary"])
+        self.assertEqual(result["vulnerabilities"][0]["id"], "CVE-2021-44228")
+        self.assertEqual(
+            result["vulnerabilities"][0]["matched_dependencies"][0]["name"],
+            "org.apache.logging.log4j:log4j-core",
+        )
+        self.assertNotIn("records", result["vulnerability_matching"])
+        self.assertEqual(
+            result["vulnerability_matching"]["coverage_status"],
+            "complete",
+        )
+        self.assertTrue(any(item.get("id") == "vulnerabilities" for item in state["plan"]))
+        self.assertEqual(
+            matched_payloads[0]["dependencies"][0]["name"],
+            "org.apache.logging.log4j:log4j-core",
+        )
+        matched_events = [event for event in events if event["type"] == "vulnerability.matched"]
+        self.assertEqual(len(matched_events), 1)
+        self.assertIn("命中 1 个已知漏洞", matched_events[0]["message"])
+
+    def test_full_scan_continues_when_vulnerability_matching_degrades(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pom.xml").write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>2.14.1</version>
+    </dependency>
+  </dependencies>
+</project>
+""",
+                encoding="utf-8",
+            )
+            (root / "App.java").write_text("class App {}\n", encoding="utf-8")
+            events: list[dict] = []
+
+            def event_sink(_task_id, event_type, node, status, message, data):
+                events.append(
+                    {"type": event_type, "node": node, "status": status, "message": message, "data": data or {}}
+                )
+
+            with patch(
+                "app.agent.task_agent.match_sbom_vulnerabilities",
+                side_effect=RuntimeError("catalog offline"),
+            ):
+                state = TaskAgentGraph(language_scanner=fake_language_scanner, event_sink=event_sink).invoke(
+                    task_id="task-vuln-degraded",
+                    objective="scan java project",
+                    workspace_path=str(root),
+                    user_id="analyst",
+                )
+
+        result = state["result"]
+        self.assertEqual(result["vulnerability_count"], 0)
+        self.assertEqual(result["vulnerability_matching"]["coverage_status"], "failed")
+        self.assertNotIn("组件已知漏洞", result["summary"])
+        self.assertEqual(result["dependency_count"], 1)
+        failed_events = [event for event in events if event["type"] == "vulnerability.failed"]
+        self.assertEqual(len(failed_events), 1)
+        self.assertIn("降级", failed_events[0]["message"])
+
+    def test_agent_task_report_metrics_counts_dependency_vulnerabilities(self) -> None:
+        task = {
+            "result": {
+                "total_files": 12,
+                "dependency_count": 3,
+                "total_findings": 2,
+                "vulnerability_count": 2,
+                "vulnerability_severities": {"CRITICAL": 1, "HIGH": 1, "MEDIUM": 0, "LOW": 0},
+                "language_results": {
+                    "java": {"findings": [{"severity": "HIGH"}, {"severity": "MEDIUM"}]},
+                },
+            }
+        }
+
+        metrics = agent_task_report_metrics(task)
+
+        self.assertEqual(metrics["dependency_vulnerabilities"], 2)
+        self.assertEqual(metrics["code_findings"], 2)
+        self.assertEqual(metrics["severity"], {"CRITICAL": 1, "HIGH": 2, "MEDIUM": 1, "LOW": 0})
+        self.assertEqual(metrics["high_risk"], 3)
+        self.assertEqual(metrics["total_risks"], 4)
+
     def test_running_task_can_be_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -1048,23 +1668,113 @@ class TaskAgentTests(unittest.TestCase):
                 language_scanner=slow_scanner,
             )
             task = service.create(objective="cancel scan", workspace_path=str(root), user_id="analyst")
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 task = service.get(task["id"])
                 if task.get("current_node") == "scan_python":
                     break
                 time.sleep(0.02)
-            service.cancel(task["id"])
-            deadline = time.monotonic() + 3
+            self.assertEqual(
+                task.get("current_node"),
+                "scan_python",
+                "扫描未在 10 秒内进入 scan_python，取消前提不成立。",
+            )
+            service.store.update(
+                task["id"],
+                result={"finding_count": 12, "dependencies": [{"name": "stale"}]},
+                report={"id": "stale-report"},
+                report_interrupt={"interrupt_id": "stale-interrupt"},
+                report_thread_id="stale-thread",
+                report_download_artifact={"id": "stale-download"},
+                workspace_fingerprint="stale-workspace",
+                ruleset_fingerprint="stale-rules",
+                engine_fingerprint="stale-engine",
+            )
+            with patch.object(service.graph, "cancel_active_scan", wraps=service.graph.cancel_active_scan) as stop_engine:
+                cancelling = service.cancel(task["id"])
+                # cancel() 返回前工作线程可能已完成停止，cancelling/cancelled 均为合法的已受理状态。
+                self.assertIn(cancelling["status"], {"cancelling", "cancelled"})
+                self.assertIsNone(cancelling["result"])
+                self.assertEqual(cancelling["languages"], [])
+                self.assertEqual(cancelling["plan"], [])
+                stop_engine.assert_called()
+            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 task = service.get(task["id"])
                 if task["status"] == "cancelled":
                     break
                 time.sleep(0.02)
             service.shutdown(wait=True)
+            # 状态落库先于终态事件，关停后必须重新读取，避免用轮询时的旧快照断言事件流。
+            task = service.get(task["id"])
 
         self.assertEqual(task["status"], "cancelled")
+        self.assertIsNone(task["result"])
+        self.assertEqual(task["languages"], [])
+        self.assertEqual(task["plan"], [])
+        self.assertIsNone(task["report"])
+        self.assertIsNone(task["report_interrupt"])
+        self.assertIsNone(task["report_thread_id"])
+        self.assertIsNone(task["report_download_artifact"])
+        self.assertIsNone(task["workspace_fingerprint"])
+        self.assertIsNone(task["ruleset_fingerprint"])
+        self.assertIsNone(task["engine_fingerprint"])
         self.assertTrue(any(event["type"] == "task.cancelled" for event in task["events"]))
+        node_cancelled_events = [
+            event
+            for event in task["events"]
+            if event["type"] == "node.cancelled" and event["status"] == "cancelled"
+        ]
+        self.assertTrue(node_cancelled_events, "取消时应为在途节点补齐 node.cancelled 终态事件。")
+        self.assertEqual(node_cancelled_events[-1]["node"], "scan_python")
+        event_types = [event["type"] for event in task["events"]]
+        self.assertLess(
+            event_types.index("node.cancelled"),
+            event_types.index("task.cancelled"),
+            "node.cancelled 应先于 task.cancelled 记录，保证前端先收到节点终态。",
+        )
+
+    def test_worker_cannot_overwrite_cancelling_state_when_starting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "task-agent-start-cancel-race-key"},
+        ):
+            store = AgentTaskStore(Path(temp_dir) / "tasks.json")
+            store.create(
+                {
+                    "id": "task-cancel-before-worker-start",
+                    "objective": "scan project",
+                    "workspace_path": temp_dir,
+                    "workspace_name": "project",
+                    "user_id": "analyst",
+                    "status": "cancelling",
+                    "current_node": "queued",
+                    "languages": ["python"],
+                    "plan": [{"node": "scan_python", "status": "pending"}],
+                    "result": {"finding_count": 4},
+                    "report_ready": True,
+                    "report_decision": "pending",
+                    "report": {"id": "stale-report"},
+                    "events": [],
+                    "created_at": "2026-08-02T00:00:00+08:00",
+                    "updated_at": "2026-08-02T00:00:00+08:00",
+                }
+            )
+            graph = Mock()
+            graph.invoke.side_effect = AssertionError("cancelled task must not enter the graph")
+            service = TaskAgentService(store, graph=graph, execution_mode="worker")
+
+            service._run("task-cancel-before-worker-start")
+            task = store.get("task-cancel-before-worker-start")
+
+        self.assertEqual(task["status"], "cancelled")
+        self.assertIsNone(task["result"])
+        self.assertEqual(task["languages"], [])
+        self.assertEqual(task["plan"], [])
+        self.assertFalse(task["report_ready"])
+        self.assertIsNone(task["report"])
+        graph.invoke.assert_not_called()
+        graph.cancel_active_scan.assert_called_once_with()
 
     @staticmethod
     def _wait_for_task(client: TestClient, task_id: str) -> dict:

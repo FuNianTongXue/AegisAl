@@ -1,4 +1,191 @@
 rules:
+  - id: secflow.go.recall-filepath-clean-misuse
+    languages: [go]
+    severity: ERROR
+    message: 未先固定到根路径就清理外部路径，后续 Join 仍可能保留父目录跳转。
+    metadata:
+      category: security
+      scenario: path_traversal
+      cwe: [CWE-22]
+      owasp: [A01:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 先把输入强制为根相对路径，再 clean 并验证最终路径仍位于允许根目录内。
+    patterns:
+      - pattern-either:
+          - pattern: filepath.Clean($REQUEST.URL.Path)
+          - pattern: path.Clean($REQUEST.URL.Path)
+          - pattern: filepath.Clean("/" + strings.Trim($REQUEST.URL.Path, ...))
+          - pattern: path.Clean("/" + strings.Trim($REQUEST.URL.Path, ...))
+      - pattern-either:
+          - pattern-inside: |
+              func $FUNC(...) {
+                ...
+                $TARGET := filepath.Join(...)
+                ...
+                ioutil.ReadFile($TARGET)
+                ...
+              }
+          - pattern-inside: |
+              func $FUNC(...) {
+                ...
+                $TARGET := filepath.Join(...)
+                ...
+                os.ReadFile($TARGET)
+                ...
+              }
+
+  - id: secflow.go.recall-terminal-path-traversal
+    languages: [go]
+    severity: ERROR
+    message: 终端输入未经文件名约束就进入文件路径，可能访问允许根目录之外的文件。
+    metadata:
+      category: security
+      scenario: path_traversal
+      cwe: [CWE-22]
+      owasp: [A01:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 将输入归一化为 basename，并验证最终路径位于固定根目录内。
+    patterns:
+      - pattern-inside: |
+          $READER := bufio.NewReader(os.Stdin)
+          ...
+          $FILE, $ERROR := $READER.ReadString(...)
+          ...
+      - pattern-either:
+          - pattern: os.Open(filepath.Join(..., $FILE, ...))
+          - pattern: os.Open(path.Join(..., $FILE, ...))
+          - pattern: os.Open($FILE)
+      - focus-metavariable: $FILE
+
+  - id: secflow.go.recall-root-filesystem-server
+    languages: [go]
+    severity: ERROR
+    message: HTTP 文件服务直接暴露系统根目录，远程请求可读取非预期文件。
+    metadata:
+      category: security
+      scenario: path_traversal
+      cwe: [CWE-22, CWE-548]
+      owasp: [A01:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 将 FileServer 根目录限制到专用静态资源目录，并按允许列表控制可访问文件。
+    pattern-either:
+      - pattern: http.FileServer(http.Dir("/"))
+      - pattern: http.StripPrefix($PREFIX, http.FileServer(http.Dir("/")))
+
+  - id: secflow.go.recall-zip-slip
+    languages: [go]
+    severity: ERROR
+    message: 归档条目名称未经根目录约束就用于输出路径，可能通过 Zip Slip 覆盖任意文件。
+    metadata:
+      category: security
+      scenario: path_traversal
+      cwe: [CWE-22]
+      owasp: [A01:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 清理条目名后验证目标路径仍以解压根目录加路径分隔符为前缀，并拒绝绝对路径和符号链接。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  func $FUNC(..., $FILE *zip.File, ...) $RETURN {
+                    ...
+                  }
+              - pattern: $FILE.Name
+          - patterns:
+              - pattern-inside: |
+                  func $FUNC(..., $FILE *tar.Header, ...) $RETURN {
+                    ...
+                  }
+              - pattern: $FILE.Name
+          - patterns:
+              - pattern-inside: |
+                  $ARCHIVE, $ERROR := zip.OpenReader(...)
+                  ...
+                  for ..., $FILE := range $ARCHIVE.File {
+                    ...
+                  }
+              - pattern: $FILE.Name
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.Create($PATH)
+              - pattern: os.OpenFile($PATH, ...)
+              - pattern: os.Mkdir($PATH, ...)
+              - pattern: os.MkdirAll($PATH, ...)
+          - focus-metavariable: $PATH
+    pattern-sanitizers:
+      - pattern: filepath.Base(...)
+      - pattern: path.Base(...)
+
+  - id: secflow.go.recall-dynamic-sql-concatenation
+    languages: [go]
+    severity: ERROR
+    message: SQL 语句与动态表达式直接拼接，可能造成 SQL 注入。
+    metadata:
+      category: security
+      scenario: sql_injection
+      cwe: [CWE-89]
+      owasp: [A03:2021]
+      confidence: MEDIUM
+      profile: recall
+      remediation: 使用固定 SQL 模板和占位符参数，不要拼接外部输入或动态标识符。
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: $QUERY := $SQL + $DYNAMIC
+              - pattern: $QUERY = $SQL + $DYNAMIC
+              - pattern: $DB.Query($SQL + $DYNAMIC, ...)
+              - pattern: $DB.QueryRow($SQL + $DYNAMIC, ...)
+              - pattern: $DB.Exec($SQL + $DYNAMIC, ...)
+          - pattern-not-inside: |
+              const $DYNAMIC = "..."
+              ...
+          - pattern-not-inside: |
+              $DYNAMIC, ... := strconv.Atoi(...)
+              ...
+          - pattern-not-inside: |
+              $DYNAMIC, ... := strconv.ParseInt(...)
+              ...
+          - pattern-not-inside: |
+              $DYNAMIC, ... := strconv.ParseUint(...)
+              ...
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?is)^`?"?\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH)\b.*'
+          - metavariable-regex:
+              metavariable: $DYNAMIC
+              regex: '^(?!"|`|[0-9]+$|strconv\.(?:Atoi|ParseInt|ParseUint)\s*\().+'
+      - patterns:
+          - pattern-either:
+              - pattern: $QUERY := $DYNAMIC + $SQL
+              - pattern: $QUERY = $DYNAMIC + $SQL
+              - pattern: $DB.Query($DYNAMIC + $SQL, ...)
+              - pattern: $DB.QueryRow($DYNAMIC + $SQL, ...)
+              - pattern: $DB.Exec($DYNAMIC + $SQL, ...)
+          - pattern-not-inside: |
+              const $DYNAMIC = "..."
+              ...
+          - pattern-not-inside: |
+              $DYNAMIC, ... := strconv.Atoi(...)
+              ...
+          - pattern-not-inside: |
+              $DYNAMIC, ... := strconv.ParseInt(...)
+              ...
+          - pattern-not-inside: |
+              $DYNAMIC, ... := strconv.ParseUint(...)
+              ...
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?is)^`?"?.*\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH)\b.*'
+          - metavariable-regex:
+              metavariable: $DYNAMIC
+              regex: '^(?!"|`|[0-9]+$|strconv\.(?:Atoi|ParseInt|ParseUint)\s*\().+'
+
   - id: secflow.go.recall-formatted-sql
     languages: [go]
     severity: ERROR
@@ -13,14 +200,194 @@ rules:
       remediation: 使用固定 SQL 模板和占位符参数，不要把外部输入拼接到查询文本。
     patterns:
       - pattern-either:
-          - pattern: fmt.Sprintf($FORMAT, $ARG, ...)
-          - pattern: fmt.Sprint($FORMAT, $ARG, ...)
+          - patterns:
+              - pattern-either:
+                  - pattern: $QUERY := fmt.Sprintf($FORMAT, $ARG, ...)
+                  - pattern: $QUERY = fmt.Sprintf($FORMAT, $ARG, ...)
+                  - pattern: var $QUERY = fmt.Sprintf($FORMAT, $ARG, ...)
+              - pattern-inside: |
+                  $QUERY := fmt.Sprintf($FORMAT, $ARG, ...)
+                  ...
+                  $DB.$METHOD($QUERY, ...)
+          - patterns:
+              - pattern-either:
+                  - pattern: $QUERY = fmt.Sprintf($FORMAT, $ARG, ...)
+                  - pattern: var $QUERY = fmt.Sprintf($FORMAT, $ARG, ...)
+              - pattern-inside: |
+                  $QUERY = fmt.Sprintf($FORMAT, $ARG, ...)
+                  ...
+                  $DB.$METHOD($QUERY, ...)
+          - pattern: $DB.$METHOD(fmt.Sprintf($FORMAT, $ARG, ...), ...)
+      - pattern-not: fmt.Sprintf($FORMAT, pq.QuoteIdentifier(...), ...)
+      - pattern-not: fmt.Sprintf($FORMAT, strconv.Atoi(...), ...)
+      - pattern-not: fmt.Sprintf($FORMAT, strconv.ParseInt(...), ...)
+      - pattern-not: fmt.Sprintf($FORMAT, strconv.ParseUint(...), ...)
+      - pattern-not-inside: |
+          const $ARG = "..."
+          ...
       - metavariable-regex:
           metavariable: $FORMAT
-          regex: '(?is)^`?"?\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH)\b.*%[-+ #0-9.*]*[a-zA-Z].*'
+          regex: '(?is)^`?"?\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH)\b.*%[-+ #0-9.*]*(?:v|s|q).*'
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: '^(Query|QueryContext|QueryRow|QueryRowContext|Exec|ExecContext|Prepare|PrepareContext|QueryOne|QueryEx|ExecEx)$'
       - metavariable-regex:
           metavariable: $ARG
-          regex: '^(?!"|`|[0-9]+$).+'
+          regex: '^(?!"|`|[0-9]+$|pq\.QuoteIdentifier\s*\(|strconv\.(?:Atoi|ParseInt|ParseUint)\s*\().+'
+
+  - id: secflow.go.recall-go-pg-dynamic-sql
+    languages: [go]
+    severity: ERROR
+    message: go-pg 查询方法接收了动态构造的 SQL 文本，可能造成 SQL 注入。
+    metadata:
+      category: security
+      scenario: sql_injection
+      cwe: [CWE-89]
+      owasp: [A03:2021]
+      confidence: LOW
+      profile: recall
+      source-rule-url: https://github.com/semgrep/semgrep-rules/tree/develop/go/lang/security/audit/sqli
+      remediation: 使用固定查询和 go-pg 参数占位符，不要拼接或格式化外部值。
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: $DB.$METHOD(..., $QUERY, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      $QUERY = $X + $Y
+                      ...
+                  - pattern-inside: |
+                      $QUERY += $X
+                      ...
+                  - pattern-inside: |
+                      $QUERY = fmt.Sprintf("...", $PARAM, ...)
+                      ...
+              - pattern-not-inside: |
+                  $QUERY += "..."
+                  ...
+              - pattern-not-inside: |
+                  $QUERY = "..." + "..."
+                  ...
+          - pattern: $DB.$METHOD(..., $X + $Y, ...)
+          - pattern: $DB.$METHOD(..., fmt.Sprintf("...", $PARAM, ...), ...)
+      - pattern-either:
+          - pattern-inside: |
+              $DB = pg.Connect(...)
+              ...
+          - pattern-inside: |
+              func $FUNC(..., $DB *pg.DB, ...) {
+                ...
+              }
+      - pattern-not: $DB.$METHOD(..., "..." + "...", ...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: '^(Exec|ExecContext|ExecOne|ExecOneContext|Query|QueryOne|QueryContext|QueryOneContext)$'
+
+  - id: secflow.go.recall-pgx-dynamic-sql
+    languages: [go]
+    severity: ERROR
+    message: pgx 查询方法接收了动态构造的 SQL 文本，可能造成 SQL 注入。
+    metadata:
+      category: security
+      scenario: sql_injection
+      cwe: [CWE-89]
+      owasp: [A03:2021]
+      confidence: LOW
+      profile: recall
+      source-rule-url: https://github.com/semgrep/semgrep-rules/tree/develop/go/lang/security/audit/sqli
+      remediation: 使用固定查询和 pgx 参数占位符，不要拼接或格式化外部值。
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: $DB.$METHOD(..., $QUERY, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      $QUERY = $X + $Y
+                      ...
+                  - pattern-inside: |
+                      $QUERY += $X
+                      ...
+                  - pattern-inside: |
+                      $QUERY = fmt.Sprintf("...", $PARAM, ...)
+                      ...
+              - pattern-not-inside: |
+                  $QUERY += "..."
+                  ...
+              - pattern-not-inside: |
+                  $QUERY = "..." + "..."
+                  ...
+          - pattern: $DB.$METHOD(..., $X + $Y, ...)
+          - pattern: $DB.$METHOD(..., fmt.Sprintf("...", $PARAM, ...), ...)
+      - pattern-either:
+          - pattern-inside: |
+              $DB, ... = pgx.Connect(...)
+              ...
+          - pattern-inside: |
+              $DB, ... = pgx.NewConnPool(...)
+              ...
+          - pattern-inside: |
+              $DB, ... = pgx.ConnectConfig(...)
+              ...
+          - pattern-inside: |
+              func $FUNC(..., $DB *pgx.Conn, ...) {
+                ...
+              }
+      - pattern-not: $DB.$METHOD(..., "..." + "...", ...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: '^(Exec|ExecEx|Query|QueryEx|QueryRow|QueryRowEx)$'
+
+  - id: secflow.go.recall-go-pg-orm-dynamic-sql
+    languages: [go]
+    severity: ERROR
+    message: go-pg ORM 条件或表达式接收了动态构造的 SQL 文本，可能造成 SQL 注入。
+    metadata:
+      category: security
+      scenario: sql_injection
+      cwe: [CWE-89]
+      owasp: [A03:2021]
+      confidence: LOW
+      profile: recall
+      source-rule-url: https://github.com/semgrep/semgrep-rules/tree/develop/go/lang/security/audit/sqli
+      remediation: 使用 ORM 参数占位符，不要把动态值拼入 Where/WhereOr/ColumnExpr 等表达式。
+    patterns:
+      - pattern-inside: |
+          import (
+            ...
+            "$IMPORT"
+          )
+          ...
+      - metavariable-regex:
+          metavariable: $IMPORT
+          regex: '.*go-pg.*'
+      - pattern-either:
+          - patterns:
+              - pattern: $DB.$METHOD(..., $QUERY, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      $QUERY = $X + $Y
+                      ...
+                  - pattern-inside: |
+                      $QUERY += $X
+                      ...
+                  - pattern-inside: |
+                      $QUERY = fmt.Sprintf("...", $PARAM, ...)
+                      ...
+              - pattern-not-inside: |
+                  $QUERY += "..."
+                  ...
+              - pattern-not-inside: |
+                  $QUERY = "..." + "..."
+                  ...
+          - pattern: $DB.$CHAIN(...).$METHOD(..., $X + $Y, ...).$NEXT(...)
+          - pattern: $DB.$METHOD(..., fmt.Sprintf("...", $PARAM, ...), ...)
+      - pattern-not: $DB.$METHOD(..., "...", ...)
+      - pattern-not: $DB.$CHAIN(...).$METHOD(..., "...", ...).$NEXT(...)
+      - pattern-not: path.Join(...)
+      - pattern-not: filepath.Join(...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: '^(Where|WhereOr|Join|GroupExpr|OrderExpr|ColumnExpr)$'
 
   - id: secflow.go.recall-xss-response
     languages: [go]
@@ -38,6 +405,7 @@ rules:
     pattern-sources:
       - pattern-either:
           - pattern: $R.URL.Query().Get(...)
+          - pattern: $R.URL.Query()
           - pattern: $R.FormValue(...)
           - pattern: $R.PostFormValue(...)
           - pattern: $R.Header.Get(...)
@@ -45,6 +413,17 @@ rules:
           - pattern: $C.Param(...)
           - pattern: $C.Query(...)
           - pattern: $C.PostForm(...)
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      func $FUNC(..., $REQUEST *http.Request, ..., $PARAM string, ...) {
+                        ...
+                      }
+                  - pattern-inside: |
+                      func $FUNC(..., $REQUEST *http.Request, ..., $PARAM string, ...) $RET {
+                        ...
+                      }
+              - pattern: $PARAM
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -53,10 +432,29 @@ rules:
               - pattern: fmt.Fprint($W, $DATA, ...)
               - pattern: fmt.Fprintf($W, $FORMAT, $DATA, ...)
               - pattern: template.HTML($DATA)
+              - pattern: template.HTMLAttr($DATA)
               - pattern: template.JS($DATA)
               - pattern: template.URL($DATA)
               - pattern: template.CSS($DATA)
+              - pattern: template.Srcset($DATA)
           - focus-metavariable: $DATA
+      - patterns:
+          - pattern-either:
+              - pattern: $HTML := $PREFIX + $DATA + $SUFFIX
+              - pattern: $HTML = $PREFIX + $DATA + $SUFFIX
+              - pattern: const $HTML = $PREFIX + $DATA + $SUFFIX
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '(?is)^(?:"|`).*<[a-z][^>]*.*'
+          - focus-metavariable: $DATA
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: html.EscapeString(...)
+          - pattern: template.HTMLEscapeString(...)
+          - pattern: json.Marshal(...)
+          - pattern: strconv.Atoi(...)
+          - pattern: strconv.ParseInt(...)
+          - pattern: strconv.ParseUint(...)
 
   - id: secflow.go.recall-dangerous-exec
     languages: [go]
@@ -78,6 +476,26 @@ rules:
           - pattern: syscall.ForkExec($CMD, ...)
       - pattern-not: exec.Command("...", ...)
       - pattern-not: exec.CommandContext($CTX, "...", ...)
+      - pattern-not: syscall.Exec("...", ...)
+      - pattern-not-inside: |
+          $CMD, $ERR := exec.LookPath("...")
+          ...
+          exec.Command($CMD, ...)
+      - pattern-not-inside: |
+          $CMD, $ERR := exec.LookPath("...")
+          ...
+          $ARGS := []string{"...", ...}
+          ...
+          syscall.Exec($CMD, ...)
+      - pattern-not-inside: |
+          $COMMANDS := map[string][]string{...}
+          ...
+          $CMDARGS := $COMMANDS[$KEY]
+          ...
+          $EXE := $CMDARGS[0]
+          $ARGS := $CMDARGS[1:]
+          ...
+          exec.Command($EXE, $ARGS...)
 
   - id: secflow.go.recall-ssrf
     languages: [go]
@@ -99,6 +517,9 @@ rules:
           - pattern: $R.PostFormValue(...)
           - pattern: $R.Header.Get(...)
           - pattern: $R.PathValue(...)
+          - pattern: $R.URL.Query()[$KEY]
+          - pattern: $R.URL.Path
+          - pattern: $R.Host
           - pattern: $C.Param(...)
           - pattern: $C.Query(...)
           - pattern: os.Args[$INDEX]
@@ -153,6 +574,35 @@ rules:
               - pattern: context.WithTimeout($CTX, $DURATION)
               - pattern: context.WithDeadline($CTX, $DURATION)
           - focus-metavariable: $DURATION
+
+  - id: secflow.go.recall-unbounded-decompression
+    languages: [go]
+    severity: ERROR
+    message: 解压数据流未经输出大小限制直接复制，压缩炸弹可能耗尽磁盘、内存或 CPU。
+    metadata:
+      category: security
+      scenario: resource_exhaustion
+      cwe: [CWE-400, CWE-409]
+      owasp: [A04:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 通过 io.LimitReader 或 io.CopyN 限制解压后的总字节数，并限制文件数量和压缩比。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: zlib.NewReader(...)
+          - pattern: gzip.NewReader(...)
+          - pattern: bzip2.NewReader(...)
+          - pattern: flate.NewReader(...)
+          - pattern: lzw.NewReader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: io.Copy($DESTINATION, $READER)
+              - pattern: io.CopyBuffer($DESTINATION, $READER, ...)
+          - focus-metavariable: $READER
+    pattern-sanitizers:
+      - pattern: io.LimitReader(...)
 
   - id: secflow.go.recall-context-cancel-leak
     languages: [go]
@@ -223,6 +673,50 @@ rules:
                     $NONCE := []byte{...}
                     ...
                   }
+          - pattern-not-inside: |
+              func $FUNC(...) {
+                ...
+                rand.Read($NONCE)
+                ...
+                cipher.NewCTR($BLOCK, $NONCE)
+                ...
+              }
+          - pattern-not-inside: |
+              func $FUNC(...) {
+                ...
+                rand.Read($NONCE[0:16])
+                ...
+                cipher.NewCTR($BLOCK, $NONCE)
+                ...
+              }
+          - pattern-not-inside: |
+              func $FUNC(...) {
+                ...
+                io.ReadFull(..., $NONCE)
+                ...
+                cipher.NewCTR($BLOCK, $NONCE)
+                ...
+              }
+          - pattern-not-inside: |
+              func $HELPER($BUF []byte) $RET {
+                return rand.Read($BUF)
+              }
+              ...
+              func $FUNC(...) {
+                ...
+                $HELPER($NONCE)
+                ...
+                cipher.NewCTR($BLOCK, $NONCE)
+                ...
+              }
+          - pattern-not-inside: |
+              func $FUNC(...) {
+                ...
+                $READER.Read($NONCE)
+                ...
+                cipher.NewCTR($BLOCK, $NONCE)
+                ...
+              }
           - pattern-either:
               - pattern: cipher.NewCBCEncrypter($BLOCK, $NONCE)
               - pattern: cipher.NewCFBEncrypter($BLOCK, $NONCE)
@@ -243,7 +737,6 @@ rules:
       profile: recall
       remediation: 安全敏感随机值使用 crypto/rand；非安全用途可在复核后忽略。
     pattern-either:
-      - pattern: rand.Int(...)
       - pattern: rand.Intn(...)
       - pattern: rand.Int31(...)
       - pattern: rand.Int31n(...)
@@ -253,7 +746,20 @@ rules:
       - pattern: rand.Float64(...)
       - pattern: rand.New(...)
       - pattern: rand.NewSource(...)
-      - pattern: rand.Read(...)
+
+  - id: secflow.go.recall-math-random-import
+    languages: [go]
+    severity: INFO
+    message: 代码导入 math/rand 随机源，若用于令牌、密钥、挑战值或安全决策则可预测。
+    metadata:
+      category: security
+      scenario: weak_random
+      cwe: [CWE-338]
+      owasp: [A02:2021]
+      confidence: LOW
+      profile: recall
+      remediation: 安全敏感随机值使用 crypto/rand；非安全用途可在复核后忽略。
+    pattern-regex: '(?m)^\s*(?:[A-Za-z_]\w*|\.)?\s*"math/rand(?:/v2)?"'
 
   - id: secflow.go.recall-weak-cryptography
     languages: [go]
@@ -312,7 +818,23 @@ rules:
       confidence: LOW
       profile: recall
       remediation: 使用 HTTPS、SFTP/FTPS 或 SSH，并验证服务端身份。
-    pattern-regex: '(?i)"(?:http|ftp|telnet)://[^"\\s]+"'
+    pattern-regex: '(?i)"(?:http|ftp|telnet)://(?!(?:127\.0\.0\.1|localhost|proxy)(?:[:/]|$))[^"\\s]+"'
+
+  - id: secflow.go.recall-plaintext-http-server
+    languages: [go]
+    severity: WARNING
+    message: HTTP 服务通过明文 ListenAndServe 暴露，网络中的请求和响应可能被窃听或篡改。
+    metadata:
+      category: security
+      scenario: insecure_transport
+      cwe: [CWE-319]
+      owasp: [A02:2021]
+      confidence: LOW
+      profile: recall
+      remediation: 对外服务使用 ListenAndServeTLS 或置于强制 TLS 的反向代理之后，并限制明文监听到本机开发用途。
+    pattern-either:
+      - pattern: http.ListenAndServe($ADDR, ...)
+      - pattern: '(&http.Server{..., Addr: $ADDR, ...}).ListenAndServe()'
 
   - id: secflow.go.recall-hardcoded-secret
     languages: [go]
@@ -328,6 +850,55 @@ rules:
       remediation: 从密钥管理服务或受保护的环境变量读取凭据，并轮换已提交的值。
     pattern-regex: '(?i)(?:password|passwd|pwd|secret|credential|token|api_?key|access_?key|private_?key|client_?(?:id|secret)|auth_?key|jwt_?key)[A-Za-z0-9_]*"?\s*(?:=|:=|:)\s*"[^"\\n]{8,}"'
 
+  - id: secflow.go.recall-sensitive-string-assignment
+    languages: [go]
+    severity: ERROR
+    message: 敏感标识符被逐项赋予长字符串常量，可能包含硬编码凭据。
+    metadata:
+      category: security
+      scenario: hardcoded_credential
+      cwe: [CWE-798]
+      owasp: [A07:2021]
+      confidence: MEDIUM
+      profile: recall
+      remediation: 从密钥管理服务或受保护的环境变量读取凭据，并轮换已提交的值。
+    patterns:
+      - pattern-either:
+          - pattern: $SECRET := $VALUE
+          - pattern: var $SECRET = $VALUE
+          - pattern: const $SECRET = $VALUE
+          - pattern: $SECRET = $VALUE
+          - pattern: $OBJECT.$SECRET = $VALUE
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: '(?i)^(?:.*(?:password|passwd|pwd|secret|credential|token|api_?key|access_?key|private_?key|client_?secret|auth_?key|jwt_?key).*)$'
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: '^"[^"\\n]{8,}"$'
+
+  - id: secflow.go.recall-hardcoded-jwt-signing-key
+    languages: [go]
+    severity: ERROR
+    message: JWT 签名使用源码中的固定字符串或字节 key，可能造成令牌伪造。
+    metadata:
+      category: security
+      scenario: hardcoded_credential
+      cwe: [CWE-798]
+      owasp: [A07:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 从密钥管理服务加载足够强度的签名 key，并建立定期轮换机制。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: '[]byte("...")'
+          - pattern: '"..."'
+        exact: true
+    pattern-sinks:
+      - patterns:
+          - pattern: $TOKEN.SignedString($KEY)
+          - focus-metavariable: $KEY
+
   - id: secflow.go.recall-provider-secret
     languages: [go]
     severity: ERROR
@@ -340,7 +911,7 @@ rules:
       confidence: MEDIUM
       profile: recall
       remediation: 立即撤销并轮换凭据，改为通过密钥管理服务注入。
-    pattern-regex: '(?i)(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:gh[pousr]|glpat|dop_v1|xox[baprs]|SG|key)-?[A-Za-z0-9_.-]{16,}|AIza[A-Za-z0-9_-]{30,}|AKIA[A-Z0-9]{16}|[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})'
+    pattern-regex: '(?i)(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{16,}|sk-(?:ant-api\d+-)?[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{16,}|dop_v1_[A-Fa-f0-9]{40,}|xox[baprs]-[A-Za-z0-9-]{16,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|CLOJARS_[A-Za-z0-9]{30,}|duffel_(?:test|live)_[A-Za-z0-9_-]{24,}|EZT[KL][A-Za-z0-9]{30,}|glc_[A-Za-z0-9]{20,}|lin_api_[A-Za-z0-9]{24,}|npm_[A-Za-z0-9]{24,}|pscale_pw_[A-Za-z0-9_=.-]{24,}|pnu_[A-Za-z0-9]{24,}|rdme_[A-Za-z0-9]{30,}|hvb\.[A-Za-z0-9_.-]{50,}|key-[A-Fa-f0-9]{32}|AIza[A-Za-z0-9_-]{30,}|AKIA[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}|https://[A-Fa-f0-9]{6,}:[A-Fa-f0-9]{6,}@gems\.contribsys\.com/|(?:adafruit|adobe|algolia|alibaba|asana|bitbucket|bittrex|contentful|droneci|dropbox|etsy|fastly|finnhub|freshbooks|gitter|gocardless|grafana|intercom|kraken|linkedin|netlify|new[-_ ]?relic|okta|plaid|prefect|sumo(?:logic)?|telegram|twitch|twitter|vault|yandex)[A-Za-z0-9_.-]{0,48}\s*(?::=|=)\s*"?[A-Za-z0-9_+=%:/.-]{14,}"?)'
 
   - id: secflow.go.recall-insecure-cookie
     languages: [go]
@@ -384,6 +955,33 @@ rules:
       - pattern: os.OpenFile($PATH, $FLAGS, 0666)
       - pattern: os.WriteFile($PATH, $DATA, 0666)
 
+  - id: secflow.go.recall-walkdir-openfile-toctou
+    languages: [go]
+    severity: WARNING
+    message: 文件遍历回调中再次创建或打开派生路径，遍历结果与实际使用之间可能发生 TOCTOU 竞态。
+    metadata:
+      category: security
+      scenario: filesystem_toctou
+      cwe: [CWE-367]
+      owasp: [A01:2021]
+      confidence: MEDIUM
+      profile: recall
+      remediation: 在受信任目录中使用已打开目录句柄和原子创建标志，避免在遍历检查后再按可替换路径创建文件。
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              filepath.WalkDir($ROOT, func($PATH string, $D fs.DirEntry, $ERR error) error {
+                ...
+              })
+          - pattern-inside: |
+              filepath.Walk($ROOT, func($PATH string, $INFO os.FileInfo, $ERR error) error {
+                ...
+              })
+      - pattern: os.OpenFile($TARGET, $FLAGS, ...)
+      - metavariable-regex:
+          metavariable: $FLAGS
+          regex: '.*\bO_(?:CREATE|TRUNC|WRONLY|RDWR)\b.*'
+
   - id: secflow.go.recall-unbounded-http-server
     languages: [go]
     severity: WARNING
@@ -399,6 +997,32 @@ rules:
     pattern-either:
       - pattern: http.ListenAndServe(...)
       - pattern: http.ListenAndServeTLS(...)
+      - patterns:
+          - pattern: (&http.Server{...}).ListenAndServe()
+          - pattern-not: '(&http.Server{..., ReadHeaderTimeout: $TIMEOUT, ...}).ListenAndServe()'
+
+  - id: secflow.go.recall-unbounded-multipart-form
+    languages: [go]
+    severity: WARNING
+    message: multipart 表单解析前未限制请求体总大小，攻击者可通过大请求耗尽磁盘或 I/O 资源。
+    metadata:
+      category: security
+      scenario: resource_exhaustion
+      cwe: [CWE-400]
+      owasp: [A04:2021]
+      confidence: HIGH
+      profile: recall
+      remediation: 在 ParseMultipartForm 前使用 http.MaxBytesReader 限制 r.Body 的总字节数。
+    patterns:
+      - pattern: $REQUEST.ParseMultipartForm(...)
+      - pattern-not-inside: |
+          func $FUNC(...) {
+            ...
+            $REQUEST.Body = http.MaxBytesReader(..., $REQUEST.Body, ...)
+            ...
+            $REQUEST.ParseMultipartForm(...)
+            ...
+          }
 
   - id: secflow.go.recall-bind-all-interfaces
     languages: [go]

@@ -106,6 +106,7 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 | POST | `/api/components/vulnerabilities/export` | `ComponentVulnerabilityRequest` | 导出组件查询结果 |
 | POST | `/api/vulnerabilities/components/export` | `VulnerabilityComponentExportRequest` | 导出指定 CVE/GHSA 的组件信息 |
 | GET | `/api/mcp/tools/component-query` | - | 获取 Excel 和 D3 Sankey MCP 工具描述 |
+| GET | `/api/mcp/tools/code-scan` | - | 获取扫描 MCP SSE Schema；实际令牌按 Agent 仅允许 `scan_language` 或 `identify_project_licenses`，不返回动态端口和能力令牌 |
 | GET | `/api/mcp/tools/project-sbom` | - | 获取项目 SBOM Excel MCP 工具描述 |
 | GET | `/api/assistant/artifacts/{artifact_id}` | Path: `artifact_id` | 下载问答、组件查询或 SBOM 制品 |
 | POST | `/api/assistant/interrupts/resume` | `AssistantInterruptResumeRequest` | 恢复报告、组件目录或 SBOM 子图的用户确认中断 |
@@ -115,10 +116,10 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 | 方法 | 路径 | 请求 | 说明 |
 | --- | --- | --- | --- |
 | POST | `/api/knowledge-graph/query` | `IntelligenceQueryRequest` | 返回实体、关系和图表数据 |
-| POST | `/api/assistant/questions` | `AskRequest` | 同步执行问答主图 |
-| POST | `/api/assistant/questions/stream` | `AskRequest` | 以 SSE 流式返回节点和回答事件 |
-| POST | `/api/assistant/workspace-actions` | `AssistantWorkspaceActionRequest` | 由 LLM 语义规划工作区目标；SBOM 进入问答子图，扫描进入原任务图 |
-| GET | `/api/langgraph/assistant` | - | 获取问答主图描述 |
+| POST | `/api/assistant/questions` | `AskRequest` | 由 Multi-Agent Supervisor 规划并交接给专业 Agent |
+| POST | `/api/assistant/questions/stream` | `AskRequest` | 以 SSE 返回真实 Agent、子图和回答事件 |
+| POST | `/api/assistant/workspace-actions` | `AssistantWorkspaceActionRequest` | Supervisor 在 Code Scan、SBOM 或普通问答 Agent 之间语义交接 |
+| GET | `/api/langgraph/assistant` | - | 获取 Supervisor、专业 Agent、handoff 和内部子图描述 |
 | GET | `/api/langgraph/collectors` | - | 获取采集器子图描述 |
 | GET | `/api/system/runtime` | - | 获取 LangGraph、LLM、采集器等运行状态 |
 
@@ -138,11 +139,13 @@ SSE 客户端应逐个解析 `event:` 和 `data:` 行，并在空行处提交事
 | 事件 | `data` | 说明 |
 | --- | --- | --- |
 | `trace` | `TraceItem` | 真实 LangGraph 节点状态；可携带脱敏后的 Tool Call 或 Prompt Diff presentation |
-| `content` | `{"delta":"..."}` | 最终 Markdown 正文的无损增量分片，按接收顺序拼接 |
+| `content` | `{"delta":"..."}` | 模型供应商实时文本 delta；确定性回答或上游不支持流式时为最终 Markdown 的兼容分片，按接收顺序拼接且不会在 `result` 前重复发送 |
 | `result` | `AskResult` | 规范最终结果，包含完整正文、公开 `evidence_sources`、汇总 `token_usage`、制品和完整 trace |
 | `error` | `{"message":"..."}` | 脱敏错误；收到后结束本轮请求 |
 
 `evidence_sources` 只公开 `nvd`、`github_advisory` 和 `osv` 的状态与数量；回答中的其他权威 URL 来自已核验 `reference_links`。客户端不得把进度文案当作独立事实，也不得从 Tool Call presentation 推断未返回的数据。连接取消后客户端停止消费本轮事件。
+
+服务不会把 Responses reasoning、Chat `reasoning_content` 或 Anthropic thinking block 写入 `content`；Thinking 面板只消费 `trace` 中的高层 LangGraph 节点状态。
 
 ### 3.8 工作区任务
 
@@ -160,7 +163,13 @@ SSE 客户端应逐个解析 `event:` 和 `data:` 行，并在空行处提交事
 | POST | `/api/agent/tasks/{task_id}/report-download-decision` | `AgentTaskReportDownloadDecisionRequest` + `user_id` | 报告完成后确认下载及格式 |
 | GET | `/api/agent/tasks/{task_id}/events` | Query: `user_id`, `after` | SSE 任务事件流，可按序号续传 |
 
-`/api/assistant/workspace-actions` 不按固定关键词决定流程。请求包含 `objective`、`workspace_path`、`user_id`、`session_id` 和 `response_language`；响应 `kind=assistant` 时返回 SBOM interrupt 回答，`kind=agent_task` 时返回原扫描任务。SBOM 依次使用 `sbom_vulnerability_match_confirmation`、`sbom_excel_generation_confirmation` 和 `sbom_excel_download_confirmation`。下载中断只携带 `destination_hint`，不会返回或持久化模型生成的本机绝对目录。
+创建与恢复接口只把任务写入 SQLite WAL `task_jobs` 队列。独立 Worker 使用有期限租约领取任务并持续心跳，FastAPI 进程不运行项目扫描图。Worker 非正常退出后，监管器会启动替代进程；租约过期后任务从持久状态重新执行，最多自动恢复三次。取消排队任务会直接将队列和任务置为 `cancelled`，运行中任务则由 Worker 的持久取消检查停止。
+
+`/api/assistant/workspace-actions` 不按固定关键词决定流程。请求包含 `objective`、`workspace_path`、`user_id`、`session_id` 和 `response_language`；响应 `kind=assistant` 时返回 SBOM interrupt 回答，`kind=agent_task` 时返回原扫描任务。系统不会仅凭 SBOM 文件名构造本机路径，也不会匹配其他用户项目。SBOM 依次使用三个确认节点；每步结果写入用户隔离的本地加密操作快照。后续向 `/api/assistant/questions` 提问“存在哪些漏洞/许可”会返回 `mode=sbom_result_follow_up`，只读原 checkpoint 或快照，不会隐式确认、取消或重新执行漏洞匹配，原下载确认仍有效。
+
+问答结果增加 `orchestration`：`schema_version`、`architecture`、`supervisor`、`final_agent`、`visited_agents`、`handoffs` 和隔离策略。handoff 只公开 Agent 标识、能力意图和简短理由，不包含私有推理、绝对工作区路径、凭证或完整工具载荷。完整应用向 Supervisor 注入任务服务；独立 `assistant_app` 不注入，因此扫描执行请求不会越权创建本机任务。
+
+SBOM Agent 通过独立 `SecFlow License MCP / identify_project_licenses` 识别许可；`SecFlow Code Scan MCP` 只暴露 `scan_language`，两个 MCP 的审计字段互不混用。License MCP 只读检查 SPDX、结构化清单和许可证文件，并仅访问固定 OSI API。SBOM 依赖提取只读清单和锁文件，不读取源码推断组件。Report Agent 只能消费 SBOM Agent 已固定的许可事实，不得重新扫描。接口不可用时返回 `coverage_status=partial` 并保留本地证据；自动识别结果不构成法律意见。
 
 创建任务示例：
 
@@ -191,10 +200,10 @@ curl -N 'http://127.0.0.1:18781/api/agent/tasks/TASK_ID/events?user_id=local-use
 | POST | `/api/assistant/interrupts/resume` | `AssistantInterruptResumeRequest` | 统一恢复报告、组件漏洞目录或 SBOM 中断 |
 | GET | `/api/reports/{report_id}` | Path: `report_id` | 报告详情和格式目录 |
 | GET | `/api/reports/{report_id}/download` | Query: `format=md|html|docx|pdf` | 下载指定格式 |
-| GET | `/api/mcp/tools/reports` | - | 获取图表、Mermaid、Markdown、Word 和 PDF MCP 工具描述 |
+| GET | `/api/mcp/tools/reports` | - | 获取 SARIF、图表、Mermaid、Markdown、Word 和 PDF MCP 工具描述 |
 | GET | `/api/mcp/tools/report-charts` | - | 兼容路径，返回同一组报告 MCP 工具描述 |
 
-报告动作支持 `generate`、`download_report`、`download_report_all_formats`、`download_all`。生成流程先把扫描代码和依赖结果规范化为 JSON，再依次调用图表、Mermaid、Markdown、Word 和 PDF MCP；HTML 从已核验 Markdown/报告 JSON 转换。MD、DOCX、PDF 各自由不同 MCP 生成并记录独立哈希审计。生成和下载各有一次 interrupt。组件漏洞目录使用两次 interrupt；项目 SBOM 使用漏洞匹配、Excel 生成和下载三次 interrupt。下载中断携带固定制品的 `artifact_ids`，SBOM 还可携带系统目录语义 `destination_hint`。
+报告动作支持 `generate`、`download_report`、`download_report_all_formats`、`download_all`。生成流程先把扫描代码和依赖结果规范化为 JSON，再调用 SARIF MCP 生成 2.1.0 `codeFlows/threadFlows/locations`，由 Mermaid MCP 将每条完整污点路径转为 JPEG，最后让 HTML、Word 和 PDF 从同一 canonical JSON 嵌入相同图像。Markdown 是并列输出格式，不作为 Word/PDF 数据协议。MD、DOCX、PDF 各自由不同 MCP 生成并记录独立哈希审计；全部格式 ZIP 额外包含 canonical JSON 和 SARIF JSON。生成和下载各有一次 interrupt。组件漏洞目录使用两次 interrupt；项目 SBOM 使用漏洞匹配、Excel 生成和下载三次 interrupt。下载中断携带固定制品的 `artifact_ids`，SBOM 还可携带系统目录语义 `destination_hint`。
 
 恢复请求应原样提交确认卡片中的 `thread_id` 与 `interrupt_id`，服务端会校验卡片是否仍是该线程的当前阶段。待确认检查点保存在本机数据目录的 SQLite 中，客户端或本地服务重启后仍可恢复；已经推进的旧卡片返回 `409`，升级前遗留且无法恢复的卡片返回 `status=expired` 并从历史消息中清除，不再返回误导性的 `404`。
 

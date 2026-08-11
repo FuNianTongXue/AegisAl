@@ -19,8 +19,17 @@ rules:
           - pattern: $C.Param(...)
           - pattern: $C.PostForm(...)
           - pattern: os.Args[$INDEX]
+          - pattern: os.Args
           - pattern: os.Getenv(...)
           - pattern: flag.Arg(...)
+          - pattern: '($R : events.APIGatewayProxyRequest).Body'
+          - patterns:
+              - pattern-either:
+                  - pattern: '($R : *http.Request).$FIELD'
+                  - pattern: '($R : http.Request).$FIELD'
+              - metavariable-regex:
+                  metavariable: $FIELD
+                  regex: '^(Body|Form|GetBody|Host|PostForm|RequestURI|Trailer|TransferEncoding|URL)$'
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -29,13 +38,180 @@ rules:
               - pattern: $DB.QueryRow($QUERY, ...)
               - pattern: $DB.Exec($QUERY, ...)
               - pattern: $DB.ExecContext($CTX, $QUERY, ...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.Query($QUERY, ...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.QueryRow($QUERY, ...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.QueryRow($QUERY, ...).Scan(...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.Exec($QUERY, ...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.Query($QUERY, ...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.QueryRow($QUERY, ...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.QueryRow($QUERY, ...).Scan(...)
+          - pattern-not-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.Exec($QUERY, ...)
           - focus-metavariable: $QUERY
+      - patterns:
+          - pattern-inside: |
+              $QUERY = "$SQL"
+              ...
+              $QUERY += $DYNAMIC
+              ...
+              $DB.$METHOD($QUERY, ...)
+          - pattern: $QUERY += $DYNAMIC
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?i).*(select|delete|insert|create|update|alter|drop).*'
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: '^(Query|QueryContext|QueryRow|QueryRowContext|Exec|ExecContext|QueryOne|QueryEx|ExecEx)$'
+          - focus-metavariable: $DYNAMIC
+      - patterns:
+          - pattern-inside: |
+              var $SB strings.Builder
+              ...
+              $SB.WriteString("$SQL")
+              ...
+              $SB.WriteString($DYNAMIC)
+              ...
+              $QUERY := $PREFIX + $SB.String() + $SUFFIX
+              ...
+              $DB.$METHOD($QUERY, ...)
+          - pattern: $SB.WriteString($DYNAMIC)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?i).*(select|delete|insert|create|update|alter|drop).*'
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: '^(Query|QueryContext|QueryRow|QueryRowContext|Exec|ExecContext|QueryOne|QueryEx|ExecEx)$'
+          - focus-metavariable: $DYNAMIC
+      - patterns:
+          - pattern-inside: |
+              $FORMAT = "$SQL"
+              ...
+              $QUERY = fmt.Printf($FORMAT, $DYNAMIC, ...)
+              ...
+              $DB.$METHOD(..., $QUERY, ...)
+          - pattern: fmt.Printf($FORMAT, $DYNAMIC, ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?i).*(select|delete|insert|create|update|alter|drop).*'
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: '^(Query|QueryContext|QueryRow|QueryRowContext|Exec|ExecContext|QueryOne|QueryEx|ExecEx)$'
+          - focus-metavariable: $DYNAMIC
+      - patterns:
+          - pattern: $DB.$METHOD(..., fmt.Printf($FORMAT, $DYNAMIC, ...), ...)
+          - metavariable-regex:
+              metavariable: $FORMAT
+              regex: '(?i)^`?"?.*(select|delete|insert|create|update|alter|drop).*'
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: '^(Query|QueryContext|QueryRow|QueryRowContext|Exec|ExecContext|QueryOne|QueryEx|ExecEx)$'
+          - focus-metavariable: $DYNAMIC
     pattern-sanitizers:
+      - pattern: strconv.Atoi(...)
+      - pattern: strconv.ParseInt(...)
+      - pattern: strconv.ParseUint(...)
+      - pattern: pq.QuoteIdentifier(...)
+      - pattern: '($X : bool)'
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.Query($ARG, ...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.QueryRow($ARG, ...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.QueryRow($ARG, ...).Scan(...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.Prepare("...")
+              ...
+              $STMT.Exec($ARG, ...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.Query($ARG, ...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.QueryRow($ARG, ...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.QueryRow($ARG, ...).Scan(...)
+          - pattern: $ARG
+      - patterns:
+          - pattern-inside: |
+              $STMT, ... := $DB.PrepareContext($CTX, "...")
+              ...
+              $STMT.Exec($ARG, ...)
+          - pattern: $ARG
       - patterns:
           - pattern: fmt.Sprintf($FORMAT, ...)
           - metavariable-regex:
               metavariable: $FORMAT
               regex: '^"([^"%]|%%|%[-+ #0-9.*]*[bdoOxXUeEfFgG])+"$'
+
+  - id: secflow.go.gorm-order-injection
+    languages: [go]
+    severity: ERROR
+    message: HTTP 外部输入进入 GORM Order 表达式，可能造成 SQL 注入。
+    metadata:
+      category: security
+      scenario: sql_injection
+      cwe: [CWE-89]
+      owasp: [A03:2021]
+      confidence: HIGH
+      remediation: 将排序字段映射到固定白名单，不要把请求值直接传入 Order。
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $R.URL.Query().Get(...)
+          - pattern: $R.FormValue(...)
+          - pattern: $R.Cookie(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $DB.Order($ORDER, ...)
+          - focus-metavariable: $ORDER
+    pattern-sanitizers:
+      - pattern: '($X : bool)'
 
   - id: secflow.go.command-injection
     languages: [go]
@@ -114,13 +290,19 @@ rules:
     pattern-sources:
       - pattern-either:
           - pattern: $R.URL.Query().Get(...)
+          - pattern: $R.URL.Path
           - pattern: $R.FormValue(...)
           - pattern: $R.PostFormValue(...)
           - pattern: $C.Param(...)
           - pattern: $C.PostForm(...)
           - pattern: os.Args[$INDEX]
+          - pattern: os.Stdin
           - pattern: os.Getenv(...)
           - pattern: flag.Arg(...)
+          - pattern: $READER.ReadString(...)
+          - pattern: $READER.ReadBytes(...)
+          - pattern: $READER.ReadLine(...)
+          - pattern: $SCANNER.Text()
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -129,9 +311,16 @@ rules:
               - pattern: os.ReadFile($PATH)
               - pattern: os.WriteFile($PATH, ...)
               - pattern: http.ServeFile($W, $R, $PATH)
+              - pattern: http.ServeFileFS($W, $R, $FILESYSTEM, $PATH)
           - focus-metavariable: $PATH
     pattern-sanitizers:
       - pattern: filepath.Base(...)
+      - pattern: path.Base(...)
+      - pattern: strconv.Atoi(...)
+      - pattern: strconv.ParseInt(...)
+      - pattern: strconv.ParseUint(...)
+      - pattern: filepath.Clean("/" + ...)
+      - pattern: path.Clean("/" + ...)
 
   - id: secflow.go.ssrf
     languages: [go]
@@ -189,6 +378,9 @@ rules:
       - patterns:
           - pattern: template.HTML($DATA)
           - focus-metavariable: $DATA
+    pattern-sanitizers:
+      - pattern: html.EscapeString(...)
+      - pattern: template.HTMLEscapeString(...)
 
   - id: secflow.go.weak-cryptography
     languages: [go]

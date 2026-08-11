@@ -218,6 +218,7 @@ def build_overlay_request(
     evidence: dict[str, Any],
     iteration: int,
     previous_overlay_fingerprints: list[str],
+    user_id: str = "default",
 ) -> dict[str, Any]:
     return {
         "prompt_version": PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION,
@@ -227,11 +228,12 @@ def build_overlay_request(
         "project_profile": deepcopy(project_profile),
         "evidence": deepcopy(evidence),
         "previous_overlay_fingerprints": list(previous_overlay_fingerprints),
+        "user_id": str(user_id or "default").strip() or "default",
     }
 
 
 def default_overlay_synthesizer(request: dict[str, Any]) -> dict[str, Any]:
-    model = active_model_from_env()
+    model = active_model_from_env(str(request.get("user_id") or "default"))
     readiness_error = chat_readiness_error(model)
     if readiness_error:
         return {"status": "skipped", "reason": readiness_error, "overlay": empty_project_overlay("模型不可用。")}
@@ -245,7 +247,15 @@ def default_overlay_synthesizer(request: dict[str, Any]) -> dict[str, Any]:
             "content": json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         },
     ]
-    result = diagnose_chat_completion(model or {}, messages, enable_thinking=True, json_mode=True)
+    result = diagnose_chat_completion(
+        model or {},
+        messages,
+        enable_thinking=True,
+        json_mode=True,
+        user_id=str(request.get("user_id") or "default"),
+        session_id=str(request.get("session_id") or ""),
+        source="project_adaptive_scan",
+    )
     if result.get("status") != "success":
         return {
             "status": "failed",

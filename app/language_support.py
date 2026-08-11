@@ -439,6 +439,13 @@ def _parse_source(
             candidates.append((f"{prefix}preprocessor-defs", candidate_parser, defined_source))
             candidates.append(
                 (
+                    f"{prefix}preprocessor-defs+compiler-extensions",
+                    candidate_parser,
+                    _compiler_extension_compatibility_source(language, defined_source),
+                )
+            )
+            candidates.append(
+                (
                     f"{prefix}preprocessor-defs+macro",
                     candidate_parser,
                     _macro_compatibility_source(language, defined_source),
@@ -463,6 +470,13 @@ def _parse_source(
         for prefer_if_branch, label in ((False, "else"), (True, "if")):
             branch_source = _conditional_compilation_view(candidate_source, prefer_if_branch=prefer_if_branch)
             candidates.append((f"{prefix}preprocessor-{label}", candidate_parser, branch_source))
+            candidates.append(
+                (
+                    f"{prefix}preprocessor-{label}+compiler-extensions",
+                    candidate_parser,
+                    _compiler_extension_compatibility_source(language, branch_source),
+                )
+            )
             candidates.append(
                 (
                     f"{prefix}preprocessor-{label}+macro",
@@ -563,11 +577,6 @@ def _macro_compatibility_source(
     class_annotation = re.compile(
         rb"\b(?:class|struct)\s+(?P<name>[A-Z][A-Z0-9_]{2,})\s+(?=[A-Za-z_])"
     )
-    declaration_annotation = re.compile(
-        rb"\b(?:[A-Z][A-Z0-9_]*(?:EXPORT|INLINE|NOINLINE|API|CALL|CALLBACK|DECL|ATTR|ATTRIBUTE|"
-        rb"NODISCARD|NORETURN|NOEXCEPT|PUBLIC_INTERFACE|UNUSED)\w*|"
-        rb"ALIGNED|PUBLIC|LOCAL|__cdecl|__stdcall|__fastcall)\b"
-    )
     lowercase_declaration_annotation = re.compile(
         rb"(?m)^\s*(?:(?:static|extern|const|inline)\s+)+"
         rb"(?P<name>[a-z_]\w*(?:_cold|_unused|_always_inline|_noinline|_noreturn|_deprecated))\s+"
@@ -577,6 +586,10 @@ def _macro_compatibility_source(
     for line in source.splitlines(keepends=True):
         standalone_match = standalone.match(line)
         if standalone_match is not None:
+            content_end = offset + len(line.rstrip(b"\r\n"))
+            if _macro_line_is_expression_continuation(source, offset, content_end):
+                offset += len(line)
+                continue
             name = standalone_match.group("name")
             start = offset + standalone_match.start("name")
             end = offset + standalone_match.end("name")
@@ -606,17 +619,19 @@ def _macro_compatibility_source(
                     offset + match.start("name"),
                     offset + match.end("name"),
                 )
-        for match in declaration_annotation.finditer(line):
-            _replace_parser_span(result, offset + match.start(), offset + match.end())
         offset += len(line)
+    _mask_declaration_annotation_tokens(result, source)
     for match in lowercase_declaration_annotation.finditer(source):
         _replace_parser_span(result, match.start("name"), match.end("name"))
     if mask_function_calls:
         _mask_function_like_macros(result, source)
     _mask_sal_annotations(result, source)
     _mask_calling_convention_annotations(result, source)
+    _mask_declaration_annotation_tokens(result, source)
     _mask_gnu_attributes(result, source)
     _mask_gnu_computed_goto(result, source)
+    _mask_dos_far_pointer_qualifiers(result, source)
+    _mask_uefi_variable_name_string_macros(result, source)
     _mask_bsd_timecmp_operator_macros(result, source)
     _mask_inttypes_format_macros(result, source)
     _mask_adjacent_string_like_macros(result, source)
@@ -625,6 +640,7 @@ def _macro_compatibility_source(
     _mask_known_declaration_macro_invocations(result, source)
     _mask_type_argument_macro_calls(result, source)
     if language == "cpp":
+        _mask_cpp_new_pointer_array_stars(result, source)
         _mask_qt_parser_extensions(result, source)
     return bytes(result)
 
@@ -633,8 +649,11 @@ def _compiler_extension_compatibility_source(language: str, source: bytes) -> by
     result = bytearray(source)
     _mask_sal_annotations(result, source)
     _mask_calling_convention_annotations(result, source)
+    _mask_declaration_annotation_tokens(result, source)
     _mask_gnu_attributes(result, source)
     _mask_gnu_computed_goto(result, source)
+    _mask_dos_far_pointer_qualifiers(result, source)
+    _mask_uefi_variable_name_string_macros(result, source)
     _mask_bsd_timecmp_operator_macros(result, source)
     _mask_inttypes_format_macros(result, source)
     _mask_adjacent_string_like_macros(result, source)
@@ -643,8 +662,19 @@ def _compiler_extension_compatibility_source(language: str, source: bytes) -> by
     _mask_known_declaration_macro_invocations(result, source)
     _mask_type_argument_macro_calls(result, source)
     if language == "cpp":
+        _mask_cpp_new_pointer_array_stars(result, source)
         _mask_qt_parser_extensions(result, source)
     return bytes(result)
+
+
+def _mask_declaration_annotation_tokens(result: bytearray, source: bytes) -> None:
+    declaration_annotation = re.compile(
+        rb"\b(?:[A-Z][A-Z0-9_]*(?:EXPORT|INLINE|NOINLINE|API|CALL|CALLBACK|DECL|ATTR|ATTRIBUTE|"
+        rb"NODISCARD|NORETURN|NOEXCEPT|PUBLIC_INTERFACE|UNUSED)\w*|"
+        rb"ALIGNED|PUBLIC|LOCAL|__cdecl|__stdcall|__fastcall)\b"
+    )
+    for match in declaration_annotation.finditer(source):
+        _replace_parser_span(result, match.start(), match.end())
 
 
 def _mask_gnu_attributes(result: bytearray, source: bytes) -> None:
@@ -681,6 +711,91 @@ def _mask_gnu_computed_goto(result: bytearray, source: bytes) -> None:
     computed_goto = re.compile(rb"\bgoto\s*\*[^;\r\n]*;")
     for match in computed_goto.finditer(source):
         _replace_parser_span(result, match.start(), match.end(), b"goto L;")
+
+
+def _mask_dos_far_pointer_qualifiers(result: bytearray, source: bytes) -> None:
+    for match in re.finditer(rb"\b(?:_far|far)\b", source):
+        token = match.group(0)
+        if token == b"_far" or _far_token_is_dos_pointer_qualifier(source, match.start(), match.end()):
+            _replace_parser_span(result, match.start(), match.end())
+
+
+def _mask_uefi_variable_name_string_macros(result: bytearray, source: bytes) -> None:
+    for match in re.finditer(rb"\bEFI_[A-Z0-9_]+_VARIABLE_NAME\b", source):
+        _replace_parser_span(result, match.start(), match.end(), b'L""')
+
+
+def _far_token_is_dos_pointer_qualifier(source: bytes, start: int, end: int) -> bool:
+    line_start = source.rfind(b"\n", 0, start) + 1
+    if b"#" in source[line_start:start]:
+        return False
+
+    previous = _previous_identifier_token(source, start)
+    if previous is None or not _parser_token_looks_type_like(previous):
+        return False
+
+    cursor = end
+    while cursor < len(source) and source[cursor] in b" \t":
+        cursor += 1
+    if cursor < len(source) and source[cursor] == ord("*"):
+        return True
+
+    identifier = _identifier_token_at(source, cursor)
+    if identifier is None:
+        return False
+    identifier_end = cursor + len(identifier)
+    while identifier_end < len(source) and source[identifier_end] in b" \t":
+        identifier_end += 1
+    return identifier_end < len(source) and source[identifier_end] == ord("(")
+
+
+def _previous_identifier_token(source: bytes, index: int) -> bytes | None:
+    cursor = index - 1
+    while cursor >= 0 and source[cursor] in b" \t":
+        cursor -= 1
+    end = cursor + 1
+    while cursor >= 0 and _ascii_identifier_byte(source[cursor]):
+        cursor -= 1
+    if end <= cursor + 1:
+        return None
+    return source[cursor + 1 : end]
+
+
+def _identifier_token_at(source: bytes, index: int) -> bytes | None:
+    if index >= len(source) or not (source[index] == ord("_") or 65 <= source[index] <= 90 or 97 <= source[index] <= 122):
+        return None
+    end = index + 1
+    while end < len(source) and _ascii_identifier_byte(source[end]):
+        end += 1
+    return source[index:end]
+
+
+def _parser_token_looks_type_like(token: bytes) -> bool:
+    return token in {
+        b"void",
+        b"char",
+        b"short",
+        b"int",
+        b"long",
+        b"float",
+        b"double",
+        b"signed",
+        b"unsigned",
+        b"BOOL",
+        b"BYTE",
+        b"WORD",
+        b"DWORD",
+    } or token.endswith(b"_t") or bool(token[:1].isupper())
+
+
+def _mask_cpp_new_pointer_array_stars(result: bytearray, source: bytes) -> None:
+    pointer_array_new = re.compile(
+        rb"\bnew\s+(?:const\s+|volatile\s+)?"
+        rb"(?:[A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)(?:\s*<[^;\n\[\]]+>)?\s+"
+        rb"(?P<star>\*)\s*(?=\[)"
+    )
+    for match in pointer_array_new.finditer(source):
+        _replace_parser_span(result, match.start("star"), match.end("star"))
 
 
 def _mask_bsd_timecmp_operator_macros(result: bytearray, source: bytes) -> None:
@@ -781,6 +896,8 @@ def _macro_line_is_expression_continuation(source: bytes, line_start: int, line_
     previous = _previous_significant_line(source, line_start)
     if previous is not None:
         previous_code = previous.split(b"//", 1)[0].rstrip()
+        if _line_ends_with_statement_label(previous_code):
+            return False
         if previous_code.endswith(b"\\") or previous_code.endswith((b"&&", b"||", b"(", b"[", b",")):
             return True
         if re.search(rb"(?:[?:+\-*/%&|^=<>!]|==|!=|<=|>=)$", previous_code):
@@ -792,6 +909,14 @@ def _macro_line_is_expression_continuation(source: bytes, line_start: int, line_
         return False
     next_code = next_line.split(b"//", 1)[0].lstrip()
     return next_code.startswith((b"&&", b"||", b"+", b"-", b"*", b"/", b"%", b"&", b"|", b"^", b"?", b":", b",", b")", b"]"))
+
+
+def _line_ends_with_statement_label(line: bytes) -> bool:
+    stripped = line.strip()
+    return bool(
+        re.fullmatch(rb"(?:case\b.+|default)\s*:", stripped)
+        or re.fullmatch(rb"[A-Za-z_]\w*\s*:", stripped)
+    )
 
 
 def _previous_significant_line(source: bytes, line_start: int) -> bytes | None:

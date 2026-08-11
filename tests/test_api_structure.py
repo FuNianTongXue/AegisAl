@@ -20,7 +20,7 @@ class ApiStructureTests(unittest.TestCase):
     def test_implementations_live_in_their_domain_packages(self) -> None:
         root = Path(__file__).resolve().parents[1] / "app"
         expected = {
-            "agent": {"project_adaptive_scan.py", "task_agent.py", "task_store.py"},
+            "agent": {"project_adaptive_scan.py", "task_agent.py", "task_store.py", "task_worker.py"},
             "api/routes": {"application.py"},
             "langgraph": {
                 "assistant_graph.py",
@@ -31,11 +31,15 @@ class ApiStructureTests(unittest.TestCase):
                 "sbom_graph.py",
             },
             "mcp": {
+                "code_scan.py",
+                "code_scan_client.py",
                 "component_query.py",
                 "report_charts.py",
+                "report_excel.py",
                 "report_markdown.py",
                 "report_mermaid.py",
                 "report_pdf.py",
+                "report_template.py",
                 "report_word.py",
                 "sbom.py",
             },
@@ -71,6 +75,7 @@ class ApiStructureTests(unittest.TestCase):
             "/api/assistant/conversations",
             "/api/assistant/conversations/{session_id}",
             "/api/assistant/conversations/{session_id}/archive",
+            "/api/assistant/short-term-sessions/{session_id}",
             "/api/agent/tasks",
             "/api/agent/tasks/graph",
             "/api/agent/tasks/{task_id}",
@@ -78,15 +83,19 @@ class ApiStructureTests(unittest.TestCase):
             "/api/langgraph/assistant",
             "/api/langgraph/collectors",
             "/api/system/runtime",
+            "/api/system/capabilities",
             "/api/reports/actions",
             "/api/reports/actions/resume",
             "/api/assistant/interrupts/resume",
             "/api/assistant/workspace-actions",
             "/api/components/vulnerabilities/query",
             "/api/mcp/tools/component-query",
+            "/api/mcp/tools/code-scan",
+            "/api/mcp/tools/license-scan",
             "/api/mcp/tools/report-charts",
             "/api/mcp/tools/reports",
             "/api/mcp/tools/project-sbom",
+            "/api/mcp/tools/translation",
         }
         legacy_paths = {
             "/api/ask",
@@ -122,6 +131,24 @@ class ApiStructureTests(unittest.TestCase):
                 response = client.get(path)
                 self.assertEqual(response.status_code, 200, f"{path}: {response.text}")
                 self.assertEqual(response.json()["status"], "success")
+
+    def test_capability_catalog_is_read_from_runtime_registries(self) -> None:
+        with (
+            patch.object(application, "trial_manager", AlwaysUsableTrial()),
+            TestClient(application.app) as client,
+        ):
+            response = client.get("/api/system/capabilities")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        catalog = response.json()["data"]
+        self.assertEqual(catalog["schema_version"], "secflow.client-capabilities/v1")
+        self.assertEqual(catalog["summary"]["agent_count"], len(catalog["agents"]))
+        self.assertEqual(catalog["summary"]["mcp_server_count"], len(catalog["mcp_servers"]))
+        self.assertEqual(catalog["summary"]["skill_count"], len(catalog["skills"]))
+        server_ids = {item["id"] for item in catalog["mcp_servers"]}
+        self.assertIn("report-template", server_ids)
+        self.assertIn("report-excel", server_ids)
+        self.assertTrue(any(item["id"] == "secflow-report-generation" for item in catalog["skills"]))
 
 
 if __name__ == "__main__":

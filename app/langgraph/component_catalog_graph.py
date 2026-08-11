@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from threading import RLock
 from typing import Any, Callable, TypedDict
@@ -10,6 +11,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.assistant_intent import assistant_intent_skill_metadata
+from app.catalog_snapshot import component_catalog_snapshot_store
 from app.intelligence import intelligence_service
 from app.langgraph.checkpoints import (
     authorize_pending_interrupt,
@@ -20,9 +22,12 @@ from app.langgraph.checkpoints import (
     unregister_event_sink,
 )
 from app.mcp.component_query import invoke_catalog_excel_mcp, invoke_sankey_mcp
-from app.privacy import sanitize_public_text
+from app.privacy import sanitize_public_text, severity_cn
 from app.storage import now_iso
 from app.trace_ui import tool_call_presentation
+
+_CJK_TEXT = re.compile(r"[一-鿿]")  # CJK Unified Ideographs (一-鿿)
+_CATALOG_PREVIEW_RECORD_LIMIT = 8
 
 
 class ComponentCatalogState(TypedDict, total=False):
@@ -34,6 +39,7 @@ class ComponentCatalogState(TypedDict, total=False):
     filters: dict[str, list[str]]
     intent_plan: dict[str, Any]
     catalog_result: dict[str, Any]
+    catalog_snapshot_id: str
     chart_data: dict[str, Any]
     artifacts: list[dict[str, Any]]
     cancelled: bool
@@ -65,6 +71,7 @@ class ComponentVulnerabilityCatalogSubgraph:
             "filters": dict(payload.get("filters") or {}),
             "intent_plan": dict(payload.get("intent_plan") or {}),
             "catalog_result": {},
+            "catalog_snapshot_id": "",
             "chart_data": {},
             "artifacts": [],
             "cancelled": False,
@@ -215,9 +222,21 @@ class ComponentVulnerabilityCatalogSubgraph:
                 severities=list(filters.get("severities") or []),
                 component_names=list(filters.get("component_names") or []),
                 include_realtime=True,
+                response_language=str(state.get("response_language") or "zh-Hans"),
             )
+            state["summary"] = _catalog_summary(result, str(state.get("response_language") or "zh-Hans"))
+            records = [dict(record) for record in result.get("records") or [] if isinstance(record, dict)]
+            if len(records) > _CATALOG_PREVIEW_RECORD_LIMIT:
+                state["catalog_snapshot_id"] = component_catalog_snapshot_store.save(
+                    records,
+                    result_sha256=str(result.get("result_sha256") or ""),
+                )
+                result = {
+                    **result,
+                    "records": records[:_CATALOG_PREVIEW_RECORD_LIMIT],
+                    "preview_count": min(len(records), _CATALOG_PREVIEW_RECORD_LIMIT),
+                }
             state["catalog_result"] = result
-            state["summary"] = _catalog_summary(result)
             return _trace(
                 state,
                 "component_catalog.query",
@@ -242,22 +261,30 @@ class ComponentVulnerabilityCatalogSubgraph:
 
     @staticmethod
     def _build_sankey(state: ComponentCatalogState) -> ComponentCatalogState:
+        result = dict(state.get("catalog_result") or {})
         try:
-            sankey = invoke_sankey_mcp({"graph": dict((state.get("catalog_result") or {}).get("graph") or {})})
-            state["chart_data"] = _catalog_chart_data(state.get("catalog_result") or {}, sankey)
-            return _trace(
-                state,
-                "component_catalog.d3_sankey_mcp",
-                "D3 Sankey MCP 已生成组件、漏洞与修复版本关系图。",
+            sankey = invoke_sankey_mcp({"graph": dict(result.get("graph") or {})})
+            state["chart_data"] = _catalog_chart_data(
+                result,
+                sankey,
+                str(state.get("response_language") or "zh-Hans"),
             )
+            message = "D3 Sankey MCP 已生成组件、漏洞与修复版本关系图。"
+            status = "completed"
         except Exception as exc:  # noqa: BLE001
-            state["chart_data"] = _catalog_chart_data(state.get("catalog_result") or {}, {})
-            return _trace(
-                state,
-                "component_catalog.d3_sankey_mcp",
-                f"桑基图生成失败，保留清单结果：{sanitize_public_text(str(exc))}",
-                "warning",
+            state["chart_data"] = _catalog_chart_data(
+                result,
+                {},
+                str(state.get("response_language") or "zh-Hans"),
             )
+            message = f"桑基图生成失败，保留清单结果：{sanitize_public_text(str(exc))}"
+            status = "warning"
+        # The normalized chart is now in chart_data.  Keeping the source graph
+        # in every later checkpoint would rewrite the same 80-record graph at
+        # the confirmation, Excel, and download nodes.
+        result.pop("graph", None)
+        state["catalog_result"] = result
+        return _trace(state, "component_catalog.d3_sankey_mcp", message, status)
 
     @staticmethod
     def _confirm_generation(state: ComponentCatalogState) -> ComponentCatalogState:
@@ -284,9 +311,44 @@ class ComponentVulnerabilityCatalogSubgraph:
     def _generate_excel(state: ComponentCatalogState) -> ComponentCatalogState:
         result = state.get("catalog_result") or {}
         try:
+            records = _fixed_catalog_records(state)
+        except (KeyError, OSError, ValueError):
+            state["error"] = "组件漏洞固定结果已过期，请重新执行查询后再生成 Excel。"
+            return _trace(state, "component_catalog.snapshot", state["error"], "warning")
+        # Translation is an ingestion concern.  The former implementation
+        # synchronously sent every untranslated description through the model
+        # here; a 4,000-record export could therefore make hundreds of LLM
+        # calls and leave the confirmation request apparently stuck.  Export
+        # now consumes the immutable catalog snapshot exactly as stored.  Any
+        # pending rows retain their verified original text while the catalog's
+        # background write-through translation continues independently.
+        if str(state.get("response_language") or "").lower().startswith("zh"):
+            pending_translations = sum(
+                1
+                for record in records
+                if str(record.get("summary") or "").strip()
+                and not _CJK_TEXT.search(str(record.get("summary") or ""))
+            )
+            if pending_translations:
+                _trace(
+                    state,
+                    "component_catalog.translation_cache",
+                    (
+                        f"已直接复用情报库译文；{pending_translations} 条描述仍在后台补译，"
+                        "本次 Excel 保留核验原文，未重复调用翻译模型。"
+                    ),
+                    "warning",
+                )
+            else:
+                _trace(
+                    state,
+                    "component_catalog.translation_cache",
+                    "已直接复用情报库中预先存储的中文译文，未调用翻译模型。",
+                )
+        try:
             artifact = invoke_catalog_excel_mcp(
                 {
-                    "records": list(result.get("records") or []),
+                    "records": records,
                     "start_date": str(result.get("start_date") or ""),
                     "end_date": str(result.get("end_date") or ""),
                     "filters": dict(result.get("filters") or {}),
@@ -303,7 +365,7 @@ class ComponentVulnerabilityCatalogSubgraph:
                     "export_component_vulnerability_catalog",
                     state="completed",
                     title="Excel MCP",
-                    input_summary={"record_count": len(result.get("records") or [])},
+                    input_summary={"record_count": len(records)},
                     output={"artifact_id": artifact.get("id"), "sha256": artifact.get("sha256")},
                 ),
             )
@@ -335,7 +397,10 @@ class ComponentVulnerabilityCatalogSubgraph:
         if state.get("error"):
             state["summary"] = state["error"]
         elif not state.get("summary"):
-            state["summary"] = _catalog_summary(state.get("catalog_result") or {})
+            state["summary"] = _catalog_summary(
+                state.get("catalog_result") or {},
+                str(state.get("response_language") or "zh-Hans"),
+            )
         return _trace(
             state,
             "component_catalog.compose_result",
@@ -354,12 +419,19 @@ class ComponentVulnerabilityCatalogSubgraph:
         if raw_interrupts:
             current = raw_interrupts[0]
             value = dict(current.value) if isinstance(current.value, dict) else {"question": str(current.value)}
-            envelope = {**value, "interrupt_id": str(current.id), "thread_id": thread_id}
+            envelope = {
+                **value,
+                "interrupt_id": str(current.id),
+                "thread_id": thread_id,
+                "user_id": str(state.get("user_id") or "default"),
+                "session_id": str(state.get("session_id") or "default"),
+            }
         status = "interrupted" if envelope else ("cancelled" if state.get("cancelled") else ("failed" if state.get("error") else "completed"))
         result = dict(state.get("catalog_result") or {})
         return {
             "status": status,
             "thread_id": thread_id,
+            "response_language": str(state.get("response_language") or "zh-Hans"),
             "interrupt": envelope,
             "summary": sanitize_public_text(state.get("summary") or (envelope or {}).get("question") or ""),
             "fields": {
@@ -375,6 +447,7 @@ class ComponentVulnerabilityCatalogSubgraph:
             },
             "chart_data": dict(state.get("chart_data") or {}),
             "artifacts": list(state.get("artifacts") or []),
+            "catalog_translation": dict(result.get("catalog_translation") or {}),
             "error": sanitize_public_text(state.get("error") or ""),
             "trace": list(state.get("trace") or []),
             "skill": assistant_intent_skill_metadata(),
@@ -382,7 +455,7 @@ class ComponentVulnerabilityCatalogSubgraph:
 
 
 def component_catalog_outcome_answer(outcome: dict[str, Any]) -> dict[str, Any]:
-    return {
+    answer = {
         "mode": "component_vulnerability_catalog",
         "summary": str(outcome.get("summary") or (outcome.get("interrupt") or {}).get("question") or "组件漏洞目录等待确认。"),
         "fields": dict(outcome.get("fields") or {}),
@@ -395,9 +468,30 @@ def component_catalog_outcome_answer(outcome: dict[str, Any]) -> dict[str, Any]:
         "trace": list(outcome.get("trace") or []),
         "generated_at": now_iso(),
     }
+    language = str(outcome.get("response_language") or "zh-Hans").strip().lower()
+    if language in {"zh", "zh-cn", "zh-hans", "zh_hans"}:
+        status = dict(outcome.get("catalog_translation") or {})
+        ready = int(status.get("ready_records") or 0)
+        total = int(status.get("record_count") or 0)
+        answer["translation"] = {
+            "server": "SecFlow Vulnerability Catalog",
+            "tool": "translate_before_persist",
+            "transport": "local-catalog",
+            # The customer-facing envelope is fully localized even when some
+            # catalog descriptions are still pending; those descriptions use a
+            # deterministic Chinese placeholder until write-through completes.
+            "status": "completed",
+            "translation_status": "stored" if ready >= total else "stored-with-pending",
+            "target_language": "zh-Hans",
+            "storage_stage": "before-persist",
+            "record_count": total,
+            "ready_records": ready,
+            "pending_records": max(0, total - ready),
+        }
+    return answer
 
 
-def _catalog_summary(result: dict[str, Any]) -> str:
+def _catalog_summary(result: dict[str, Any], language: str = "zh-Hans") -> str:
     start = str(result.get("start_date") or "")
     end = str(result.get("end_date") or "")
     total = int(result.get("total") or 0)
@@ -412,16 +506,19 @@ def _catalog_summary(result: dict[str, Any]) -> str:
             )
         )
         component_text = "、".join(names[:3]) or "组件待核验"
+        description = str(record.get("title") or record.get("summary") or "").strip()
+        if str(language or "").lower().startswith("zh") and description and not _CJK_TEXT.search(description):
+            description = "描述正在后台补译"
         lines.append(
-            f"- {record.get('id')} | {str(record.get('severity') or 'UNKNOWN').upper()} | "
-            f"{component_text} | {record.get('title') or record.get('summary') or '未提供标题'}"
+            f"- {record.get('id')} | {_catalog_severity_label(record.get('severity'), language)} | "
+            f"{component_text} | {description or '未提供标题'}"
         )
     if result.get("truncated"):
         lines.append("结果已达到目录上限，当前预览和后续 Excel 会明确标记为截断结果。")
     return "\n".join(lines)
 
 
-def _catalog_chart_data(result: dict[str, Any], sankey: dict[str, Any]) -> dict[str, Any]:
+def _catalog_chart_data(result: dict[str, Any], sankey: dict[str, Any], language: str = "zh-Hans") -> dict[str, Any]:
     severity = result.get("severity") if isinstance(result.get("severity"), dict) else {}
     ecosystems = result.get("ecosystem_counts") if isinstance(result.get("ecosystem_counts"), dict) else {}
     return {
@@ -431,7 +528,12 @@ def _catalog_chart_data(result: dict[str, Any], sankey: dict[str, Any]) -> dict[
             "links": list(sankey.get("links") or []),
         },
         "severity_ring": [
-            {"id": key.lower(), "label": key, "key": key, "value": int(severity.get(key) or 0)}
+            {
+                "id": key.lower(),
+                "label": _catalog_severity_label(key, language),
+                "key": key,
+                "value": int(severity.get(key) or 0),
+            }
             for key in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
         ],
         "risk_bars": [
@@ -439,6 +541,41 @@ def _catalog_chart_data(result: dict[str, Any], sankey: dict[str, Any]) -> dict[
             for key, value in list(ecosystems.items())[:12]
         ],
     }
+
+
+def _fixed_catalog_records(state: ComponentCatalogState) -> list[dict[str, Any]]:
+    result = state.get("catalog_result") or {}
+    snapshot_id = str(state.get("catalog_snapshot_id") or "").strip()
+    if snapshot_id:
+        return component_catalog_snapshot_store.load(
+            snapshot_id,
+            expected_sha256=str(result.get("result_sha256") or ""),
+        )
+    return [dict(record) for record in result.get("records") or [] if isinstance(record, dict)]
+
+
+def _catalog_severity_label(value: Any, language: str) -> str:
+    severity = str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
+    normalized_language = str(language or "zh-Hans").strip().lower().replace("_", "-")
+    if normalized_language in {"zh", "zh-cn", "zh-hans"}:
+        return severity_cn(severity)
+    if normalized_language in {"zh-tw", "zh-hk", "zh-hant"}:
+        return {
+            "CRITICAL": "嚴重",
+            "HIGH": "高危",
+            "MEDIUM": "中危",
+            "LOW": "低危",
+            "UNKNOWN": "待定",
+        }.get(severity, severity)
+    if normalized_language == "en":
+        return {
+            "CRITICAL": "Critical",
+            "HIGH": "High",
+            "MEDIUM": "Medium",
+            "LOW": "Low",
+            "UNKNOWN": "Unknown",
+        }.get(severity, severity.title())
+    return severity
 
 
 def _trace(

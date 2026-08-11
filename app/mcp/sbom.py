@@ -16,6 +16,7 @@ import xlsxwriter
 from mcp.server.fastmcp import FastMCP
 
 from app.mcp.component_query import AssistantArtifact
+from app.privacy import severity_cn
 from app.sbom import canonical_sbom_json, localized_intelligence_source
 from app.storage import DATA_DIR, now_iso
 
@@ -81,7 +82,7 @@ artifact_store = SBOMArtifactStore()
 sbom_excel_mcp = FastMCP(
     "SecFlow SBOM Excel MCP",
     instructions=(
-        "Consume canonical CycloneDX-compatible JSON and optional vulnerability-match JSON, "
+        "Consume canonical CycloneDX-compatible JSON with project-license evidence and optional vulnerability-match JSON, "
         "then create an auditable XLSX workbook without querying or mutating source facts."
     ),
 )
@@ -89,7 +90,7 @@ sbom_excel_mcp = FastMCP(
 
 @sbom_excel_mcp.tool(
     name="export_project_sbom_excel",
-    description="Create an auditable four-sheet XLSX workbook from fixed SBOM and vulnerability-match JSON.",
+    description="Create an auditable five-sheet XLSX workbook from fixed SBOM, project-license, and vulnerability-match JSON.",
     structured_output=True,
 )
 def export_project_sbom_excel(
@@ -118,7 +119,7 @@ def build_sbom_workbook(sbom: dict[str, Any], matching: dict[str, Any]) -> bytes
     workbook.set_properties(
         {
             "title": "SecFlow Project SBOM",
-            "subject": "CycloneDX-compatible software bill of materials and vulnerability matching",
+            "subject": "CycloneDX-compatible software bill of materials, license identification, and vulnerability matching",
             "author": "SecFlow SBOM Agent",
             "comments": "Generated from canonical JSON supplied to the SBOM Excel MCP.",
         }
@@ -126,8 +127,10 @@ def build_sbom_workbook(sbom: dict[str, Any], matching: dict[str, Any]) -> bytes
     formats = _workbook_formats(workbook)
     components = [item for item in sbom.get("components") or [] if isinstance(item, dict)]
     vulnerabilities = [item for item in sbom.get("vulnerabilities") or [] if isinstance(item, dict)]
-    _write_summary_sheet(workbook, formats, sbom, matching, len(components), len(vulnerabilities))
+    licenses = _project_license_records(sbom)
+    _write_summary_sheet(workbook, formats, sbom, matching, len(components), len(licenses), len(vulnerabilities))
     _write_components_sheet(workbook, formats, components)
+    _write_licenses_sheet(workbook, formats, licenses)
     _write_vulnerabilities_sheet(workbook, formats, vulnerabilities, components)
     _write_audit_sheet(workbook, formats, sbom, matching)
     workbook.close()
@@ -206,6 +209,7 @@ def _write_summary_sheet(
     sbom: dict[str, Any],
     matching: dict[str, Any],
     component_count: int,
+    license_count: int,
     vulnerability_count: int,
 ) -> None:
     sheet = workbook.add_worksheet("摘要")
@@ -222,6 +226,9 @@ def _write_summary_sheet(
         ("序列号", sbom.get("serialNumber") or ""),
         ("生成时间", metadata.get("timestamp") or ""),
         ("组件总数", None),
+        ("项目许可数量", None),
+        ("许可识别覆盖", _property_value(metadata.get("properties"), "secflow:licenseCoverage") or "not_requested"),
+        ("OSI 接口状态", _property_value(metadata.get("properties"), "secflow:licenseRegistryStatus") or "not_requested"),
         ("版本未解析组件", _matching_or_property(matching, sbom, "unresolved_version_count", "secflow:unresolvedVersionCount")),
         ("是否匹配漏洞", "是" if matching else "否"),
         ("漏洞数量", None),
@@ -234,6 +241,8 @@ def _write_summary_sheet(
         sheet.write(index - 1, 0, label, formats["label"])
         if label == "组件总数":
             sheet.write_formula(index - 1, 1, "=COUNTA('SBOM 组件'!A2:A1048576)", formats["value"], component_count)
+        elif label == "项目许可数量":
+            sheet.write_formula(index - 1, 1, "=COUNTA('项目许可'!A2:A1048576)", formats["value"], license_count)
         elif label == "漏洞数量":
             sheet.write_formula(index - 1, 1, "=COUNTA('漏洞匹配'!A2:A1048576)", formats["value"], vulnerability_count)
         elif label == "生成时间":
@@ -275,6 +284,52 @@ def _write_components_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, An
     sheet.autofilter(0, 0, max(1, len(components)), len(headers) - 1) if not components else None
 
 
+def _write_licenses_sheet(
+    workbook: xlsxwriter.Workbook,
+    formats: dict[str, Any],
+    licenses: list[dict[str, Any]],
+) -> None:
+    sheet = workbook.add_worksheet("项目许可")
+    sheet.hide_gridlines(2)
+    headers = ["SPDX 标识", "许可名称", "置信度", "识别方式", "证据文件", "清单声明", "OSI 收录", "OSI 批准标记", "OSI 官方链接"]
+    widths = [20, 38, 12, 28, 58, 46, 12, 18, 54]
+    for column, (header, width) in enumerate(zip(headers, widths, strict=True)):
+        sheet.write(0, column, header, formats["header"])
+        sheet.set_column(column, column, width)
+    for row, item in enumerate(licenses, start=1):
+        osi = item.get("osi") if isinstance(item.get("osi"), dict) else {}
+        approval_status = str(osi.get("approval_status") or "not_found")
+        approval_label = {
+            "approved": "接口标记已批准",
+            "not_indicated": "接口未提供批准标记",
+            "not_found": "OSI 接口未收录",
+        }.get(approval_status, approval_status)
+        values = [
+            item.get("spdx_id"),
+            item.get("name"),
+            item.get("confidence"),
+            "\n".join(str(value) for value in item.get("detection_methods") or []),
+            "\n".join(str(value) for value in item.get("source_files") or []),
+            "\n".join(str(value) for value in item.get("declarations") or []),
+            "是" if osi.get("listed") else "否",
+            approval_label,
+            osi.get("official_url"),
+        ]
+        for column, value in enumerate(values):
+            cell_format = formats["success"] if column == 6 and osi.get("listed") else formats["body"]
+            sheet.write(row, column, _safe_cell(value), cell_format)
+    if licenses:
+        sheet.add_table(
+            0,
+            0,
+            len(licenses),
+            len(headers) - 1,
+            {"name": "SecFlowProjectLicenses", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]},
+        )
+    sheet.freeze_panes(1, 0)
+    sheet.autofilter(0, 0, max(1, len(licenses)), len(headers) - 1) if not licenses else None
+
+
 def _write_vulnerabilities_sheet(
     workbook: xlsxwriter.Workbook,
     formats: dict[str, Any],
@@ -283,7 +338,7 @@ def _write_vulnerabilities_sheet(
 ) -> None:
     sheet = workbook.add_worksheet("漏洞匹配")
     sheet.hide_gridlines(2)
-    headers = ["漏洞编号", "严重性", "CVSS", "影响组件", "修复版本", "发布时间", "更新时间", "情报来源", "参考链接", "漏洞描述"]
+    headers = ["漏洞编号", "风险等级", "CVSS", "影响组件", "修复版本", "发布时间", "更新时间", "情报来源", "参考链接", "漏洞描述"]
     widths = [22, 12, 10, 46, 32, 22, 22, 22, 52, 72]
     refs = {str(item.get("bom-ref") or ""): _component_label(item) for item in components}
     for column, (header, width) in enumerate(zip(headers, widths, strict=True)):
@@ -292,11 +347,12 @@ def _write_vulnerabilities_sheet(
     for row, vulnerability in enumerate(vulnerabilities, start=1):
         properties = _properties(vulnerability.get("properties"))
         rating = next(iter(vulnerability.get("ratings") or []), {})
+        severity_key = str(rating.get("severity") or "unknown").strip().casefold()
         affected = "; ".join(refs.get(str(item.get("ref") or ""), str(item.get("ref") or "")) for item in vulnerability.get("affects") or [])
         source = vulnerability.get("source") if isinstance(vulnerability.get("source"), dict) else {}
         values = [
             vulnerability.get("id"),
-            str(rating.get("severity") or "unknown").upper(),
+            severity_cn(severity_key),
             rating.get("score") if rating.get("score") is not None else "",
             affected,
             properties.get("secflow:fixedVersions"),
@@ -308,8 +364,7 @@ def _write_vulnerabilities_sheet(
         ]
         for column, value in enumerate(values):
             if column == 1:
-                severity = str(value).casefold()
-                cell_format = formats.get(severity, formats["body"])
+                cell_format = formats.get(severity_key, formats["body"])
             else:
                 cell_format = formats["body"]
             if column in {5, 6}:
@@ -331,6 +386,8 @@ def _write_audit_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, Any], s
     canonical = canonical_sbom_json(sbom)
     matching_json = json.dumps(matching, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     source_status = matching.get("source_status") if isinstance(matching.get("source_status"), list) else []
+    metadata = sbom.get("metadata") if isinstance(sbom.get("metadata"), dict) else {}
+    metadata_properties = _properties(metadata.get("properties"))
     audit_rows: list[tuple[str, Any]] = [
         ("SBOM JSON SHA-256", hashlib.sha256(canonical.encode("utf-8")).hexdigest()),
         ("漏洞匹配 JSON SHA-256", hashlib.sha256(matching_json.encode("utf-8")).hexdigest() if matching else "未执行"),
@@ -339,6 +396,9 @@ def _write_audit_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, Any], s
         ("匹配覆盖状态", matching.get("coverage_status") or "not_requested"),
         ("匹配来源状态", json.dumps(source_status, ensure_ascii=False, sort_keys=True)),
         ("匹配错误", "\n".join(str(item) for item in matching.get("errors") or []) or "无"),
+        ("许可识别覆盖", metadata_properties.get("secflow:licenseCoverage") or "not_requested"),
+        ("OSI License API 状态", metadata_properties.get("secflow:licenseRegistryStatus") or "not_requested"),
+        ("许可分析 SHA-256", metadata_properties.get("secflow:licenseAnalysisSha256") or "未执行"),
     ]
     audit_rows.extend((f"SBOM JSON {index + 1}", part) for index, part in enumerate(_chunks(canonical)))
     if matching:
@@ -347,6 +407,39 @@ def _write_audit_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, Any], s
         sheet.write(row, 0, label, formats["label"])
         sheet.write(row, 1, _safe_cell(value), formats["mono"])
     sheet.freeze_panes(1, 0)
+
+
+def _project_license_records(sbom: dict[str, Any]) -> list[dict[str, Any]]:
+    metadata = sbom.get("metadata") if isinstance(sbom.get("metadata"), dict) else {}
+    project = metadata.get("component") if isinstance(metadata.get("component"), dict) else {}
+    properties = _properties(project.get("properties"))
+    records: list[dict[str, Any]] = []
+    for choice in project.get("licenses") or []:
+        if not isinstance(choice, dict):
+            continue
+        license_value = choice.get("license") if isinstance(choice.get("license"), dict) else {}
+        license_id = str(license_value.get("id") or "").strip()
+        name = str(license_value.get("name") or license_id).strip()
+        raw_evidence = properties.get(f"secflow:license:{license_id or name}:evidence", "")
+        try:
+            evidence = json.loads(raw_evidence) if raw_evidence else {}
+        except json.JSONDecodeError:
+            evidence = {}
+        osi = evidence.get("osi") if isinstance(evidence.get("osi"), dict) else {}
+        if not osi.get("official_url") and str(license_value.get("url") or "").startswith("https://"):
+            osi = {**osi, "official_url": str(license_value.get("url"))}
+        records.append(
+            {
+                "spdx_id": license_id,
+                "name": name,
+                "confidence": float(evidence.get("confidence") or 0),
+                "source_files": list(evidence.get("source_files") or []),
+                "detection_methods": list(evidence.get("detection_methods") or []),
+                "declarations": list(evidence.get("declarations") or []),
+                "osi": osi,
+            }
+        )
+    return records
 
 
 def _matching_or_property(matching: dict[str, Any], sbom: dict[str, Any], key: str, property_name: str) -> Any:

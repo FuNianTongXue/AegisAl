@@ -212,17 +212,105 @@ def _is_code_sample_slice(node: Node, source: bytes) -> bool:
 
 
 def _code_sample_value(element: Node, source: bytes) -> tuple[list[bytes], int | None]:
-    raw_strings = [
-        source[node.start_byte + 1 : node.end_byte - 1]
-        for node in _walk(element)
-        if node.type == "raw_string_literal"
-    ]
+    code_files: list[bytes] = []
+    for node in _walk(element):
+        if node.type != "composite_literal":
+            continue
+        node_type = node.child_by_field_name("type")
+        body = node.child_by_field_name("body")
+        if node_type is None or body is None:
+            continue
+        normalized_type = re.sub(rb"\s+", b"", source[node_type.start_byte : node_type.end_byte])
+        if normalized_type != b"[]string":
+            continue
+        for expression in body.named_children:
+            value = _go_string_expression(expression, source)
+            if value is not None:
+                code_files.append(value)
+        break
     integers = [
         int(source[node.start_byte : node.end_byte])
         for node in _walk(element)
         if node.type == "int_literal"
     ]
-    return raw_strings, integers[0] if integers else None
+    return code_files, integers[0] if integers else None
+
+
+def _go_string_expression(node: Node, source: bytes) -> bytes | None:
+    if node.type == "literal_element" and len(node.named_children) == 1:
+        return _go_string_expression(node.named_children[0], source)
+    if node.type == "raw_string_literal":
+        return source[node.start_byte + 1 : node.end_byte - 1]
+    if node.type == "interpreted_string_literal":
+        return _unquote_go_string(source[node.start_byte + 1 : node.end_byte - 1])
+    if node.type == "parenthesized_expression" and len(node.named_children) == 1:
+        return _go_string_expression(node.named_children[0], source)
+    if node.type != "binary_expression":
+        return None
+    left = node.child_by_field_name("left")
+    right = node.child_by_field_name("right")
+    if left is None or right is None:
+        return None
+    operator = source[left.end_byte : right.start_byte].strip()
+    if operator != b"+":
+        return None
+    left_value = _go_string_expression(left, source)
+    right_value = _go_string_expression(right, source)
+    if left_value is None or right_value is None:
+        return None
+    return left_value + right_value
+
+
+def _unquote_go_string(value: bytes) -> bytes | None:
+    result = bytearray()
+    index = 0
+    simple = {
+        ord("a"): 0x07,
+        ord("b"): 0x08,
+        ord("f"): 0x0C,
+        ord("n"): 0x0A,
+        ord("r"): 0x0D,
+        ord("t"): 0x09,
+        ord("v"): 0x0B,
+        ord("\\"): ord("\\"),
+        ord('"'): ord('"'),
+        ord("'"): ord("'"),
+    }
+    while index < len(value):
+        current = value[index]
+        if current != ord("\\"):
+            result.append(current)
+            index += 1
+            continue
+        index += 1
+        if index >= len(value):
+            return None
+        escaped = value[index]
+        if escaped in simple:
+            result.append(simple[escaped])
+            index += 1
+            continue
+        if escaped in b"01234567":
+            digits = value[index : index + 3]
+            if len(digits) != 3 or any(item not in b"01234567" for item in digits):
+                return None
+            result.append(int(digits, 8))
+            index += 3
+            continue
+        widths = {ord("x"): 2, ord("u"): 4, ord("U"): 8}
+        width = widths.get(escaped)
+        if width is None:
+            return None
+        digits = value[index + 1 : index + 1 + width]
+        if len(digits) != width or not re.fullmatch(rb"[0-9A-Fa-f]+", digits):
+            return None
+        codepoint = int(digits, 16)
+        try:
+            result.extend(chr(codepoint).encode("utf-8"))
+        except (ValueError, UnicodeEncodeError):
+            return None
+        index += width + 1
+    return bytes(result)
 
 
 def _code_files_hash(code_files: list[bytes]) -> str:

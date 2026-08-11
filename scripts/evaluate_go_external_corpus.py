@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+DEFAULT_MANIFEST = ROOT / "config" / "evaluation" / "go-external-random-598x2-2026-07-24-v2.json"
+GO_SEMANTIC_ANALYZER = ROOT / "app" / "go_semantic_analyzer.py"
+
 from app.go_semantic_analyzer import analyze_go_semantics
 from go_external_corpus import (
     GOSEC_COMMIT,
@@ -38,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=ROOT / "config" / "evaluation" / "go-external-random-598x2-2026-07-22.json",
+        default=DEFAULT_MANIFEST,
     )
     parser.add_argument("--partition", choices=("diagnostic", "qualification"), default="diagnostic")
     parser.add_argument("--workspace", type=Path, default=Path("/tmp/secflow-go-labeled-corpus"))
@@ -46,9 +49,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--semgrep-source", type=Path)
     parser.add_argument("--rules", type=Path, default=ROOT / "config" / "semgrep")
     parser.add_argument(
+        "--adjudications",
+        type=Path,
+        help="Optional audited case-label overrides for CWE-level truth-set development.",
+    )
+    parser.add_argument(
         "--reuse-materialized",
         action="store_true",
         help="Reuse an existing materialized partition after verifying every pinned content hash.",
+    )
+    parser.add_argument(
+        "--refresh-gosec-materialized",
+        action="store_true",
+        help="Rebuild only pinned gosec cases before verifying and reusing the materialized partition.",
     )
     parser.add_argument("--semgrep", default=str(Path(sys.executable).with_name("semgrep")))
     parser.add_argument("--output", type=Path)
@@ -66,10 +79,38 @@ def main() -> int:
     selected = [case for case in manifest.get("cases") or [] if case.get("partition") == args.partition]
     if not selected:
         raise SystemExit(f"No {args.partition} cases in {args.manifest}")
+    adjudication_payload = _load_adjudications(args.adjudications)
+    selected, adjudication_summary = _apply_adjudications(selected, adjudication_payload)
 
     scan_root = args.workspace / f"materialized-{args.partition}"
     selected_gosec = {str(case["id"]): case for case in selected if case["source"] == "securego/gosec"}
     selected_semgrep = [case for case in selected if case["source"] == "semgrep/semgrep-rules"]
+    if args.refresh_gosec_materialized:
+        if not args.reuse_materialized or args.gosec_source is None:
+            raise SystemExit(
+                "--refresh-gosec-materialized requires --reuse-materialized and --gosec-source"
+            )
+        gosec_root = _source_checkout(
+            args.gosec_source,
+            GOSEC_REPOSITORY,
+            GOSEC_COMMIT,
+            args.workspace / "sources" / "gosec",
+        )
+        extracted_gosec = {
+            str(case["id"]): case
+            for case in extract_gosec_cases(gosec_root, include_code=True)
+            if case["id"] in selected_gosec
+        }
+        if set(extracted_gosec) != set(selected_gosec):
+            missing = sorted(set(selected_gosec) - set(extracted_gosec))
+            raise SystemExit(f"Unable to reconstruct {len(missing)} gosec cases: {missing[:5]}")
+        for case_id, expected in selected_gosec.items():
+            if extracted_gosec[case_id]["code_hash"] != expected["code_hash"]:
+                raise SystemExit(f"Pinned gosec case hash changed: {case_id}")
+        gosec_destination = scan_root / "gosec"
+        if gosec_destination.exists():
+            shutil.rmtree(gosec_destination)
+        materialize_gosec_cases(extracted_gosec.values(), gosec_destination)
     if args.reuse_materialized:
         gosec_paths, semgrep_paths = _verified_materialized_paths(
             scan_root,
@@ -182,12 +223,22 @@ def main() -> int:
         )
 
     metrics = _metrics(matrix)
+    methodology = dict(manifest.get("methodology") or {})
+    if adjudication_payload:
+        methodology.update(dict((adjudication_payload.get("methodology") or {})))
+    negative_label_scope = str(methodology.get("negative_label_scope") or "external_rule_specific")
+    cwe_complete_negative_labels = negative_label_scope == "cwe_complete"
+    adjudication_qualification_eligible = bool(methodology.get("qualification_eligible", cwe_complete_negative_labels))
     positive_count = matrix["TP"] + matrix["FN"]
     negative_count = matrix["TN"] + matrix["FP"]
     fnr_upper = binomial_upper_bound(matrix["FN"], positive_count)
     fpr_upper = binomial_upper_bound(matrix["FP"], negative_count)
     qualification = {
         "sample_size_passed": positive_count >= 598 and negative_count >= 598,
+        "negative_label_scope": negative_label_scope,
+        "cwe_complete_negative_labels": cwe_complete_negative_labels,
+        "adjudication_applied": bool(adjudication_payload),
+        "adjudication_qualification_eligible": adjudication_qualification_eligible,
         "point_estimate_passed": (
             metrics["accuracy"] >= args.min_accuracy
             and metrics["false_positive_rate"] <= args.max_fpr
@@ -204,14 +255,26 @@ def main() -> int:
     }
     qualification["passed"] = all(
         qualification[key]
-        for key in ("sample_size_passed", "point_estimate_passed", "confidence_passed")
+        for key in (
+            "sample_size_passed",
+            "cwe_complete_negative_labels",
+            "adjudication_qualification_eligible",
+            "point_estimate_passed",
+            "confidence_passed",
+        )
     )
     output = args.output or ROOT / "docs" / f"go-external-{args.partition}-results.json"
     report = {
         "generated_at": datetime.now(UTC).isoformat(),
         "partition": args.partition,
+        "manifest": str(args.manifest.resolve()),
+        "manifest_sha256": hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
+        "metric_scope": _metric_scope(cwe_complete_negative_labels, adjudication_payload),
+        "adjudications": adjudication_summary,
         "rules": str(args.rules.resolve()),
         "rules_sha256": _rules_sha256(args.rules),
+        "go_semantic_analyzer_sha256": _file_sha256(GO_SEMANTIC_ANALYZER),
+        "evaluator_sha256": _file_sha256(Path(__file__)),
         "semgrep_version": str((payload.get("version") or completed.stdout or "")).strip(),
         "elapsed_seconds": elapsed,
         "thresholds": {
@@ -266,6 +329,104 @@ def _rules_sha256(path: Path) -> str:
         digest.update(candidate.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_adjudications(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload.get("cases"), list):
+        raise SystemExit(f"Adjudication file must contain a cases list: {path}")
+    payload["_source_path"] = str(path.resolve())
+    payload["_source_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return payload
+
+
+def _apply_adjudications(
+    cases: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not payload:
+        return cases, {"applied": False}
+    raw_entries = payload.get("cases") or []
+    by_id: dict[str, dict[str, Any]] = {}
+    for entry in raw_entries:
+        case_id = str(entry.get("id") or "")
+        if not case_id:
+            raise SystemExit("Adjudication entry missing id")
+        if case_id in by_id:
+            raise SystemExit(f"Duplicate adjudication entry: {case_id}")
+        by_id[case_id] = dict(entry)
+
+    selected_ids = {str(case.get("id")) for case in cases}
+    unknown = sorted(set(by_id) - selected_ids)
+    if unknown:
+        raise SystemExit(f"Adjudication entries do not belong to the selected partition: {unknown[:5]}")
+
+    adjusted: list[dict[str, Any]] = []
+    excluded = 0
+    overridden = 0
+    for case in cases:
+        case_id = str(case.get("id"))
+        entry = by_id.get(case_id)
+        if entry is None:
+            adjusted.append(case)
+            continue
+        action = str(entry.get("action") or "override")
+        if action not in {"override", "exclude"}:
+            raise SystemExit(f"Unsupported adjudication action for {case_id}: {action}")
+        if action == "exclude":
+            excluded += 1
+            continue
+        updated = dict(case)
+        updated["original_vulnerable"] = bool(case.get("vulnerable"))
+        updated["original_cwes"] = list(case.get("cwes") or [])
+        if "vulnerable" in entry:
+            updated["vulnerable"] = bool(entry["vulnerable"])
+        if "cwes" in entry:
+            updated["cwes"] = list(entry.get("cwes") or [])
+        updated["adjudication"] = {
+            key: entry[key]
+            for key in (
+                "classification",
+                "product_action",
+                "reason",
+                "evidence",
+                "recommended_truth_action",
+            )
+            if key in entry
+        }
+        adjusted.append(updated)
+        overridden += 1
+
+    source_path = Path(str(payload.get("_source_path") or ""))
+    return adjusted, {
+        "applied": True,
+        "version": payload.get("version"),
+        "source": str(source_path) if source_path else None,
+        "source_sha256": payload.get("_source_sha256"),
+        "entries": len(raw_entries),
+        "overridden": overridden,
+        "excluded": excluded,
+        "methodology": payload.get("methodology") or {},
+    }
+
+
+def _metric_scope(cwe_complete_negative_labels: bool, adjudication_payload: dict[str, Any]) -> str:
+    if adjudication_payload:
+        return str(
+            adjudication_payload.get("metric_scope")
+            or (
+                "cwe_security_classification"
+                if cwe_complete_negative_labels
+                else "adjudicated_external_rule_label_agreement"
+            )
+        )
+    return "cwe_security_classification" if cwe_complete_negative_labels else "external_rule_label_agreement"
 
 
 def _verified_materialized_paths(

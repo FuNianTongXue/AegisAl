@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 from typing import Any, Literal
 
@@ -59,15 +60,34 @@ def render_markdown_report(
         parts = [clean, "", f"## {section_title}", ""]
         for diagram in diagrams:
             source = str(diagram.get("source") or "").strip()
-            if not source:
+            image_base64 = str(diagram.get("image_base64") or "").strip()
+            if not source or not image_base64:
                 continue
+            try:
+                image_payload = base64.b64decode(image_base64, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("Mermaid MCP image is not valid base64") from exc
+            media_type = str(diagram.get("image_media_type") or "image/jpeg")
+            if media_type == "image/jpeg":
+                valid_image = image_payload.startswith(b"\xff\xd8\xff")
+                data_uri_type = "jpeg"
+            elif media_type == "image/png":
+                valid_image = image_payload.startswith(b"\x89PNG\r\n\x1a\n")
+                data_uri_type = "png"
+            else:
+                raise ValueError("Mermaid MCP image media type is unsupported")
+            if not valid_image:
+                raise ValueError("Mermaid MCP image signature is invalid")
+            if hashlib.sha256(image_payload).hexdigest() != str(diagram.get("image_sha256") or ""):
+                raise ValueError("Mermaid MCP image hash verification failed")
+            title = str(diagram.get("title") or "Diagram").strip()
+            audit_source = base64.b64encode(source.encode("utf-8")).decode("ascii")
             parts.extend(
                 [
-                    f"### {str(diagram.get('title') or 'Diagram').strip()}",
+                    f"### {title}",
                     "",
-                    "```mermaid",
-                    source,
-                    "```",
+                    f"![{title}](data:image/{data_uri_type};base64,{image_base64})",
+                    f"<!-- secflow-mermaid-source:{diagram.get('source_sha256') or ''}:{audit_source} -->",
                     "",
                 ]
             )

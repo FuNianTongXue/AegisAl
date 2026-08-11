@@ -154,6 +154,8 @@ class CollectorService:
                     str(record.get("id", "")),
                     str(record.get("title", "")),
                     str(record.get("summary", "")),
+                    str(record.get("title_zh", "")),
+                    str(record.get("summary_zh", "")),
                     str(record.get("severity", "")),
                     str(record.get("source", "")),
                 ]
@@ -182,6 +184,8 @@ class CollectorService:
                     str(record.get("id", "")),
                     str(record.get("title", "")),
                     str(record.get("summary", "")),
+                    str(record.get("title_zh", "")),
+                    str(record.get("summary_zh", "")),
                     str(record.get("severity", "")),
                     str(record.get("source", "")),
                     str(record.get("published_at", "")),
@@ -340,6 +344,7 @@ def _nvd_record(cve: dict[str, Any], config: dict[str, Any], year: int | None) -
         "affected_versions": _nvd_affected_versions(cve),
         "fixed_versions": _nvd_fixed_versions(cve),
         "references": _nvd_references(cve),
+        "has_poc": _nvd_has_poc(cve),
         "collection": config.get("collection_name", "cve"),
         "published_at": cve.get("published") or "",
         "updated_at": cve.get("lastModified") or now_iso(),
@@ -353,6 +358,19 @@ def _nvd_references(cve: dict[str, Any]) -> list[str]:
     if not isinstance(references, list):
         return []
     return [str(reference["url"]) for reference in references if isinstance(reference, dict) and reference.get("url")]
+
+
+def _nvd_has_poc(cve: dict[str, Any]) -> bool:
+    references = cve.get("references") or []
+    if isinstance(references, dict):
+        references = references.get("referenceData") or []
+    if not isinstance(references, list):
+        return False
+    return any(
+        "exploit" in {str(tag or "").strip().casefold() for tag in reference.get("tags") or []}
+        for reference in references
+        if isinstance(reference, dict)
+    )
 
 
 def _nvd_severity(cve: dict[str, Any]) -> str:

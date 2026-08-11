@@ -436,6 +436,7 @@ struct AskResult: Decodable, Equatable {
     let artifacts: [AssistantArtifact]
     let report: AnalysisReportSummary?
     let interrupt: ReportInterruptEnvelope?
+    let agentTask: AgentTaskSnapshot?
     let tokenUsage: Int
     let confidence: Double
     let trace: [TraceItem]
@@ -453,6 +454,7 @@ struct AskResult: Decodable, Equatable {
         case artifacts
         case report
         case interrupt
+        case agentTask
         case tokenUsage
         case confidence
         case trace
@@ -474,8 +476,11 @@ struct AskResult: Decodable, Equatable {
         evidenceSources = try container.decodeIfPresent([AssistantEvidenceSource].self, forKey: .evidenceSources) ?? []
         chartData = try container.decodeIfPresent(DependencyChartData.self, forKey: .chartData)
         artifacts = try container.decodeIfPresent([AssistantArtifact].self, forKey: .artifacts) ?? []
-        report = try container.decodeIfPresent(AnalysisReportSummary.self, forKey: .report)
+        // Download-only report actions may return a legacy empty object because
+        // they prepare an existing artifact instead of creating a new report.
+        report = try? container.decode(AnalysisReportSummary.self, forKey: .report)
         interrupt = try container.decodeIfPresent(ReportInterruptEnvelope.self, forKey: .interrupt)
+        agentTask = try container.decodeIfPresent(AgentTaskSnapshot.self, forKey: .agentTask)
         tokenUsage = try container.decodeIfPresent(Int.self, forKey: .tokenUsage) ?? 0
         confidence = try container.decode(Double.self, forKey: .confidence)
         trace = try container.decode([TraceItem].self, forKey: .trace)
@@ -494,6 +499,7 @@ struct AskResult: Decodable, Equatable {
         artifacts = []
         report = nil
         interrupt = nil
+        agentTask = nil
         tokenUsage = 0
         confidence = exchange.confidence
         trace = []
@@ -519,6 +525,7 @@ struct AskResult: Decodable, Equatable {
         artifacts = []
         report = nil
         interrupt = nil
+        agentTask = nil
         tokenUsage = 0
         confidence = 1
         self.trace = trace
@@ -671,6 +678,33 @@ struct ReportActionResult: Decodable, Equatable {
     let answer: AskResult?
     let reportMcp: ReportMCPAudit?
     let reportMcps: [ReportMCPAudit]?
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case threadId
+        case interrupt
+        case summary
+        case report
+        case artifacts
+        case error
+        case answer
+        case reportMcp
+        case reportMcps
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(String.self, forKey: .status)
+        threadId = try container.decode(String.self, forKey: .threadId)
+        interrupt = try container.decodeIfPresent(ReportInterruptEnvelope.self, forKey: .interrupt)
+        summary = try container.decode(String.self, forKey: .summary)
+        report = try? container.decode(AnalysisReportSummary.self, forKey: .report)
+        artifacts = try container.decodeIfPresent([AssistantArtifact].self, forKey: .artifacts) ?? []
+        error = try container.decodeIfPresent(String.self, forKey: .error) ?? ""
+        answer = try container.decodeIfPresent(AskResult.self, forKey: .answer)
+        reportMcp = try? container.decode(ReportMCPAudit.self, forKey: .reportMcp)
+        reportMcps = try container.decodeIfPresent([ReportMCPAudit].self, forKey: .reportMcps)
+    }
 }
 
 struct AssistantArtifact: Decodable, Equatable, Identifiable {
@@ -1069,13 +1103,17 @@ struct ConversationTurn: Identifiable, Equatable {
 }
 
 struct TraceItem: Codable, Equatable, Identifiable {
+    var traceId: String? = nil
     let node: String
     let status: String
     let message: String
     let time: String
     var presentation: LangGraphNodePresentation? = nil
 
-    var id: String { "\(node)|\(time)|\(message)" }
+    var id: String {
+        let stableID = traceId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return stableID.isEmpty ? "\(node)|\(time)|\(message)" : stableID
+    }
 }
 
 struct LangGraphNodePresentation: Codable, Equatable {
@@ -1234,6 +1272,69 @@ struct AgentTaskSnapshot: Decodable, Equatable, Identifiable {
     var resolvedReportDecision: String {
         if let reportDecision, !reportDecision.isEmpty { return reportDecision }
         return isReportReady ? "pending" : "unavailable"
+    }
+
+    func applying(event: AgentTaskEvent) -> AgentTaskSnapshot {
+        guard !events.contains(where: { $0.sequence == event.sequence }) else { return self }
+
+        var updatedEvents = events
+        updatedEvents.append(event)
+        updatedEvents.sort { $0.sequence < $1.sequence }
+        if updatedEvents.count > 500 {
+            updatedEvents.removeFirst(updatedEvents.count - 500)
+        }
+
+        let planStatus: String? = switch event.type {
+        case "node.started": "running"
+        case "node.completed", "verification.completed": "completed"
+        case "node.failed": "failed"
+        default: nil
+        }
+        let updatedPlan = plan.map { step in
+            guard let planStatus, step.node == event.node else { return step }
+            return AgentTaskPlanStep(
+                id: step.id,
+                title: step.title,
+                node: step.node,
+                status: planStatus,
+                language: step.language
+            )
+        }
+        let updatedStatus: String = switch event.type {
+        case "task.created", "task.resumed": "queued"
+        case "task.started": "running"
+        case "task.cancelling": "cancelling"
+        case "task.completed": "completed"
+        case "task.failed": "failed"
+        case "task.cancelled": "cancelled"
+        case "task.interrupted": "interrupted"
+        default: status
+        }
+
+        return AgentTaskSnapshot(
+            id: id,
+            objective: objective,
+            workspacePath: workspacePath,
+            workspaceName: workspaceName,
+            workspaceType: workspaceType,
+            userId: userId,
+            status: updatedStatus,
+            currentNode: event.node.isEmpty ? currentNode : event.node,
+            languages: languages,
+            plan: updatedPlan,
+            events: updatedEvents,
+            result: result,
+            reportReady: updatedStatus == "completed" ? false : reportReady,
+            reportDecision: reportDecision,
+            report: report,
+            reportInterrupt: reportInterrupt,
+            reportDownloadArtifact: reportDownloadArtifact,
+            error: event.type == "task.failed" ? event.message : error,
+            archived: archived,
+            archivedAt: archivedAt,
+            createdAt: createdAt,
+            updatedAt: event.time
+        )
     }
 }
 

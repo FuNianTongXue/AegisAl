@@ -1,0 +1,97 @@
+name: Cross-platform release build
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "config/semgrep/**"
+      - "desktop/SecFlowTauri/**"
+      - "scripts/build_tauri_**"
+      - "requirements*.txt"
+      - ".github/workflows/cross-platform-release-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x86-64:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install pnpm and build dependencies
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-windows.txt
+          pnpm --dir desktop/SecFlowTauri install --frozen-lockfile
+      - name: Build formal Windows package
+        shell: pwsh
+        run: ./scripts/build_tauri_windows.ps1 -Edition formal -OutputDir dist/windows/formal
+      - name: Build seven-day Windows trial
+        shell: pwsh
+        run: ./scripts/build_tauri_windows.ps1 -Edition trial -OutputDir dist/windows/trial
+      - uses: actions/upload-artifact@v4
+        with:
+          name: secflow-v1.3.1-windows-x86-64
+          path: dist/windows/**/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      PYTHON_BIN: python3
+      SECFLOW_MACOS_ARCH: x86_64
+      SECFLOW_TAURI_TARGET: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Install build dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-macos.txt
+          pnpm --dir desktop/SecFlowTauri install --frozen-lockfile
+      - name: Build formal macOS Intel package
+        run: |
+          bash scripts/build_tauri_macos.sh
+          mkdir -p dist/macos-intel/formal
+          cp desktop/SecFlowTauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg dist/macos-intel/formal/SecFlow-v1.3.1-macOS-x86_64-Formal.dmg
+      - name: Build seven-day macOS Intel trial
+        run: |
+          bash scripts/build_tauri_macos_trial.sh
+          mkdir -p dist/macos-intel/trial
+          cp desktop/SecFlowTauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*7*试用版*.dmg dist/macos-intel/trial/SecFlow-v1.3.1-macOS-x86_64-Trial-7Days.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: secflow-v1.3.1-macos-x86-64
+          path: dist/macos-intel/**/*.dmg
+          if-no-files-found: error
+          retention-days: 1

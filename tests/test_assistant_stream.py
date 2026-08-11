@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -53,7 +54,30 @@ class FakeKnowledgeGraph:
         }
 
 
+class FakeStreamingKnowledgeGraph(FakeKnowledgeGraph):
+    def invoke(self, _question, _top_k, **kwargs):
+        kwargs["content_sink"]("实时")
+        kwargs["content_sink"]("回答")
+        return {
+            "mode": "llm_direct",
+            "summary": "实时回答",
+            "fields": {},
+            "trace": [],
+            "generated_at": "2026-07-22T10:00:01+00:00",
+        }
+
+
 class AssistantStreamTests(unittest.TestCase):
+    def test_system_prompt_uses_shanghai_date_across_utc_day_boundary(self) -> None:
+        prompt = system_prompt(
+            "zh-Hans",
+            now=datetime(2026, 8, 1, 16, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertIn("系统当前日期为 2026年08月02日", prompt)
+        self.assertIn("当前时间为 00:30:00", prompt)
+        self.assertIn("Asia/Shanghai", prompt)
+
     def test_non_component_answer_omits_empty_component_detail(self) -> None:
         graph = KnowledgeSecurityGraph()
         state = {
@@ -156,6 +180,36 @@ class AssistantStreamTests(unittest.TestCase):
             self.assertEqual(legacy_listing.status_code, 200, legacy_listing.text)
             self.assertEqual(legacy_listing.json()["data"], [])
 
+    def test_short_term_consultation_can_be_cleared_without_creating_conversation_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            service.add_short_term_exchange(
+                "tester",
+                "information:isolated",
+                "第一轮咨询",
+                {"summary": "第一轮回答"},
+            )
+            with (
+                patch.object(main_module, "memory_service", service),
+                patch.object(main_module, "trial_manager", AlwaysUsableTrial()),
+                TestClient(main_module.app) as client,
+            ):
+                listing = client.get("/api/assistant/conversations", params={"user_id": "tester"})
+                cleared = client.delete(
+                    "/api/assistant/short-term-sessions/information:isolated",
+                    params={"user_id": "tester"},
+                )
+                rejected = client.delete(
+                    "/api/assistant/short-term-sessions/persistent-session",
+                    params={"user_id": "tester"},
+                )
+
+            self.assertEqual(listing.status_code, 200, listing.text)
+            self.assertEqual(listing.json()["data"], [])
+            self.assertEqual(cleared.status_code, 200, cleared.text)
+            self.assertEqual(cleared.json()["data"]["cleared_turn_count"], 1)
+            self.assertEqual(rejected.status_code, 422, rejected.text)
+
     def test_interrupt_resume_replaces_the_original_history_answer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = LongTermMemoryService(Path(temp_dir) / "memory.json")
@@ -247,13 +301,42 @@ class AssistantStreamTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["content-type"].split(";")[0], "text/event-stream")
         self.assertEqual(response.text.count("event: trace"), 2)
+        self.assertNotIn('"node": "supervisor_agent"', response.text)
+        self.assertNotIn('"node": "conversation_agent"', response.text)
+        self.assertNotIn('"node": "result_aggregator_agent"', response.text)
         self.assertEqual(response.text.count("event: content"), 1)
         self.assertLess(response.text.index("event: trace"), response.text.index("event: result"))
         self.assertLess(response.text.index("event: content"), response.text.index("event: result"))
         content_data = response.text.split("event: content\ndata: ", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(json.loads(content_data)["delta"], "测试回答")
         result_data = response.text.split("event: result\ndata: ", 1)[1].split("\n\n", 1)[0]
-        self.assertEqual(json.loads(result_data)["summary"], "测试回答")
+        result = json.loads(result_data)
+        self.assertEqual(result["summary"], "测试回答")
+        self.assertEqual(result["orchestration"]["architecture"], "direct-model")
+        self.assertFalse(result["orchestration"]["agentic"])
+
+    def test_stream_endpoint_does_not_repeat_genuine_model_deltas(self) -> None:
+        with (
+            patch.object(main_module, "knowledge_graph", FakeStreamingKnowledgeGraph()),
+            patch.object(main_module, "trial_manager", AlwaysUsableTrial()),
+            TestClient(main_module.app) as client,
+        ):
+            response = client.post(
+                "/api/ask/stream",
+                json={
+                    "question": "测试真实流",
+                    "top_k": 5,
+                    "user_id": "tester",
+                    "session_id": "session-stream",
+                    "response_language": "zh-Hans",
+                    "attachments": [],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.text.count("event: content"), 2)
+        self.assertEqual(response.text.count('"delta": "实时"'), 1)
+        self.assertEqual(response.text.count('"delta": "回答"'), 1)
 
     def test_answer_content_chunks_preserve_markdown_exactly(self) -> None:
         answer = "# 漏洞摘要\n\n第一段。第二段。\n\n```java\nreturn value;\n```"

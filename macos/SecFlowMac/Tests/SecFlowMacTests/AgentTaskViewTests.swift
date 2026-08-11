@@ -4,6 +4,32 @@ import XCTest
 @testable import SecFlowMac
 
 final class AgentTaskViewTests: XCTestCase {
+    func testAssistantConversationScrollPositionOnlyFollowsNearBottom() {
+        XCTAssertTrue(
+            assistantConversationScrollIsNearBottom(documentMaxY: 1_500, visibleMaxY: 1_420)
+        )
+        XCTAssertFalse(
+            assistantConversationScrollIsNearBottom(documentMaxY: 1_500, visibleMaxY: 1_300)
+        )
+        XCTAssertFalse(
+            assistantConversationScrollIsNearBottom(documentMaxY: .infinity, visibleMaxY: 1_300)
+        )
+        XCTAssertTrue(
+            assistantConversationScrollFollowState(
+                documentMaxY: 1_500,
+                visibleMaxY: 1_370,
+                currentlyFollowing: true
+            )
+        )
+        XCTAssertFalse(
+            assistantConversationScrollFollowState(
+                documentMaxY: 1_500,
+                visibleMaxY: 1_370,
+                currentlyFollowing: false
+            )
+        )
+    }
+
     func testCompletedTaskHidesHistoricalRunningHeartbeats() {
         let events = [
             AgentTaskEvent(sequence: 1, type: "node.started", node: "scan_java", status: "running", message: "开始扫描", time: "2026-07-29T10:33:10+00:00"),
@@ -600,6 +626,68 @@ final class AgentTaskViewTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testCompletedTaskAcceptsFollowUpWithoutLayoutFeedbackLoop() throws {
+        let model = AppModel()
+        let task = sampleTask()
+        model.agentTasks = [task]
+        model.activeAgentTask = task
+        model.conversationTurns = [
+            ConversationTurn(
+                question: task.objective,
+                attachmentNames: [task.workspaceName],
+                agentTaskID: task.id
+            )
+        ]
+        let size = NSSize(width: 1100, height: 720)
+        let hostingView = NSHostingView(
+            rootView: AssistantView(loadsAgentTasks: false)
+                .environmentObject(model)
+                .frame(width: size.width, height: size.height)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        window.orderFrontRegardless()
+        defer { window.close() }
+
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        hostingView.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+
+        let followUpID = UUID()
+        model.conversationTurns.append(
+            ConversationTurn(
+                id: followUpID,
+                question: "请指出风险代码并补充修复方法，不要重新扫描。",
+                attachmentNames: [task.workspaceName],
+                agentTaskID: task.id,
+                showsAgentTaskWorkflow: false
+            )
+        )
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+
+        let answer = sampleScanFollowUpAnswer()
+        let index = try XCTUnwrap(model.conversationTurns.firstIndex(where: { $0.id == followUpID }))
+        model.conversationTurns[index].streamedAnswer = answer.summary
+        model.conversationTurns[index].answer = answer
+        model.conversationTurns[index].answeredAt = Date()
+        model.conversationTurns[index].processingTrace = answer.trace
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(model.conversationTurns.count, 2)
+        XCTAssertFalse(model.conversationTurns[1].showsAgentTaskWorkflow)
+        let bitmap = try XCTUnwrap(hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds))
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
+        XCTAssertGreaterThan(nonWhitePixelCount(bitmap), 18_000)
+    }
+
     private func sampleProfile() -> UserProfileSettingsSnapshot {
         UserProfileSettingsSnapshot(
             displayName: "测试用户",
@@ -667,6 +755,97 @@ final class AgentTaskViewTests: XCTestCase {
         }
         """#.data(using: .utf8)!
         return try JSONDecoder.secFlow.decode(AskResult.self, from: json)
+    }
+
+    private func sampleScanFollowUpAnswer() -> AskResult {
+        let generatedAt = "2026-07-31T02:08:06+00:00"
+        let prompt = String(
+            repeating: "先根据用户措辞、会话上下文、附件和可用能力理解实际目标，再规划是否检索、扫描、分析、制图或生成报告。\n",
+            count: 20
+        )
+        let trace = [
+            TraceItem(node: "supervisor_agent", status: "completed", message: "已完成任务规划并选择专业 Agent。", time: generatedAt),
+            TraceItem(node: "code_scan_agent", status: "completed", message: "Code Scan Agent 已完成。", time: generatedAt),
+            TraceItem(node: "result_aggregator_agent", status: "completed", message: "已完成结构化结果合并与审计。", time: generatedAt),
+            TraceItem(
+                node: "classify_query",
+                status: "completed",
+                message: "已根据问题语义选择 scan_result_follow_up 能力。",
+                time: generatedAt,
+                presentation: LangGraphNodePresentation(
+                    kind: "tool_call",
+                    title: "LLM semantic intent planner",
+                    toolName: "plan_assistant_intent",
+                    state: "completed",
+                    input: ["question": "别重新检查，直接根据刚才那条结果告诉我漏洞代码在哪、为什么危险、应该怎么改。"],
+                    output: "{\"intent\":\"scan_result_follow_up\",\"confidence\":1.0}",
+                    error: "",
+                    before: nil,
+                    after: nil
+                )
+            ),
+            TraceItem(node: "load_memory_context", status: "completed", message: "已召回长期记忆。", time: generatedAt),
+            TraceItem(
+                node: "call_llm",
+                status: "completed",
+                message: "模型调用成功。",
+                time: generatedAt,
+                presentation: LangGraphNodePresentation(
+                    kind: "prompt_diff",
+                    title: "系统提示词变更",
+                    toolName: nil,
+                    state: "completed",
+                    input: nil,
+                    output: nil,
+                    error: nil,
+                    before: prompt,
+                    after: prompt.replacingOccurrences(of: "实际目标", with: "真实目标")
+                )
+            ),
+            TraceItem(node: "translate_vulnerability_card", status: "completed", message: "当前问题无需生成漏洞卡片。", time: generatedAt),
+            TraceItem(node: "compose_answer", status: "completed", message: "已生成最终回答。", time: generatedAt),
+            TraceItem(node: "persist_memory", status: "completed", message: "已写入长期记忆。", time: generatedAt),
+        ]
+        let summary = #"""
+        ## 漏洞代码位置
+
+        **文件**：`app.py`，第 6–8 行
+
+        ```python
+        def run_command() -> None:
+            command = request.args.get("cmd")
+            os.system(command)
+        ```
+
+        ## 为什么危险
+
+        - **污点路径**：外部输入 `request.args.get("cmd")` 未经任何过滤或校验，直接传入 `os.system()`。
+        - **控制流特征**：source 与 sink 位于同一顺序执行路径，中间无任何分支条件或消毒逻辑。
+        - **实际风险**：攻击者可完全控制命令内容，导致任意命令执行。
+
+        ## 应该怎么改
+
+        采用**白名单 + 参数数组**方式，禁止 shell 解释：
+
+        ```python
+        allowed_commands = {"status": ["/usr/bin/fixed-tool", "--status"]}
+        arguments = allowed_commands.get(command)
+        if arguments is None:
+            raise ValueError("unsupported command")
+        subprocess.run(arguments, check=True, shell=False)
+        ```
+
+        1. 使用白名单映射，只允许预定义的命令与参数组合。
+        2. 使用参数数组传递，避免 shell 解析。
+        3. 显式设置 `shell=False`。
+        """#
+        return AskResult(
+            localSummary: summary,
+            mode: "scan_result_follow_up",
+            fields: ["扫描证据": "1 条结构化 finding", "扫描轮次": "1"],
+            trace: trace,
+            generatedAt: generatedAt
+        )
     }
 
     private func sampleComponentQueryAnswer() throws -> AskResult {

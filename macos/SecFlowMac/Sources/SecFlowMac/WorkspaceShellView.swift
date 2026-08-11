@@ -127,6 +127,15 @@ struct WorkspaceShellView: View {
     }
 
     var body: some View {
+        FeatureStoreObserver(
+            assistant: model.assistantStore,
+            agentTasks: model.agentTaskStore
+        ) {
+            workspaceContent
+        }
+    }
+
+    private var workspaceContent: some View {
         ZStack(alignment: .leading) {
             HStack(spacing: 0) {
                 Color.clear

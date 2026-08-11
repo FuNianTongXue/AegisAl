@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -78,13 +79,13 @@ AVATAR_MEDIA_TYPES = {
 
 def default_profile_settings() -> dict[str, Any]:
     return {
-        "display_name": "李明哲",
-        "email": "limingzhe@example.com",
-        "phone": "138 **** 6688",
-        "department": "网络安全部",
-        "role": "安全分析师",
-        "employee_id": "SEC-20240315",
-        "bio": "网络安全分析师，专注于威胁情报分析与漏洞研究。拥有 5 年以上安全行业经验，熟悉各类安全工具与攻防技术。",
+        "display_name": "",
+        "email": "",
+        "phone": "",
+        "department": "",
+        "role": "",
+        "employee_id": "",
+        "bio": "",
         "avatar_file_name": "",
         "avatar_content_type": "",
         "avatar_updated_at": "",
@@ -250,31 +251,35 @@ def default_legal_documents() -> dict[str, dict[str, Any]]:
     }
 
 
-def public_settings_snapshot() -> dict[str, Any]:
+def public_settings_snapshot(user_id: str = "default") -> dict[str, Any]:
     return {
-        "profile": get_profile_settings(),
+        "profile": get_profile_settings(user_id),
         "preferences": get_preference_settings(),
         "about": about_settings(),
         "legal": get_legal_documents(),
     }
 
 
-def get_profile_settings() -> dict[str, Any]:
+def get_profile_settings(user_id: str = "default") -> dict[str, Any]:
     state = store.read()
-    profile = _settings_bucket(state).get("profile")
+    resolved_user_id = _normalize_user_id(user_id)
+    profile = _stored_profile(_settings_bucket(state), resolved_user_id)
     if not isinstance(profile, dict):
         profile = {}
     result = default_profile_settings()
     result.update({key: value for key, value in profile.items() if key in result})
-    result["avatar_available"] = avatar_path(result).is_file() if result.get("avatar_file_name") else False
+    result["avatar_available"] = (
+        avatar_path(result, resolved_user_id).is_file() if result.get("avatar_file_name") else False
+    )
     return result
 
 
-def update_profile_settings(update: dict[str, Any]) -> dict[str, Any]:
+def update_profile_settings(update: dict[str, Any], user_id: str = "default") -> dict[str, Any]:
     state = store.read()
     settings = _settings_bucket(state)
+    resolved_user_id = _normalize_user_id(user_id)
     current = default_profile_settings()
-    existing = settings.get("profile")
+    existing = _stored_profile(settings, resolved_user_id)
     if isinstance(existing, dict):
         current.update(existing)
     for key in ("display_name", "email", "phone", "department", "role", "employee_id", "bio"):
@@ -283,12 +288,17 @@ def update_profile_settings(update: dict[str, Any]) -> dict[str, Any]:
     if len(str(current.get("bio") or "")) > 200:
         current["bio"] = str(current.get("bio") or "")[:200]
     current["updated_at"] = now_iso()
-    settings["profile"] = current
+    _store_profile(settings, resolved_user_id, current)
     store.write(state)
-    return get_profile_settings()
+    return get_profile_settings(resolved_user_id)
 
 
-def save_profile_avatar(file_name: str, content_base64: str, content_type: str = "") -> dict[str, Any]:
+def save_profile_avatar(
+    file_name: str,
+    content_base64: str,
+    content_type: str = "",
+    user_id: str = "default",
+) -> dict[str, Any]:
     clean_name = Path(file_name).name.strip()
     extension = Path(clean_name).suffix.lower()
     if extension not in SUPPORTED_AVATAR_EXTENSIONS:
@@ -305,14 +315,15 @@ def save_profile_avatar(file_name: str, content_base64: str, content_type: str =
 
     state = store.read()
     settings = _settings_bucket(state)
+    resolved_user_id = _normalize_user_id(user_id)
     profile = default_profile_settings()
-    existing = settings.get("profile")
+    existing = _stored_profile(settings, resolved_user_id)
     if isinstance(existing, dict):
         profile.update(existing)
-    _remove_avatar_files()
-    avatar_dir().mkdir(parents=True, exist_ok=True)
+    _remove_avatar_files(resolved_user_id)
+    avatar_dir(resolved_user_id).mkdir(parents=True, exist_ok=True)
     target_name = f"avatar{extension}"
-    target = avatar_dir() / target_name
+    target = avatar_dir(resolved_user_id) / target_name
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, target)
@@ -320,31 +331,33 @@ def save_profile_avatar(file_name: str, content_base64: str, content_type: str =
     profile["avatar_content_type"] = content_type.strip() or AVATAR_MEDIA_TYPES[extension]
     profile["avatar_updated_at"] = now_iso()
     profile["updated_at"] = now_iso()
-    settings["profile"] = profile
+    _store_profile(settings, resolved_user_id, profile)
     store.write(state)
-    return get_profile_settings()
+    return get_profile_settings(resolved_user_id)
 
 
-def delete_profile_avatar() -> dict[str, Any]:
+def delete_profile_avatar(user_id: str = "default") -> dict[str, Any]:
     state = store.read()
     settings = _settings_bucket(state)
+    resolved_user_id = _normalize_user_id(user_id)
     profile = default_profile_settings()
-    existing = settings.get("profile")
+    existing = _stored_profile(settings, resolved_user_id)
     if isinstance(existing, dict):
         profile.update(existing)
-    _remove_avatar_files()
+    _remove_avatar_files(resolved_user_id)
     profile["avatar_file_name"] = ""
     profile["avatar_content_type"] = ""
     profile["avatar_updated_at"] = ""
     profile["updated_at"] = now_iso()
-    settings["profile"] = profile
+    _store_profile(settings, resolved_user_id, profile)
     store.write(state)
-    return get_profile_settings()
+    return get_profile_settings(resolved_user_id)
 
 
-def avatar_response() -> FileResponse:
-    profile = get_profile_settings()
-    path = avatar_path(profile)
+def avatar_response(user_id: str = "default") -> FileResponse:
+    resolved_user_id = _normalize_user_id(user_id)
+    profile = get_profile_settings(resolved_user_id)
+    path = avatar_path(profile, resolved_user_id)
     if not path.is_file():
         raise KeyError("avatar")
     return FileResponse(
@@ -461,13 +474,19 @@ def about_settings() -> dict[str, Any]:
     }
 
 
-def avatar_dir() -> Path:
-    return DATA_DIR / "settings" / "profile"
+def avatar_dir(user_id: str = "default") -> Path:
+    resolved_user_id = _normalize_user_id(user_id)
+    base = DATA_DIR / "settings" / "profile"
+    if resolved_user_id == "default":
+        return base
+    digest = hashlib.sha256(resolved_user_id.encode("utf-8")).hexdigest()[:32]
+    return base / digest
 
 
-def avatar_path(profile: dict[str, Any]) -> Path:
+def avatar_path(profile: dict[str, Any], user_id: str = "default") -> Path:
     file_name = Path(str(profile.get("avatar_file_name") or "")).name
-    return avatar_dir() / file_name if file_name else avatar_dir() / "avatar"
+    directory = avatar_dir(user_id)
+    return directory / file_name if file_name else directory / "avatar"
 
 
 def _settings_bucket(state: dict[str, Any]) -> dict[str, Any]:
@@ -516,12 +535,40 @@ def _merge_legal_document(default_document: dict[str, Any], stored_document: Any
     return result
 
 
-def _remove_avatar_files() -> None:
+def _remove_avatar_files(user_id: str = "default") -> None:
     for extension in SUPPORTED_AVATAR_EXTENSIONS:
         try:
-            (avatar_dir() / f"avatar{extension}").unlink()
+            (avatar_dir(user_id) / f"avatar{extension}").unlink()
         except FileNotFoundError:
             pass
+
+
+def _normalize_user_id(user_id: str) -> str:
+    return str(user_id or "default").strip() or "default"
+
+
+def _stored_profile(settings: dict[str, Any], user_id: str) -> dict[str, Any]:
+    profiles = settings.get("profiles")
+    if isinstance(profiles, dict) and isinstance(profiles.get(user_id), dict):
+        return profiles[user_id]
+    legacy = settings.get("profile")
+    if not isinstance(legacy, dict):
+        return {}
+    legacy_email = str(legacy.get("email") or "").strip().casefold()
+    if user_id == "default" or (legacy_email and legacy_email == user_id.casefold()):
+        return legacy
+    return {}
+
+
+def _store_profile(settings: dict[str, Any], user_id: str, profile: dict[str, Any]) -> None:
+    if user_id == "default":
+        settings["profile"] = profile
+        return
+    profiles = settings.setdefault("profiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+        settings["profiles"] = profiles
+    profiles[user_id] = profile
 
 
 def _validate_avatar_magic(data: bytes, extension: str) -> None:

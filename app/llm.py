@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from copy import deepcopy
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 from app.storage import mask_secret, now_iso, store
+from app.model_usage import model_usage_service
 
 
 LOCAL_PROVIDERS = {"ollama", "vllm", "local"}
@@ -69,8 +71,8 @@ FALLBACK_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "description": "低延迟轻量模型"},
     ],
     "deepseek": [
-        {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "description": "DeepSeek 官方低延迟模型"},
-        {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "description": "DeepSeek 官方高能力模型"},
+        {"id": "deepseek-chat", "name": "DeepSeek Chat", "description": "DeepSeek 官方通用对话模型"},
+        {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner", "description": "DeepSeek 官方推理模型"},
     ],
     "google": [
         {"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash", "description": "稳定版智能体与编码模型"},
@@ -144,8 +146,8 @@ NON_CHAT_MODEL_TOKENS = {
 }
 
 
-def llm_public_config() -> dict[str, Any]:
-    config = _stored_llm_config()
+def llm_public_config(user_id: str = "default") -> dict[str, Any]:
+    config = _stored_llm_config(user_id=user_id)
     provider = str(config.get("provider") or "openai")
     catalog_provider = str(config.get("catalog_provider") or provider)
     provider_name = MODEL_PROVIDER_NAMES.get(catalog_provider, catalog_provider)
@@ -159,8 +161,13 @@ def llm_public_config() -> dict[str, Any]:
         "endpoint": _safe_endpoint(str(config.get("endpoint", ""))),
         "wire_api": str(config.get("wire_api") or ""),
         "reasoning_effort": str(config.get("reasoning_effort") or ""),
+        "reasoning_options": _reasoning_options_for_config(config),
         "disable_response_storage": bool(config.get("disable_response_storage")),
         "enabled": bool(config.get("enabled")),
+        "max_tokens": int(config.get("max_tokens") or 1800),
+        "temperature": float(config.get("temperature") if config.get("temperature") is not None else 0.25),
+        "top_p": float(config.get("top_p") if config.get("top_p") is not None else 0.9),
+        "timeout_ms": int(config.get("timeout_ms") or 60000),
         "configured": bool(config.get("enabled")) and not bool(readiness_error),
         "has_api_key": bool(api_key),
         "api_key_masked": mask_secret(api_key) if api_key else "",
@@ -169,21 +176,32 @@ def llm_public_config() -> dict[str, Any]:
     }
 
 
-def save_llm_config(update: dict[str, Any]) -> dict[str, Any]:
+def save_llm_config(update: dict[str, Any], user_id: str = "default") -> dict[str, Any]:
     state = store.read()
-    current = _stored_llm_config(state)
+    resolved_user_id = _normalize_user_id(user_id)
+    current = _stored_llm_config(state, resolved_user_id)
     merged = _merge_llm_update(current, update)
     merged["updated_at"] = now_iso()
-    state["llm"] = merged
+    if resolved_user_id == "default":
+        state["llm"] = merged
+    else:
+        configs = state.setdefault("llm_users", {})
+        if not isinstance(configs, dict):
+            configs = {}
+            state["llm_users"] = configs
+        configs[resolved_user_id] = merged
     store.write(state)
-    return llm_public_config()
+    return llm_public_config(resolved_user_id)
 
 
-def test_llm_config(update: dict[str, Any]) -> dict[str, Any]:
-    model = _active_model_from_config(_merge_llm_update(_stored_llm_config(), update))
+def test_llm_config(update: dict[str, Any], user_id: str = "default") -> dict[str, Any]:
+    model = _active_model_from_config(
+        _merge_llm_update(_stored_llm_config(user_id=user_id), update)
+    )
     result = diagnose_chat_completion(
         model,
         [{"role": "user", "content": "请只回复：SecFlow OK"}],
+        record_usage=False,
     )
     return {
         "status": result.get("status", "failed"),
@@ -195,7 +213,7 @@ def test_llm_config(update: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def list_llm_models(update: dict[str, Any]) -> dict[str, Any]:
+def list_llm_models(update: dict[str, Any], user_id: str = "default") -> dict[str, Any]:
     provider = str(update.get("provider") or "openai").strip().lower()
     if provider not in PROVIDER_DEFAULTS:
         raise ValueError(f"不支持的模型服务商：{provider}")
@@ -203,7 +221,7 @@ def list_llm_models(update: dict[str, Any]) -> dict[str, Any]:
     if catalog_provider not in FALLBACK_MODELS:
         catalog_provider = "custom" if provider == "custom" else provider
 
-    current = _stored_llm_config()
+    current = _stored_llm_config(user_id=user_id)
     endpoint = str(update.get("endpoint") or _default_endpoint(provider)).strip()
     api_key = str(update.get("api_key") or "").strip()
     current_endpoint = str(current.get("endpoint") or "").rstrip("/")
@@ -237,8 +255,8 @@ def list_llm_models(update: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def active_model_from_env() -> dict[str, Any] | None:
-    stored = _active_model_from_config(_stored_llm_config())
+def active_model_from_env(user_id: str = "default") -> dict[str, Any] | None:
+    stored = _active_model_from_config(_stored_llm_config(user_id=user_id))
     if stored and stored.get("enabled"):
         return stored
 
@@ -282,8 +300,8 @@ def active_model_from_env() -> dict[str, Any] | None:
     }
 
 
-def llm_status() -> dict[str, Any]:
-    model = active_model_from_env()
+def llm_status(user_id: str = "default") -> dict[str, Any]:
+    model = active_model_from_env(user_id)
     error = chat_readiness_error(model)
     return {
         "configured": not bool(error),
@@ -315,10 +333,53 @@ def diagnose_chat_completion(
     messages: list[dict[str, str]],
     enable_thinking: bool = False,
     json_mode: bool = False,
+    on_delta: Callable[[str], None] | None = None,
+    *,
+    user_id: str = "default",
+    session_id: str = "",
+    source: str = "",
+    record_usage: bool = True,
+) -> dict[str, Any]:
+    result = _diagnose_chat_completion_impl(
+        active_model,
+        messages,
+        enable_thinking=enable_thinking,
+        json_mode=json_mode,
+        on_delta=on_delta,
+    )
+    if record_usage and source:
+        try:
+            model_usage_service.record_result(
+                result,
+                active_model,
+                user_id=user_id,
+                session_id=session_id,
+                source=source,
+            )
+        except Exception:  # noqa: BLE001 - usage telemetry must never break a model response.
+            pass
+    return result
+
+
+def _diagnose_chat_completion_impl(
+    active_model: dict[str, Any],
+    messages: list[dict[str, str]],
+    enable_thinking: bool = False,
+    json_mode: bool = False,
+    on_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     readiness_error = chat_readiness_error(active_model)
     if readiness_error:
         return {"status": "failed", "message": readiness_error, "latency_ms": None}
+
+    if on_delta is not None:
+        return _stream_chat_completion(
+            active_model,
+            messages,
+            enable_thinking=enable_thinking,
+            json_mode=json_mode,
+            on_delta=on_delta,
+        )
 
     provider = str(active_model.get("provider", "")).lower()
     if provider == "claude":
@@ -386,6 +447,222 @@ def diagnose_chat_completion(
     }
 
 
+def _stream_chat_completion(
+    active_model: dict[str, Any],
+    messages: list[dict[str, str]],
+    *,
+    enable_thinking: bool,
+    json_mode: bool,
+    on_delta: Callable[[str], None],
+) -> dict[str, Any]:
+    provider = str(active_model.get("provider", "")).lower()
+    wire_api = _wire_api(active_model)
+    endpoint = _normalized_endpoint(active_model)
+    headers: dict[str, str]
+    body: dict[str, Any]
+    url: str
+
+    if provider == "claude":
+        system_parts = [item["content"] for item in messages if item.get("role") == "system"]
+        chat_messages = [
+            {"role": item.get("role", "user"), "content": item.get("content", "")}
+            for item in messages
+            if item.get("role") != "system"
+        ] or [{"role": "user", "content": "请回复 SecFlow OK"}]
+        body = {
+            "model": active_model.get("model", "claude-3-5-sonnet-latest"),
+            "messages": chat_messages,
+            "max_tokens": int(active_model.get("maxTokens", 1800)),
+            "stream": True,
+        }
+        if system_parts:
+            body["system"] = "\n\n".join(system_parts)
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": str(active_model.get("apiKey", "")),
+            "anthropic-version": "2023-06-01",
+        }
+        url = f"{endpoint}/messages"
+        stream_kind = "anthropic"
+    elif provider == "openai" or wire_api == "responses":
+        body = {
+            "model": active_model.get("model", _default_model("openai")),
+            "input": [
+                {"role": item.get("role", "user"), "content": item.get("content", "")}
+                for item in messages
+            ],
+            "max_output_tokens": int(active_model.get("maxTokens", 1800)),
+            "stream": True,
+        }
+        reasoning_effort = str(active_model.get("reasoningEffort") or "").strip()
+        if reasoning_effort and reasoning_effort != "none":
+            body["reasoning"] = {"effort": reasoning_effort}
+        if bool(active_model.get("disableResponseStorage")):
+            body["store"] = False
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {active_model.get('apiKey', '')}",
+        }
+        url = f"{endpoint}/responses"
+        stream_kind = "responses"
+    else:
+        body = {
+            "model": active_model.get("model", "deepseek-chat"),
+            "messages": messages,
+            "max_tokens": int(active_model.get("maxTokens", 1800)),
+            "temperature": float(active_model.get("temperature", 0.25)),
+            "top_p": float(active_model.get("topP", 0.9)),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if enable_thinking and _supports_thinking_param(active_model):
+            body["thinking"] = {"type": "enabled"}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        headers = {"Content-Type": "application/json"}
+        api_key = str(active_model.get("apiKey", ""))
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        url = f"{endpoint}/chat/completions"
+        stream_kind = "chat"
+
+    timeout_s = max(float(active_model.get("timeoutMs", 60000)) / 1000.0, 1.0)
+    started = time.perf_counter()
+    parts: list[str] = []
+    final_data: dict[str, Any] = {}
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            with client.stream("POST", url, json=body, headers=headers) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    clean = str(line or "").strip()
+                    if not clean or clean.startswith(("event:", ":")):
+                        continue
+                    encoded = clean[5:].strip() if clean.startswith("data:") else clean
+                    if encoded == "[DONE]":
+                        break
+                    try:
+                        payload = json.loads(encoded)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if payload.get("type") in {"error", "response.failed"}:
+                        error = payload.get("error") if isinstance(payload.get("error"), dict) else payload
+                        raise RuntimeError(str(error.get("message") or "模型流返回失败事件。"))
+                    delta = _stream_text_delta(payload, stream_kind)
+                    if delta:
+                        parts.append(delta)
+                        try:
+                            on_delta(delta)
+                        except Exception:  # noqa: BLE001 - a disconnected UI must not abort model execution.
+                            pass
+                    if stream_kind == "responses" and payload.get("type") == "response.completed":
+                        completed = payload.get("response")
+                        if isinstance(completed, dict):
+                            final_data = completed
+                    else:
+                        _merge_stream_metadata(final_data, payload, stream_kind)
+    except httpx.HTTPStatusError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        detail = exc.response.text[:500] if exc.response is not None else str(exc)
+        return {
+            "status": "failed",
+            "message": f"模型接口返回 HTTP {exc.response.status_code if exc.response else ''}：{detail}",
+            "latency_ms": latency_ms,
+        }
+    except Exception as exc:  # noqa: BLE001
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        return {"status": "failed", "message": f"模型流式请求失败：{exc}", "latency_ms": latency_ms}
+
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    answer_text = "".join(parts).strip()
+    if not answer_text and final_data:
+        answer_text = (
+            _extract_openai_response_text(final_data)
+            if stream_kind == "responses"
+            else _extract_non_stream_answer(final_data, stream_kind)
+        )
+    if not answer_text:
+        return {"status": "failed", "message": "当前模型未返回可用结果。", "latency_ms": latency_ms}
+    return {
+        "status": "success",
+        "message": "模型接口流式调用成功。",
+        "latency_ms": latency_ms,
+        "answer": answer_text,
+        "reasoning": "",
+        "data": final_data,
+        "streamed": True,
+    }
+
+
+def _stream_text_delta(payload: dict[str, Any], stream_kind: str) -> str:
+    if stream_kind == "responses":
+        if payload.get("type") == "response.output_text.delta":
+            return str(payload.get("delta") or "")
+        return ""
+    if stream_kind == "anthropic":
+        if payload.get("type") != "content_block_delta":
+            return ""
+        delta = payload.get("delta") if isinstance(payload.get("delta"), dict) else {}
+        return str(delta.get("text") or "") if delta.get("type") == "text_delta" else ""
+    choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    delta = choices[0].get("delta") if isinstance(choices[0].get("delta"), dict) else {}
+    content = delta.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
+        )
+    return ""
+
+
+def _extract_non_stream_answer(data: dict[str, Any], stream_kind: str) -> str:
+    if stream_kind == "anthropic":
+        return "\n".join(
+            str(part.get("text") or "").strip()
+            for part in data.get("content", []) or []
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+    return str(message.get("content") or "").strip()
+
+
+def _merge_stream_metadata(
+    final_data: dict[str, Any],
+    payload: dict[str, Any],
+    stream_kind: str,
+) -> None:
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+    if usage is not None:
+        final_data["usage"] = {**dict(final_data.get("usage") or {}), **usage}
+    if stream_kind == "anthropic" and payload.get("type") == "message_start":
+        message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+        if isinstance(message.get("usage"), dict):
+            final_data["usage"] = dict(message["usage"])
+        for key in ("id", "model", "role", "type"):
+            if message.get(key) is not None:
+                final_data[key] = message[key]
+    elif stream_kind == "anthropic" and payload.get("type") == "message_delta":
+        if isinstance(payload.get("usage"), dict):
+            final_data["usage"] = {
+                **dict(final_data.get("usage") or {}),
+                **dict(payload["usage"]),
+            }
+    elif stream_kind == "chat":
+        for key in ("id", "model", "created", "system_fingerprint"):
+            if payload.get(key) is not None:
+                final_data[key] = payload[key]
+
+
 def _diagnose_openai_response(
     active_model: dict[str, Any],
     messages: list[dict[str, str]],
@@ -400,7 +677,7 @@ def _diagnose_openai_response(
         "max_output_tokens": int(active_model.get("maxTokens", 1800)),
     }
     reasoning_effort = str(active_model.get("reasoningEffort") or "").strip()
-    if reasoning_effort:
+    if reasoning_effort and reasoning_effort != "none":
         body["reasoning"] = {"effort": reasoning_effort}
     if bool(active_model.get("disableResponseStorage")):
         body["store"] = False
@@ -549,6 +826,33 @@ def _supports_thinking_param(active_model: dict[str, Any]) -> bool:
     return provider in {"ollama", "vllm"} and any(token in model for token in ("reason", "thinking", "qwq"))
 
 
+def _reasoning_options_for_config(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose only reasoning levels the selected wire protocol/model can honor.
+
+    The desktop uses this metadata to avoid presenting cosmetic controls that a
+    provider would silently ignore or reject. DeepSeek exposes reasoning as a
+    separate model, while OpenAI Responses models expose configurable effort.
+    """
+    provider = str(config.get("provider") or "").strip().lower()
+    model = str(config.get("model") or "").strip().lower()
+    wire_api = str(config.get("wire_api") or PROVIDER_DEFAULTS.get(provider, {}).get("wire_api") or "").strip().lower()
+
+    if provider == "deepseek":
+        return [{"value": "high", "fixed": True}] if "reasoner" in model else [{"value": "none", "fixed": True}]
+
+    if provider == "openai" or wire_api == "responses":
+        if model.startswith("gpt-4.1"):
+            return [{"value": "none", "fixed": True}]
+        values = ["none", "low", "medium", "high"]
+        if model.startswith(("gpt-5.4", "gpt-5.6", "o1", "o3", "o4")) or provider == "custom":
+            values.append("xhigh")
+        if model.startswith(("gpt-5.6-sol", "gpt-5.6-terra")) or (provider == "custom" and "gpt-5.6" in model):
+            values.append("max")
+        return [{"value": value} for value in values]
+
+    return [{"value": "none", "fixed": True}]
+
+
 def _safe_endpoint(endpoint: str) -> str:
     if not endpoint:
         return ""
@@ -641,9 +945,20 @@ def _extract_openai_response_text(data: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _stored_llm_config(state: dict[str, Any] | None = None) -> dict[str, Any]:
+def _stored_llm_config(
+    state: dict[str, Any] | None = None,
+    user_id: str = "default",
+) -> dict[str, Any]:
     state = state or store.read()
-    config = deepcopy(state.get("llm") or {})
+    resolved_user_id = _normalize_user_id(user_id)
+    user_configs = state.get("llm_users")
+    stored_user_config = user_configs.get(resolved_user_id) if isinstance(user_configs, dict) else None
+    if isinstance(stored_user_config, dict):
+        config = deepcopy(stored_user_config)
+    elif resolved_user_id == "default" or _legacy_llm_owner_matches(state, resolved_user_id):
+        config = deepcopy(state.get("llm") or {})
+    else:
+        config = {}
     provider = str(config.get("provider") or "openai").lower()
     defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["openai"])
     config.setdefault("provider", provider)
@@ -661,6 +976,17 @@ def _stored_llm_config(state: dict[str, Any] | None = None) -> dict[str, Any]:
     config.setdefault("reasoning_effort", defaults.get("reasoning_effort", ""))
     config.setdefault("disable_response_storage", defaults.get("disable_response_storage", False))
     return config
+
+
+def _normalize_user_id(user_id: str) -> str:
+    return str(user_id or "default").strip() or "default"
+
+
+def _legacy_llm_owner_matches(state: dict[str, Any], user_id: str) -> bool:
+    settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
+    profile = settings.get("profile") if isinstance(settings.get("profile"), dict) else {}
+    profile_email = str(profile.get("email") or "").strip().casefold()
+    return bool(profile_email and profile_email == user_id.casefold())
 
 
 def _merge_llm_update(current: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:

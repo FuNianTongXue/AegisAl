@@ -28,6 +28,15 @@ ASSISTANT_PROJECT_ID = "assistant"
 ASSISTANT_PROJECT_NAME = "智能问答"
 
 
+def _unique_text(values: list[Any], *, limit: int) -> list[str]:
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned[:limit]
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
@@ -57,6 +66,10 @@ class LongTermMemoryService:
         self.context_chars = _env_int("SECFLOW_MEMORY_CONTEXT_CHARS", 3000)
         self.state_path = state_path or DATA_DIR / "memory.json"
         self._lock = RLock()
+        # Information Center conversations are intentionally process-local.
+        # They must provide continuity while the small consultation window is
+        # open without entering the durable conversation archive/profile.
+        self._short_term_sessions: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._postgres_ready: bool | None = None
         self._postgres_error = ""
 
@@ -235,7 +248,29 @@ class LongTermMemoryService:
                     state.setdefault("profiles", {})[user_id] = profile
                 else:
                     state.setdefault("profiles", {}).pop(user_id, None)
+                project_links = state.setdefault("projectLinks", {}).get(user_id, [])
+                remaining_links = [
+                    item
+                    for item in project_links
+                    if str(item.get("sessionId") or "default") != session_id
+                ]
+                if remaining_links:
+                    state["projectLinks"][user_id] = remaining_links
+                else:
+                    state["projectLinks"].pop(user_id, None)
+                sbom_operations = state.setdefault("sbomOperations", {}).get(user_id, [])
+                remaining_operations = [
+                    item
+                    for item in sbom_operations
+                    if str(item.get("sessionId") or "default") != session_id
+                ]
+                if remaining_operations:
+                    state["sbomOperations"][user_id] = remaining_operations
+                else:
+                    state["sbomOperations"].pop(user_id, None)
                 self._write_json_state(state)
+        if self._use_postgres():
+            self._delete_local_project_links_for_session(user_id, session_id)
         return {
             "id": session_id,
             "title": detail["title"],
@@ -265,6 +300,250 @@ class LongTermMemoryService:
                 "summaryChars": len(profile.get("summary", "")),
             },
         }
+
+    def build_short_term_context(
+        self,
+        user_id: str,
+        session_id: str,
+        question: str,
+    ) -> dict[str, Any]:
+        """Build context from only the current in-memory consultation session."""
+
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        with self._lock:
+            recent = deepcopy(
+                self._short_term_sessions.get((owner, conversation), [])[-self.recent_limit :]
+            )
+        prompt_context = self._format_prompt_context({}, recent, [])
+        return {
+            "enabled": True,
+            "backend": "process-memory",
+            "scope": "short-term",
+            "summary": "",
+            "recentHistory": recent,
+            "retrievedMemories": [],
+            "promptContext": prompt_context[: self.context_chars],
+            "injectedMessages": self._history_messages(recent),
+            "stats": {
+                "historyCount": len(recent),
+                "recentCount": len(recent),
+                "retrievedCount": 0,
+                "summaryChars": 0,
+            },
+        }
+
+    def add_short_term_exchange(
+        self,
+        user_id: str,
+        session_id: str,
+        question: str,
+        answer_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Remember an Information Center turn without writing it to disk."""
+
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        entry = self._build_entry(owner, conversation, question, answer_data)
+        with self._lock:
+            history = self._short_term_sessions.setdefault((owner, conversation), [])
+            entry["id"] = f"short-{len(history) + 1:04d}"
+            history.append(entry)
+            if len(history) > self.recent_limit:
+                del history[: len(history) - self.recent_limit]
+        return deepcopy(entry)
+
+    def clear_short_term_session(self, user_id: str, session_id: str) -> dict[str, Any]:
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        with self._lock:
+            removed = len(self._short_term_sessions.pop((owner, conversation), []))
+        return {"session_id": conversation, "cleared_turn_count": removed}
+
+    def remember_project_link(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        project_name: str,
+        workspace_path: str,
+        task_id: str = "",
+        artifact_ids: list[str] | None = None,
+        artifact_names: list[str] | None = None,
+        repository_url: str = "",
+    ) -> dict[str, Any]:
+        """Keep local project/workspace associations out of synced conversation payloads."""
+
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        workspace = str(workspace_path or "").strip()
+        name = str(project_name or "").strip() or Path(workspace).name or "项目"
+        if not workspace:
+            raise ValueError("项目工作区不能为空。")
+        clean_artifact_ids = _unique_text(artifact_ids or [], limit=100)
+        clean_artifact_names = _unique_text(artifact_names or [], limit=100)
+        with self._lock:
+            state = self._read_json_state()
+            links = state.setdefault("projectLinks", {}).setdefault(owner, [])
+            existing = next(
+                (
+                    item
+                    for item in links
+                    if str(item.get("sessionId") or "default") == conversation
+                    and str(item.get("workspacePath") or "") == workspace
+                ),
+                None,
+            )
+            timestamp = now_iso()
+            if existing is None:
+                existing = {
+                    "projectName": name,
+                    "workspacePath": workspace,
+                    "taskId": str(task_id or "").strip(),
+                    "sessionId": conversation,
+                    "artifactIds": [],
+                    "artifactNames": [],
+                    "repositoryUrl": str(repository_url or "").strip(),
+                    "availability": "unknown",
+                    "lastVerifiedAt": "",
+                    "updatedAt": timestamp,
+                }
+                links.insert(0, existing)
+            existing["projectName"] = name
+            if task_id:
+                existing["taskId"] = str(task_id).strip()
+            if repository_url:
+                existing["repositoryUrl"] = str(repository_url).strip()
+            existing["artifactIds"] = _unique_text(
+                [*(existing.get("artifactIds") or []), *clean_artifact_ids],
+                limit=100,
+            )
+            existing["artifactNames"] = _unique_text(
+                [*(existing.get("artifactNames") or []), *clean_artifact_names],
+                limit=100,
+            )
+            existing["updatedAt"] = timestamp
+            links.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
+            state["projectLinks"][owner] = links[:100]
+            self._write_json_state(state)
+            return deepcopy(existing)
+
+    def list_project_links(self, user_id: str, *, session_id: str = "") -> list[dict[str, Any]]:
+        owner = str(user_id or "default").strip() or "default"
+        state = self._read_json_state()
+        links = state.setdefault("projectLinks", {}).get(owner, [])
+        if session_id:
+            conversation = str(session_id).strip()
+            links = [item for item in links if str(item.get("sessionId") or "default") == conversation]
+        return deepcopy(links)
+
+    def attach_project_artifacts(
+        self,
+        user_id: str,
+        session_id: str,
+        artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        links = self.list_project_links(user_id, session_id=session_id)
+        if not links:
+            return None
+        current = links[0]
+        return self.remember_project_link(
+            user_id,
+            session_id,
+            project_name=str(current.get("projectName") or "项目"),
+            workspace_path=str(current.get("workspacePath") or ""),
+            task_id=str(current.get("taskId") or ""),
+            artifact_ids=[str(item.get("id") or "") for item in artifacts if isinstance(item, dict)],
+            artifact_names=[str(item.get("file_name") or "") for item in artifacts if isinstance(item, dict)],
+            repository_url=str(current.get("repositoryUrl") or ""),
+        )
+
+    def remember_sbom_operation(
+        self,
+        user_id: str,
+        session_id: str,
+        operation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a user-owned SBOM result reference outside model prompt memory."""
+
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        thread_id = str(operation.get("thread_id") or operation.get("threadId") or "").strip()
+        if not thread_id.startswith("sbom-"):
+            raise ValueError("SBOM operation thread is invalid")
+        snapshot = {
+            "threadId": thread_id,
+            "userId": owner,
+            "sessionId": conversation,
+            "projectName": str(operation.get("project_name") or operation.get("projectName") or "项目")[:240],
+            "workspacePath": str(operation.get("workspace_path") or operation.get("workspacePath") or ""),
+            "status": str(operation.get("status") or "unknown")[:40],
+            "componentCount": max(0, int(operation.get("component_count") or operation.get("componentCount") or 0)),
+            "components": deepcopy(list(operation.get("components") or [])[:5000]),
+            "matchRequested": bool(operation.get("match_requested") or operation.get("matchRequested")),
+            "matching": deepcopy(operation.get("matching") if isinstance(operation.get("matching"), dict) else {}),
+            "licenseAnalysis": deepcopy(
+                operation.get("license_analysis")
+                if isinstance(operation.get("license_analysis"), dict)
+                else operation.get("licenseAnalysis") if isinstance(operation.get("licenseAnalysis"), dict) else {}
+            ),
+            "interrupt": deepcopy(operation.get("interrupt") if isinstance(operation.get("interrupt"), dict) else None),
+            "artifacts": deepcopy([item for item in operation.get("artifacts") or [] if isinstance(item, dict)][:100]),
+            "updatedAt": now_iso(),
+        }
+        matching = snapshot["matching"]
+        matching["records"] = [item for item in matching.get("records") or [] if isinstance(item, dict)][:500]
+        with self._lock:
+            state = self._read_json_state()
+            operations = state.setdefault("sbomOperations", {}).setdefault(owner, [])
+            operations = [item for item in operations if str(item.get("threadId") or "") != thread_id]
+            operations.insert(0, snapshot)
+            state["sbomOperations"][owner] = operations[:100]
+            self._write_json_state(state)
+        return deepcopy(snapshot)
+
+    def latest_sbom_operation(
+        self,
+        user_id: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any] | None:
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "").strip()
+        state = self._read_json_state()
+        operations = [
+            item
+            for item in state.setdefault("sbomOperations", {}).get(owner, [])
+            if isinstance(item, dict)
+        ]
+        if conversation:
+            current = [item for item in operations if str(item.get("sessionId") or "default") == conversation]
+            if current:
+                return deepcopy(current[0])
+        return deepcopy(operations[0]) if operations else None
+
+    def mark_project_link_availability(
+        self,
+        user_id: str,
+        session_id: str,
+        workspace_path: str,
+        *,
+        available: bool,
+    ) -> None:
+        owner = str(user_id or "default").strip() or "default"
+        with self._lock:
+            state = self._read_json_state()
+            links = state.setdefault("projectLinks", {}).get(owner, [])
+            for item in links:
+                if (
+                    str(item.get("sessionId") or "default") == (str(session_id or "default").strip() or "default")
+                    and str(item.get("workspacePath") or "") == str(workspace_path or "").strip()
+                ):
+                    item["availability"] = "available" if available else "unavailable"
+                    item["lastVerifiedAt"] = now_iso()
+                    item["updatedAt"] = now_iso()
+                    self._write_json_state(state)
+                    return
 
     def add_exchange(
         self,
@@ -355,6 +634,11 @@ class LongTermMemoryService:
                     conn.execute("delete from secflow_knowledge_conversation_exchanges where user_id = %s", (user_id,))
                     conn.execute("delete from secflow_knowledge_conversations where user_id = %s", (user_id,))
                     conn.execute("delete from secflow_knowledge_memory_profiles where user_id = %s", (user_id,))
+                with self._lock:
+                    state = self._read_json_state()
+                    state.setdefault("projectLinks", {}).pop(user_id, None)
+                    state.setdefault("sbomOperations", {}).pop(user_id, None)
+                    self._write_json_state(state)
                 return {"status": "success", "message": f"已清除用户 {user_id} 的长期记忆。"}
             except Exception as exc:  # noqa: BLE001
                 self._mark_postgres_failed(exc)
@@ -362,6 +646,8 @@ class LongTermMemoryService:
         state.setdefault("users", {}).pop(user_id, None)
         state.setdefault("conversationMetadata", {}).pop(user_id, None)
         state.setdefault("profiles", {}).pop(user_id, None)
+        state.setdefault("projectLinks", {}).pop(user_id, None)
+        state.setdefault("sbomOperations", {}).pop(user_id, None)
         self._write_json_state(state)
         return {"status": "success", "message": f"已清除用户 {user_id} 的本地记忆。"}
 
@@ -656,12 +942,20 @@ class LongTermMemoryService:
                     state.setdefault("users", {})
                     state.setdefault("profiles", {})
                     state.setdefault("conversationMetadata", {})
+                    state.setdefault("projectLinks", {})
+                    state.setdefault("sbomOperations", {})
                     if not raw.lstrip().startswith('{"__secflow_encrypted__"'):
                         self._write_json_state(state)
                     return state
                 except (InvalidTag, json.JSONDecodeError, OSError, ValueError):
                     pass
-            state: dict[str, Any] = {"users": {}, "profiles": {}, "conversationMetadata": {}}
+            state: dict[str, Any] = {
+                "users": {},
+                "profiles": {},
+                "conversationMetadata": {},
+                "projectLinks": {},
+                "sbomOperations": {},
+            }
             self._write_json_state(state)
             return state
 
@@ -709,6 +1003,31 @@ class LongTermMemoryService:
         value = state.setdefault("conversationMetadata", {}).get(user_id, {})
         return deepcopy(value) if isinstance(value, dict) else {}
 
+    def _delete_local_project_links_for_session(self, user_id: str, session_id: str) -> None:
+        with self._lock:
+            state = self._read_json_state()
+            links = state.setdefault("projectLinks", {}).get(user_id, [])
+            remaining = [
+                item
+                for item in links
+                if str(item.get("sessionId") or "default") != session_id
+            ]
+            if remaining:
+                state["projectLinks"][user_id] = remaining
+            else:
+                state["projectLinks"].pop(user_id, None)
+            operations = state.setdefault("sbomOperations", {}).get(user_id, [])
+            remaining_operations = [
+                item
+                for item in operations
+                if str(item.get("sessionId") or "default") != session_id
+            ]
+            if remaining_operations:
+                state["sbomOperations"][user_id] = remaining_operations
+            else:
+                state["sbomOperations"].pop(user_id, None)
+            self._write_json_state(state)
+
     def _profile_from_history(self, user_id: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         summary = ""
         facts: list[dict[str, Any]] = []
@@ -736,6 +1055,7 @@ class LongTermMemoryService:
                 "knowledge_graph",
                 "evidence_sources",
                 "chart_data",
+                "license_analysis",
                 "artifacts",
                 "report",
                 "interrupt",
@@ -875,7 +1195,7 @@ class LongTermMemoryService:
     ) -> float:
         text = f"{question}\n{answer}".lower()
         score = 0.18 + min(max(confidence, 0.0), 1.0) * 0.22
-        if mode in {"vulnerability_lookup", "vulnerability_year_lookup", "llm_rag", "security_knowledge"}:
+        if mode in {"vulnerability_lookup", "vulnerability_year_lookup", "llm_rag", "security_knowledge", "project_submission"}:
             score += 0.14
         if any(topic in {"CVE", "GHSA", "供应链", "代码审计", "威胁建模"} for topic in topics):
             score += 0.18

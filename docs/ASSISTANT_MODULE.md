@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 独立应用 | `app/assistant_app.py` | FastAPI 应用、健康检查和 Assistant Router 挂载 |
 | API | `app/api/routes/assistant.py` | 只提供 `/api/assistant` 路由 |
-| Agent | `app/agent/assistant_service.py` | 问答调用、Markdown 无损 SSE 分片、Interrupt 恢复与失效结果 |
+| Agent | `app/agent/assistant_service.py` | 问答调用、供应商真实文本 delta、兼容 SSE 分片、Interrupt 恢复与失效结果 |
 | LangGraph | `app/langgraph/assistant_graph.py` | 意图理解、记忆、情报、组件、SBOM、报告和 LLM 编排 |
 | MCP | `app/mcp/` | Excel、D3 Sankey、Mermaid、Markdown、Word 与 PDF 工具 |
 | 记忆 | `app/memory.py` | 按 `user_id + session_id` 保存、归档和删除历史对话 |
@@ -48,7 +48,7 @@ uvicorn app.assistant_app:app \
 | `POST` | `/api/assistant/conversations/{session_id}/archive` | 归档或恢复会话 |
 | `DELETE` | `/api/assistant/conversations/{session_id}` | 永久删除会话 |
 
-SSE 的 `content.delta` 按原始回答分片，拼接后必须与最终 Markdown 完全一致。`Thinking` 和 `trace` 只展示高层节点任务，不返回模型私有推理。
+SSE 的 `content.delta` 优先直接来自 OpenAI Responses、OpenAI-compatible Chat Completions 或 Anthropic 的文本流；确定性回答和不支持流式的上游才将最终 Markdown 无损分片。单轮只使用一种正文来源，不会在 `result` 前重复发送。`Thinking` 和 `trace` 只展示高层节点任务，Responses reasoning、Chat `reasoning_content` 和 Anthropic thinking block 均不返回。
 
 ## 5. 扫描与报告状态一致性
 

@@ -31,22 +31,124 @@ private let taskWorkspaceContentTypes: [UTType] = {
     return types
 }()
 
-private let assistantConversationBottomID = "assistant-conversation-bottom"
-private let assistantConversationCoordinateSpace = "assistant-conversation-scroll"
+private struct AssistantConversationScrollObserver: NSViewRepresentable {
+    let scrollRequest: Int
+    let onFollowingChange: (Bool) -> Void
 
-private struct AssistantConversationBottomPreferenceKey: PreferenceKey {
-    static var defaultValue = CGFloat.infinity
+    func makeNSView(context: Context) -> AssistantConversationScrollObservationView {
+        let view = AssistantConversationScrollObservationView()
+        view.onFollowingChange = onFollowingChange
+        view.requestScrollToBottom(scrollRequest)
+        return view
+    }
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+    func updateNSView(_ nsView: AssistantConversationScrollObservationView, context: Context) {
+        nsView.onFollowingChange = onFollowingChange
+        nsView.installIfNeeded()
+        nsView.requestScrollToBottom(scrollRequest)
     }
 }
 
-private struct AssistantConversationViewportPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+private final class AssistantConversationScrollObservationView: NSView {
+    var onFollowingChange: ((Bool) -> Void)?
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+    private weak var observedScrollView: NSScrollView?
+    private var boundsObserver: NSObjectProtocol?
+    private var lastReportedValue: Bool?
+    private var pendingReportedValue: Bool?
+    private var reportIsScheduled = false
+    private var lastScrollRequest = 0
+    private var pendingScrollRequest: Int?
+    private var scrollIsScheduled = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in
+            self?.installIfNeeded()
+        }
+    }
+
+    func installIfNeeded() {
+        guard let scrollView = enclosingScrollView else { return }
+        guard observedScrollView !== scrollView else { return }
+
+        removeObservation()
+        observedScrollView = scrollView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reportCurrentPosition()
+        }
+        reportCurrentPosition()
+    }
+
+    func requestScrollToBottom(_ request: Int) {
+        guard request > 0, request != lastScrollRequest else { return }
+        lastScrollRequest = request
+        pendingScrollRequest = request
+        scheduleScrollIfNeeded()
+    }
+
+    private func scheduleScrollIfNeeded() {
+        guard pendingScrollRequest != nil, !scrollIsScheduled else { return }
+        scrollIsScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.scrollIsScheduled = false
+                self.installIfNeeded()
+                guard self.pendingScrollRequest != nil else { return }
+                self.pendingScrollRequest = nil
+                self.scrollToBottom()
+            }
+        }
+    }
+
+    private func scrollToBottom() {
+        guard let scrollView = observedScrollView else { return }
+        scrollToVisible(bounds.insetBy(dx: 0, dy: -1))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        reportCurrentPosition()
+    }
+
+    private func reportCurrentPosition() {
+        guard let scrollView = observedScrollView,
+              let documentView = scrollView.documentView
+        else { return }
+        let followsBottom = assistantConversationScrollFollowState(
+            documentMaxY: documentView.bounds.maxY,
+            visibleMaxY: scrollView.documentVisibleRect.maxY,
+            currentlyFollowing: lastReportedValue
+        )
+        guard followsBottom != lastReportedValue else { return }
+        lastReportedValue = followsBottom
+        pendingReportedValue = followsBottom
+        guard !reportIsScheduled else { return }
+        reportIsScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.reportIsScheduled = false
+            guard let value = self.pendingReportedValue else { return }
+            self.pendingReportedValue = nil
+            self.onFollowingChange?(value)
+        }
+    }
+
+    private func removeObservation() {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+        }
+        boundsObserver = nil
+        observedScrollView = nil
+        lastReportedValue = nil
+        pendingReportedValue = nil
+    }
+
+    deinit {
+        removeObservation()
     }
 }
 
@@ -57,6 +159,31 @@ func assistantConversationIsNearBottom(
 ) -> Bool {
     guard bottomY.isFinite, viewportHeight > 0 else { return false }
     return bottomY <= viewportHeight + tolerance
+}
+
+func assistantConversationScrollIsNearBottom(
+    documentMaxY: CGFloat,
+    visibleMaxY: CGFloat,
+    tolerance: CGFloat = 120
+) -> Bool {
+    guard documentMaxY.isFinite, visibleMaxY.isFinite else { return false }
+    return documentMaxY - visibleMaxY <= tolerance
+}
+
+func assistantConversationScrollFollowState(
+    documentMaxY: CGFloat,
+    visibleMaxY: CGFloat,
+    currentlyFollowing: Bool?,
+    tolerance: CGFloat = 120,
+    hysteresis: CGFloat = 24
+) -> Bool {
+    guard documentMaxY.isFinite, visibleMaxY.isFinite else {
+        return currentlyFollowing ?? false
+    }
+    let distance = documentMaxY - visibleMaxY
+    guard let currentlyFollowing else { return distance <= tolerance }
+    let threshold = currentlyFollowing ? tolerance + hysteresis : tolerance - hysteresis
+    return distance <= threshold
 }
 
 func isMeaningfulAssistantQuestion(_ value: String) -> Bool {
@@ -153,9 +280,6 @@ struct AssistantView: View {
     @State private var isSelectingTaskWorkspace = false
     @State private var isTaskDropTargeted = false
     @State private var taskScrollRequest = 0
-    @State private var conversationViewportHeight: CGFloat = 0
-    @State private var conversationBottomY = CGFloat.infinity
-    @State private var hasMeasuredConversationBottom = false
     @State private var followsConversationBottom = true
     @FocusState private var isComposerFocused: Bool
 
@@ -170,6 +294,15 @@ struct AssistantView: View {
     }
 
     var body: some View {
+        FeatureStoreObserver(
+            assistant: model.assistantStore,
+            agentTasks: model.agentTaskStore
+        ) {
+            assistantContent
+        }
+    }
+
+    private var assistantContent: some View {
         VStack(spacing: 0) {
             if let task = model.activeAgentTask {
                 contextHeader(for: task)
@@ -223,126 +356,76 @@ struct AssistantView: View {
     }
 
     private var conversation: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 24) {
-                    if model.conversationTurns.isEmpty && !model.isAsking {
-                        Color.clear.frame(height: 260)
-                    }
+        ScrollView {
+            LazyVStack(spacing: 24) {
+                if model.conversationTurns.isEmpty && !model.isAsking {
+                    Color.clear.frame(height: 260)
+                }
 
-                    ForEach(model.conversationTurns) { turn in
-                        AssistantConversationTurnRow(
-                            turn: turn,
-                            task: turn.agentTaskID.flatMap { taskID in
-                                model.allAgentTasks.first(where: { $0.id == taskID })
-                            },
-                            isRegenerateDisabled: model.isAsking || askTask != nil || workspaceActionTask != nil,
-                            onRegenerate: { regenerate(turn.id) },
-                            onContinue: {
-                                question = model.uiText("请继续回答，并补充尚未覆盖的风险与修复建议。")
-                                isComposerFocused = true
-                            },
-                            onInterruptDecision: { interrupt, confirm, format in
-                                handleInterruptDecision(
-                                    turnID: turn.id,
-                                    interrupt: interrupt,
-                                    confirm: confirm,
-                                    format: format
-                                )
-                            }
-                        )
-                        .id(turn.id)
-                    }
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id(assistantConversationBottomID)
-                        .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: AssistantConversationBottomPreferenceKey.self,
-                                    value: geometry.frame(in: .named(assistantConversationCoordinateSpace)).minY
-                                )
-                            }
+                ForEach(model.conversationTurns) { turn in
+                    AssistantConversationTurnRow(
+                        turn: turn,
+                        task: turn.agentTaskID.flatMap { taskID in
+                            model.allAgentTasks.first(where: { $0.id == taskID })
+                        },
+                        isRegenerateDisabled: model.isAsking || askTask != nil || workspaceActionTask != nil,
+                        onRegenerate: { regenerate(turn.id) },
+                        onContinue: {
+                            question = model.uiText("请继续回答，并补充尚未覆盖的风险与修复建议。")
+                            isComposerFocused = true
+                        },
+                        onInterruptDecision: { interrupt, confirm, format in
+                            handleInterruptDecision(
+                                turnID: turn.id,
+                                interrupt: interrupt,
+                                confirm: confirm,
+                                format: format
+                            )
                         }
-                }
-                .padding(.horizontal, 30)
-                .padding(.top, 12)
-                .padding(.bottom, 20)
-                .frame(maxWidth: 1160)
-                .frame(maxWidth: .infinity)
-            }
-            .coordinateSpace(name: assistantConversationCoordinateSpace)
-            .background {
-                GeometryReader { geometry in
-                    Color.clear.preference(
-                        key: AssistantConversationViewportPreferenceKey.self,
-                        value: geometry.size.height
                     )
+                    .id(turn.id)
                 }
+
+                AssistantConversationScrollObserver(
+                    scrollRequest: taskScrollRequest,
+                    onFollowingChange: { followsBottom in
+                    if followsBottom != followsConversationBottom {
+                        followsConversationBottom = followsBottom
+                    }
+                })
+                .frame(height: 1)
             }
-            .onPreferenceChange(AssistantConversationViewportPreferenceKey.self) { height in
-                conversationViewportHeight = height
-                updateConversationFollowState(bottomY: conversationBottomY, viewportHeight: height)
-            }
-            .onPreferenceChange(AssistantConversationBottomPreferenceKey.self) { bottomY in
-                conversationBottomY = bottomY
-                if bottomY.isFinite {
-                    hasMeasuredConversationBottom = true
-                    updateConversationFollowState(
-                        bottomY: bottomY,
-                        viewportHeight: conversationViewportHeight
-                    )
-                } else if hasMeasuredConversationBottom {
-                    followsConversationBottom = false
-                }
-            }
-            .onChange(of: model.sessionID) { _, _ in
-                hasMeasuredConversationBottom = false
-                followsConversationBottom = true
-                Task { @MainActor in
-                    await Task.yield()
-                    proxy.scrollTo(assistantConversationBottomID, anchor: .bottom)
-                }
-            }
-            .onChange(of: model.conversationTurns.count) { _, _ in
-                guard followsConversationBottom else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(assistantConversationBottomID, anchor: .bottom)
-                }
-            }
-            .onChange(of: model.isAsking) { _, _ in
-                guard followsConversationBottom else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(assistantConversationBottomID, anchor: .bottom)
-                }
-            }
-            .onChange(of: model.activeTrace.count) { _, _ in
-                guard followsConversationBottom else { return }
-                proxy.scrollTo(assistantConversationBottomID, anchor: .bottom)
-            }
-            .onChange(of: model.activeAgentTask?.updatedAt) { _, _ in
-                guard followsConversationBottom else { return }
-                proxy.scrollTo(assistantConversationBottomID, anchor: .bottom)
-            }
-            .onChange(of: taskScrollRequest) { _, _ in
-                guard let taskID = model.activeAgentTask?.id else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("task-\(taskID)", anchor: .bottom)
-                }
-            }
+            .padding(.horizontal, 30)
+            .padding(.top, 12)
+            .padding(.bottom, 20)
+            .frame(maxWidth: 1160)
+            .frame(maxWidth: .infinity)
+        }
+        .onChange(of: model.sessionID) { _, _ in
+            followsConversationBottom = true
+            requestConversationScroll()
+        }
+        .onChange(of: model.conversationTurns.count) { _, _ in
+            requestConversationScrollIfFollowing()
+        }
+        .onChange(of: model.isAsking) { _, _ in
+            requestConversationScrollIfFollowing()
+        }
+        .onChange(of: model.activeTrace.count) { _, _ in
+            requestConversationScrollIfFollowing()
+        }
+        .onChange(of: model.activeAgentTask?.updatedAt) { _, _ in
+            requestConversationScrollIfFollowing()
         }
     }
 
-    private func updateConversationFollowState(bottomY: CGFloat, viewportHeight: CGFloat) {
-        guard bottomY.isFinite, viewportHeight > 0 else { return }
-        let isNearBottom = assistantConversationIsNearBottom(
-            bottomY: bottomY,
-            viewportHeight: viewportHeight
-        )
-        if isNearBottom != followsConversationBottom {
-            followsConversationBottom = isNearBottom
-        }
+    private func requestConversationScrollIfFollowing() {
+        guard followsConversationBottom else { return }
+        requestConversationScroll()
+    }
+
+    private func requestConversationScroll() {
+        taskScrollRequest &+= 1
     }
 
     private var composer: some View {
@@ -547,11 +630,12 @@ struct AssistantView: View {
             let result = await model.ask(
                 question: question,
                 topK: 8,
-                onTrace: { item in
+                onTrace: { items in
                     guard let index = model.conversationTurns.firstIndex(where: { $0.id == turnID }) else { return }
-                    if !model.conversationTurns[index].processingTrace.contains(where: { $0.id == item.id }) {
-                        model.conversationTurns[index].processingTrace.append(item)
-                    }
+                    model.conversationTurns[index].processingTrace = mergingTraceItems(
+                        model.conversationTurns[index].processingTrace,
+                        updates: items
+                    )
                 },
                 onContent: { delta in
                     guard let index = model.conversationTurns.firstIndex(where: { $0.id == turnID }) else { return }
@@ -563,6 +647,11 @@ struct AssistantView: View {
             if let result {
                 model.conversationTurns[index].answer = result
                 model.conversationTurns[index].streamedAnswer = result.summary
+                if let task = result.agentTask {
+                    model.conversationTurns[index].agentTaskID = task.id
+                    model.conversationTurns[index].showsAgentTaskWorkflow = true
+                    taskScrollRequest += 1
+                }
             } else {
                 model.conversationTurns[index].errorMessage = model.errorMessage ?? model.uiText("本地安全分析暂时不可用。")
             }
@@ -793,7 +882,6 @@ struct AssistantView: View {
             }
             question = ""
             taskWorkspacePath = ""
-            taskScrollRequest += 1
         }
     }
 
@@ -813,7 +901,6 @@ struct AssistantView: View {
         model.conversationTurns.append(turn)
         question = ""
         followsConversationBottom = true
-        taskScrollRequest += 1
 
         workspaceActionTask = Task { @MainActor in
             defer { workspaceActionTask = nil }

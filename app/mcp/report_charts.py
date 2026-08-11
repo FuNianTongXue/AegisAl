@@ -186,6 +186,10 @@ async def report_mcp_specs() -> list[dict[str, Any]]:
     from app.mcp.report_markdown import markdown_mcp_spec
     from app.mcp.report_mermaid import mermaid_mcp_spec
     from app.mcp.report_pdf import pdf_mcp_spec
+    from app.mcp.report_excel import excel_mcp_spec
+    from app.mcp.report_sarif import sarif_mcp_spec
+    from app.mcp.report_template import template_mcp_spec
+    from app.mcp.translation import translation_mcp_spec
     from app.mcp.report_word import word_mcp_spec
 
     tools = await report_chart_mcp.list_tools()
@@ -203,10 +207,14 @@ async def report_mcp_specs() -> list[dict[str, Any]]:
         ],
     }
     return [
+        await translation_mcp_spec(),
+        await template_mcp_spec(),
         chart_spec,
+        await sarif_mcp_spec(),
         await mermaid_mcp_spec(),
         await markdown_mcp_spec(),
         await word_mcp_spec(),
+        await excel_mcp_spec(),
         await pdf_mcp_spec(),
     ]
 

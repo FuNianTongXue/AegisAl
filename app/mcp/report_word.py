@@ -33,7 +33,7 @@ report_word_mcp = FastMCP(
     instructions=(
         "Render verified SecFlow report JSON into a real DOCX using the standard_business_brief "
         "preset and memo_masthead header. Preserve headings, real lists, explicit table geometry, "
-        "evidence line breaks, remediation, Mermaid source, and audit hashes."
+        "evidence line breaks, remediation, structured diagram summaries, and audit hashes."
     ),
 )
 
@@ -101,6 +101,23 @@ def _build_docx(document: dict[str, Any], mermaid: dict[str, Any]) -> bytes:
 
     report = document["report"]
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    template = document.get("template") if isinstance(document.get("template"), dict) else {}
+    template_fonts = template.get("fonts") if isinstance(template.get("fonts"), dict) else {}
+    template_tokens = template.get("style_tokens") if isinstance(template.get("style_tokens"), dict) else {}
+    body_font = str(template_fonts.get("latin_body") or "SF Pro Text")
+    heading_font = str(template_fonts.get("latin_heading") or "SF Pro Display")
+    east_asia_font = str(template_fonts.get("body") or "PingFang SC")
+    east_asia_heading_font = str(template_fonts.get("heading") or east_asia_font)
+    code_font = str(template_fonts.get("code") or "SFMono-Regular")
+    primary = _hex_token(template_tokens.get("primary"), "112C53")
+    accent = _hex_token(template_tokens.get("accent"), "0BA3C4")
+    text_color = _hex_token(template_tokens.get("text"), "15233A")
+    from app.reports import _normalize_report_language, _report_china_time
+
+    report_language = _normalize_report_language(
+        metadata.get("language") or (report.get("metrics") or {}).get("language")
+    )
+    chinese_report = report_language in {"zh-Hans", "zh-Hant"}
     output = Document()
     section = output.sections[0]
     section.page_width = Inches(8.5)
@@ -111,53 +128,54 @@ def _build_docx(document: dict[str, Any], mermaid: dict[str, Any]) -> bytes:
     section.right_margin = Inches(1)
 
     styles = output.styles
-    _configure_style(styles["Normal"], "SF Pro Text", "PingFang SC", 10.5, RGBColor, qn, line_spacing=1.10, after=6)
-    _configure_style(styles["Title"], "SF Pro Display", "PingFang SC", 23, RGBColor, qn, color="172033", bold=True, after=4)
-    _configure_style(styles["Subtitle"], "SF Pro Text", "PingFang SC", 13, RGBColor, qn, color="52677F", after=12)
+    _configure_style(styles["Normal"], body_font, east_asia_font, 10.5, RGBColor, qn, color=text_color, line_spacing=1.10, after=6)
+    _configure_style(styles["Title"], heading_font, east_asia_heading_font, 23, RGBColor, qn, color=primary, bold=True, after=4)
+    _configure_style(styles["Subtitle"], body_font, east_asia_font, 13, RGBColor, qn, color="52677F", after=12)
     heading_tokens = {
-        "Heading 1": (16, "1B5E86", 16, 8),
-        "Heading 2": (13, "1B5E86", 12, 6),
-        "Heading 3": (11.5, "234F6A", 8, 4),
+        "Heading 1": (16, primary, 16, 8),
+        "Heading 2": (13, accent, 12, 6),
+        "Heading 3": (11.5, primary, 8, 4),
     }
     for name, (size, color, before, after) in heading_tokens.items():
         _configure_style(
-            styles[name], "SF Pro Display", "PingFang SC", size, RGBColor, qn,
+            styles[name], heading_font, east_asia_heading_font, size, RGBColor, qn,
             color=color, bold=True, before=before, after=after, keep_with_next=True,
         )
     if "SecFlow Code" not in styles:
         code_style = styles.add_style("SecFlow Code", WD_STYLE_TYPE.PARAGRAPH)
     else:
         code_style = styles["SecFlow Code"]
-    _configure_style(code_style, "SFMono-Regular", "PingFang SC", 8, RGBColor, qn, color="DCE6FF", after=0)
+    _configure_style(code_style, code_font, east_asia_font, 8, RGBColor, qn, color="DCE6FF", after=0)
 
     header = section.header.paragraphs[0]
     header.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    header_run = header.add_run("SECFLOW  /  SECURITY SCAN REPORT")
-    _set_run_font(header_run, "SF Pro Text", "PingFang SC", qn, size=8, color=RGBColor(98, 112, 137), bold=True)
+    header_run = header.add_run("SECFLOW  /  安全扫描报告" if chinese_report else "SECFLOW  /  SECURITY SCAN REPORT")
+    _set_run_font(header_run, body_font, east_asia_font, qn, size=8, color=RGBColor(98, 112, 137), bold=True)
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     footer_run = footer.add_run("SecFlow  |  ")
-    _set_run_font(footer_run, "SF Pro Text", "PingFang SC", qn, size=8, color=RGBColor(114, 128, 150))
+    _set_run_font(footer_run, body_font, east_asia_font, qn, size=8, color=RGBColor(114, 128, 150))
     _append_page_field(footer, OxmlElement, qn)
 
     title = output.add_paragraph(style="Title")
     title.add_run(str(report.get("project_name") or "SecFlow"))
     subtitle = output.add_paragraph(style="Subtitle")
     subtitle.add_run(str(report.get("title") or "安全扫描报告"))
-    generated_at = str(document.get("generated_at") or "-")
+    generated_at = _report_china_time(document.get("generated_at") or "-")
     source_hash = str((document.get("audit") or {}).get("source_payload_sha256") or "-")
-    for label, value in (
-        ("Generated", generated_at),
-        ("Source SHA-256", source_hash),
-        ("Status", "Verified scan facts"),
-    ):
+    cover_rows = (
+        (("生成时间", generated_at), ("来源 SHA-256", source_hash), ("状态", "扫描事实已核验"))
+        if chinese_report
+        else (("Generated", generated_at), ("Source SHA-256", source_hash), ("Status", "Verified scan facts"))
+    )
+    for label, value in cover_rows:
         paragraph = output.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(2)
         label_run = paragraph.add_run(f"{label}: ")
-        _set_run_font(label_run, "SF Pro Text", "PingFang SC", qn, size=9, bold=True)
+        _set_run_font(label_run, body_font, east_asia_font, qn, size=9, bold=True)
         value_run = paragraph.add_run(value)
-        _set_run_font(value_run, "SF Pro Text", "PingFang SC", qn, size=9)
-    _paragraph_bottom_border(output.add_paragraph(), OxmlElement, qn, "1B7899")
+        _set_run_font(value_run, body_font, east_asia_font, qn, size=9)
+    _paragraph_bottom_border(output.add_paragraph(), OxmlElement, qn, accent)
 
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     metric_table = output.add_table(rows=2, cols=4)
@@ -179,26 +197,43 @@ def _build_docx(document: dict[str, Any], mermaid: dict[str, Any]) -> bytes:
         if not isinstance(item, dict):
             continue
         output.add_heading(f"{index}. {str(item.get('title') or '').strip()}", level=1)
-        _append_markdown(
-            output,
-            str(item.get("content") or ""),
-            styles,
-            OxmlElement,
-            qn,
-            RGBColor,
-            WD_ALIGN_PARAGRAPH,
-            WD_CELL_VERTICAL_ALIGNMENT,
-            WD_TABLE_ALIGNMENT,
-        )
+        blocks = item.get("blocks") if isinstance(item.get("blocks"), list) else []
+        if blocks:
+            _append_report_blocks(output, blocks, document.get("visuals") or {}, styles)
+        else:
+            _append_markdown(
+                output,
+                str(item.get("content") or ""),
+                styles,
+                OxmlElement,
+                qn,
+                RGBColor,
+                WD_ALIGN_PARAGRAPH,
+                WD_CELL_VERTICAL_ALIGNMENT,
+                WD_TABLE_ALIGNMENT,
+            )
 
     core = output.core_properties
     core.title = str(report.get("title") or "SecFlow 安全扫描报告")
     core.author = "SecFlow"
     core.subject = "Verified security scan report"
     core.keywords = "SecFlow, security, scan, report, MCP"
+    _apply_document_run_fonts(
+        output,
+        qn,
+        body_font=body_font,
+        heading_font=heading_font,
+        code_font=code_font,
+        east_asia_font=east_asia_font,
+    )
     buffer = io.BytesIO()
     output.save(buffer)
     return _add_ooxml_font_fallbacks(buffer.getvalue())
+
+
+def _hex_token(value: Any, fallback: str) -> str:
+    clean = str(value or "").strip().lstrip("#").upper()
+    return clean if re.fullmatch(r"[0-9A-F]{6}", clean) else fallback
 
 
 _WORDPROCESSINGML_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -277,6 +312,30 @@ def _append_markdown(
         if not stripped:
             index += 1
             continue
+        image_match = re.fullmatch(
+            r"!\[[^\]]*\]\(data:image/(png|jpeg);base64,([A-Za-z0-9+/=]+)\)",
+            stripped,
+        )
+        if image_match:
+            from docx.shared import Inches
+
+            try:
+                payload = base64.b64decode(image_match.group(2), validate=True)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Word report contains an invalid Mermaid image") from exc
+            valid_signature = (
+                payload.startswith(b"\x89PNG\r\n\x1a\n")
+                if image_match.group(1) == "png"
+                else payload.startswith(b"\xff\xd8\xff")
+            )
+            if len(payload) > 8 * 1024 * 1024 or not valid_signature:
+                raise ValueError("Word report Mermaid image failed validation")
+            document.add_picture(io.BytesIO(payload), width=Inches(6.1))
+            index += 1
+            continue
+        if stripped.startswith("<!-- secflow-mermaid-source:"):
+            index += 1
+            continue
         if stripped.startswith("```"):
             language = stripped[3:].strip()
             code_lines: list[str] = []
@@ -319,6 +378,123 @@ def _append_markdown(
         index += 1
 
 
+def _append_report_blocks(
+    document: Any,
+    blocks: list[dict[str, Any]],
+    visuals: dict[str, Any],
+    styles: Any,
+) -> None:
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Inches, RGBColor
+
+    diagrams = {
+        str(item.get("image_sha256") or ""): item
+        for item in visuals.get("diagrams") or []
+        if isinstance(item, dict)
+    }
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "")
+        if kind == "heading":
+            document.add_heading(str(block.get("text") or ""), level=min(3, max(1, int(block.get("level") or 2))))
+        elif kind == "paragraph":
+            document.add_paragraph(str(block.get("text") or ""))
+        elif kind == "quote":
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.left_indent = Inches(0.25)
+            run = paragraph.add_run(str(block.get("text") or ""))
+            run.italic = True
+            _shade_paragraph(paragraph, OxmlElement, qn, "EDF7FA")
+        elif kind in {"bullet_list", "numbered_list"}:
+            style = "List Bullet" if kind == "bullet_list" else "List Number"
+            for item in block.get("items") or []:
+                document.add_paragraph(str(item), style=style)
+        elif kind == "code":
+            _add_code_block(
+                document,
+                [str(line) for line in block.get("lines") or []],
+                str(block.get("language") or ""),
+                styles,
+                OxmlElement,
+                qn,
+                RGBColor,
+            )
+        elif kind == "table":
+            _add_json_table(
+                document,
+                [str(item) for item in block.get("columns") or []],
+                [[str(cell) for cell in row] for row in block.get("rows") or [] if isinstance(row, list)],
+                OxmlElement,
+                qn,
+                RGBColor,
+                WD_CELL_VERTICAL_ALIGNMENT,
+                WD_TABLE_ALIGNMENT,
+            )
+        elif kind == "diagram":
+            diagram = diagrams.get(str(block.get("sha256") or ""))
+            if not diagram:
+                raise ValueError("Word report JSON references a missing diagram")
+            payload = base64.b64decode(str(diagram.get("image_base64") or ""), validate=True)
+            media_type = str(diagram.get("image_media_type") or "")
+            valid = (media_type == "image/jpeg" and payload.startswith(b"\xff\xd8\xff")) or (
+                media_type == "image/png" and payload.startswith(b"\x89PNG\r\n\x1a\n")
+            )
+            if not valid or hashlib.sha256(payload).hexdigest() != str(diagram.get("image_sha256") or ""):
+                raise ValueError("Word report JSON diagram failed validation")
+            try:
+                from PIL import Image as PillowImage
+
+                with PillowImage.open(io.BytesIO(payload)) as bitmap:
+                    pixel_width, pixel_height = bitmap.size
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError("Word report JSON diagram dimensions are invalid") from exc
+            scale = min(6.1 / max(1, pixel_width), 8.0 / max(1, pixel_height))
+            document.add_picture(
+                io.BytesIO(payload),
+                width=Inches(max(0.1, pixel_width * scale)),
+                height=Inches(max(0.1, pixel_height * scale)),
+            )
+
+
+def _add_json_table(
+    document: Any,
+    columns: list[str],
+    rows: list[list[str]],
+    OxmlElement: Any,
+    qn: Any,
+    RGBColor: Any,
+    WD_CELL_VERTICAL_ALIGNMENT: Any,
+    WD_TABLE_ALIGNMENT: Any,
+) -> None:
+    column_count = max(1, len(columns), *(len(row) for row in rows))
+    table = document.add_table(rows=len(rows) + 1, cols=column_count)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.autofit = False
+    for column_index in range(column_count):
+        table.cell(0, column_index).text = columns[column_index] if column_index < len(columns) else ""
+    for row_index, row in enumerate(rows, start=1):
+        for column_index in range(column_count):
+            cell = table.cell(row_index, column_index)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            cell.text = row[column_index] if column_index < len(row) else ""
+    if column_count == 2:
+        widths = [2100, 7260]
+    elif column_count == 8:
+        widths = [600, 800, 1300, 1000, 1400, 1400, 1860, 1000]
+    elif column_count == 9:
+        widths = [850, 650, 650, 900, 850, 1050, 1150, 850, 2410]
+    else:
+        base = 9360 // column_count
+        widths = [base] * column_count
+        widths[-1] += 9360 - sum(widths)
+    _set_table_geometry(table, widths, OxmlElement, qn)
+    _style_table(table, OxmlElement, qn, RGBColor, header_rows=1, centered=False)
+
+
 def _add_markdown_table(
     document: Any,
     lines: list[str],
@@ -343,6 +519,10 @@ def _add_markdown_table(
             cell.text = _plain_markdown(row[column_index] if column_index < len(row) else "")
     if column_count == 2:
         widths = [2100, 7260]
+    elif column_count == 8:
+        widths = [600, 800, 1300, 1000, 1400, 1400, 1860, 1000]
+    elif column_count == 9:
+        widths = [850, 650, 650, 900, 850, 1050, 1150, 850, 2410]
     else:
         base = 9360 // column_count
         widths = [base] * column_count
@@ -361,10 +541,23 @@ def _add_code_block(
     RGBColor: Any,
 ) -> None:
     if language.lower() == "mermaid":
-        label = document.add_paragraph()
-        label_run = label.add_run("Mermaid MCP")
-        label_run.bold = True
-        label_run.font.color.rgb = RGBColor(27, 120, 153)
+        from app.reports import _mermaid_structured_rows
+
+        headers, rows = _mermaid_structured_rows("\n".join(lines))
+        if not rows:
+            return
+        table = document.add_table(rows=len(rows) + 1, cols=len(headers))
+        table.alignment = 0
+        table.autofit = False
+        for column, value in enumerate(headers):
+            table.cell(0, column).text = value
+        for row_index, row in enumerate(rows, start=1):
+            for column, value in enumerate(row):
+                table.cell(row_index, column).text = value
+        widths = [3100, 1800, 4460] if len(headers) == 3 else [6960, 2400]
+        _set_table_geometry(table, widths, OxmlElement, qn)
+        _style_table(table, OxmlElement, qn, RGBColor, header_rows=1, centered=False)
+        return
     table = document.add_table(rows=1, cols=1)
     table.autofit = False
     _set_table_geometry(table, [9360], OxmlElement, qn)
@@ -399,9 +592,7 @@ def _configure_style(
     style.font.size = Pt(size)
     style.font.bold = bold
     style.font.color.rgb = RGBColor.from_string(color)
-    style._element.rPr.rFonts.set(qn("w:ascii"), latin)
-    style._element.rPr.rFonts.set(qn("w:hAnsi"), latin)
-    style._element.rPr.rFonts.set(qn("w:eastAsia"), east_asia)
+    _set_rfonts(style._element.rPr.rFonts, latin, east_asia, qn)
     style.paragraph_format.space_before = Pt(before)
     style.paragraph_format.space_after = Pt(after)
     if line_spacing is not None:
@@ -426,9 +617,62 @@ def _set_run_font(
     run.bold = bold
     if color is not None:
         run.font.color.rgb = color
-    run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), latin)
-    run._element.get_or_add_rPr().rFonts.set(qn("w:hAnsi"), latin)
-    run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), east_asia)
+    _set_rfonts(run._element.get_or_add_rPr().rFonts, latin, east_asia, qn)
+
+
+def _set_rfonts(rfonts: Any, latin: str, east_asia: str, qn: Any) -> None:
+    for theme_name in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        rfonts.attrib.pop(qn(f"w:{theme_name}"), None)
+    rfonts.set(qn("w:ascii"), latin)
+    rfonts.set(qn("w:hAnsi"), latin)
+    rfonts.set(qn("w:eastAsia"), east_asia)
+    rfonts.set(qn("w:cs"), latin)
+
+
+def _apply_document_run_fonts(
+    document: Any,
+    qn: Any,
+    *,
+    body_font: str = "SF Pro Text",
+    heading_font: str = "SF Pro Display",
+    code_font: str = "SFMono-Regular",
+    east_asia_font: str = "PingFang SC",
+) -> None:
+    from docx.oxml import OxmlElement
+
+    def paragraphs(container: Any):
+        yield from container.paragraphs
+        for table in container.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    yield from paragraphs(cell)
+
+    containers = [document]
+    for section in document.sections:
+        containers.extend([section.header, section.footer])
+    for container in containers:
+        for paragraph in paragraphs(container):
+            style_name = str(getattr(paragraph.style, "name", "") or "")
+            if style_name == "SecFlow Code":
+                latin = code_font
+            elif style_name in {"Title", "Subtitle", "Heading 1", "Heading 2", "Heading 3"}:
+                latin = heading_font
+            else:
+                latin = body_font
+            for run in paragraph.runs:
+                rpr = run._element.get_or_add_rPr()
+                contains_cjk = bool(re.search(r"[\u2e80-\u9fff\uf900-\ufaff]", str(run.text or "")))
+                run_latin = "Arial Unicode MS" if contains_cjk else latin
+                rfonts = rpr.get_or_add_rFonts()
+                _set_rfonts(rfonts, run_latin, east_asia_font, qn)
+                if contains_cjk:
+                    rfonts.set(qn("w:hint"), "eastAsia")
+                language = rpr.find(qn("w:lang"))
+                if language is None:
+                    language = OxmlElement("w:lang")
+                    rpr.append(language)
+                language.set(qn("w:val"), "en-US")
+                language.set(qn("w:eastAsia"), "zh-CN")
 
 
 def _set_table_geometry(table: Any, widths: list[int], OxmlElement: Any, qn: Any) -> None:
@@ -484,6 +728,11 @@ def _style_table(
     centered: bool,
 ) -> None:
     for row_index, row in enumerate(table.rows):
+        row_properties = row._tr.get_or_add_trPr()
+        if row_properties.find(qn("w:cantSplit")) is None:
+            row_properties.append(OxmlElement("w:cantSplit"))
+        if row_index < header_rows and row_properties.find(qn("w:tblHeader")) is None:
+            row_properties.append(OxmlElement("w:tblHeader"))
         for cell in row.cells:
             if row_index < header_rows:
                 _shade_cell(cell, OxmlElement, qn, "F2F4F7")

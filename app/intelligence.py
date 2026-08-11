@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time as monotonic_time
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -19,6 +20,15 @@ from typing import Any
 import httpx
 from packaging.version import InvalidVersion, Version
 
+from app.catalog_translation import (
+    CATALOG_TRANSLATION_LANGUAGE,
+    CATALOG_TRANSLATION_VERSION,
+    record_summary_for_language,
+    record_title_for_language,
+    record_translation_ready,
+    records_translation_ready,
+    translate_records_for_storage,
+)
 from app.collectors import (
     _github_cvss_score,
     _github_version_facts,
@@ -40,10 +50,16 @@ CVE_ID = re.compile(r"\bCVE-\d{4}-\d{4,8}\b", re.I)
 GHSA_ID = re.compile(r"\bGHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}\b", re.I)
 _SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
 _FIXED_SOURCE_ORDER = ["nvd", "github_advisory", "osv"]
+_CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 _BATCH_INTERVAL_SECONDS = 15 * 60
 _BATCH_LOOKBACK_DAYS = 7
 _BATCH_LIMIT = 500
-_CATALOG_SCHEMA_VERSION = "4"
+# Asking the same date range twice within this window must return the same
+# catalog: the just-in-time refresh is throttled per range so consecutive
+# questions are answered from a stable local snapshot instead of depending on
+# upstream source timing. Background batch refreshes still keep data current.
+_RANGE_REFRESH_TTL_SECONDS = 15 * 60
+_CATALOG_SCHEMA_VERSION = "5"
 _CATALOG_RECORD_PURPOSE = "secflow-vulnerability-catalog-record"
 _DEPENDENCY_LOOKUP_BUDGET_SECONDS = 12.0
 _DEPENDENCY_TOTAL_BUDGET_SECONDS = 8.0
@@ -64,6 +80,63 @@ _GITHUB_BATCH_PAGE_SIZE = 100
 _GITHUB_BATCH_MAX_PAGES = 50
 _GITHUB_BATCH_MAX_RECORDS = 5_000
 _GITHUB_BATCH_BUDGET_SECONDS = 18.0
+
+
+def _environment_flag(name: str, *, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "")).strip().casefold()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _catalog_record_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        row = connection.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()
+        return int(row[0] if row else 0)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return 0
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _default_catalog_path() -> Path:
+    configured = os.getenv("SECFLOW_VULNERABILITY_CATALOG_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+
+    current = DATA_DIR / "vulnerability_catalog.sqlite3"
+    current_count = _catalog_record_count(current)
+    candidates: list[Path] = []
+    configured_legacy = os.getenv("SECFLOW_LEGACY_DATA_DIR", "").strip()
+    if configured_legacy:
+        candidates.append(Path(configured_legacy).expanduser() / "vulnerability_catalog.sqlite3")
+    is_tauri_data_dir = DATA_DIR.name.casefold() == "ai.secflow.security-agent"
+    if sys.platform == "darwin" and is_tauri_data_dir:
+        candidates.append(Path.home() / "Library" / "Application Support" / "SecFlow" / "vulnerability_catalog.sqlite3")
+    elif sys.platform == "win32" and is_tauri_data_dir and os.getenv("LOCALAPPDATA"):
+        candidates.append(Path(os.environ["LOCALAPPDATA"]) / "SecFlow" / "vulnerability_catalog.sqlite3")
+
+    # The Tauri client has a new bundle identifier and therefore a new data
+    # directory. Reuse a substantially more complete legacy catalog in place;
+    # all other conversations, tasks, and settings remain in the current app dir.
+    best_path = current
+    best_count = current_count
+    for candidate in candidates:
+        try:
+            if candidate.resolve() == current.resolve():
+                continue
+        except OSError:
+            continue
+        candidate_count = _catalog_record_count(candidate)
+        if candidate_count >= 1_000 and candidate_count > max(best_count * 2, best_count + 1_000):
+            best_path = candidate
+            best_count = candidate_count
+    return best_path
 
 
 def _collect_futures_with_budget(futures: dict[Any, Any], budget_seconds: float) -> tuple[list[tuple[Any, Any]], list[Any]]:
@@ -107,6 +180,19 @@ def _catalog_timestamp(record: dict[str, Any]) -> str:
         return value
 
 
+def _parse_catalog_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _transient_feed_name(label: str) -> str:
     digest = hashlib.sha256(f"secflow-feed:{label}".encode("utf-8")).hexdigest()
     return f"{digest[:32]}.cache"
@@ -136,6 +222,7 @@ class _VulnerabilityCatalog:
                     severity TEXT NOT NULL,
                     record_date TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    has_poc INTEGER NOT NULL DEFAULT 0,
                     record_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_vulnerabilities_record_date
@@ -153,9 +240,21 @@ class _VulnerabilityCatalog:
                 );
                 CREATE INDEX IF NOT EXISTS idx_vulnerability_components_key
                     ON vulnerability_components(component_key);
+                CREATE INDEX IF NOT EXISTS idx_vulnerability_components_cid
+                    ON vulnerability_components(canonical_id);
+                CREATE TABLE IF NOT EXISTS range_query_snapshots (
+                    snapshot_key TEXT PRIMARY KEY,
+                    generated_at TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS catalog_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS known_exploited_vulnerabilities (
+                    cve_id TEXT PRIMARY KEY,
+                    date_added TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
@@ -174,6 +273,30 @@ class _VulnerabilityCatalog:
                 )
                 self._set_metadata_in_connection(connection, "record_encryption_migration_status", "pending")
                 self._set_metadata_in_connection(connection, "record_encryption_migration_cursor", "")
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(vulnerabilities)").fetchall()
+            }
+            if "has_poc" not in columns:
+                connection.execute("ALTER TABLE vulnerabilities ADD COLUMN has_poc INTEGER NOT NULL DEFAULT 0")
+                self._set_metadata_in_connection(connection, "poc_backfill_status", "pending")
+                self._set_metadata_in_connection(connection, "poc_backfill_cursor", "")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vulnerabilities_has_poc ON vulnerabilities(has_poc)"
+            )
+            translation_key = secure_metadata_key("catalog_translation_backfill_status")
+            translation_row = connection.execute(
+                "SELECT value FROM catalog_metadata WHERE key = ?",
+                (translation_key,),
+            ).fetchone()
+            if translation_row is None:
+                record_count = int(connection.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()[0])
+                self._set_metadata_in_connection(
+                    connection,
+                    "catalog_translation_backfill_status",
+                    "pending" if record_count else "complete",
+                )
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
 
     def _migrate_catalog_metadata(self, connection: sqlite3.Connection) -> None:
         metadata_rows = connection.execute("SELECT key, value FROM catalog_metadata WHERE key <> 'schema_version'").fetchall()
@@ -190,6 +313,75 @@ class _VulnerabilityCatalog:
 
     def encryption_migration_pending(self) -> bool:
         return self.metadata("record_encryption_migration_status") == "pending"
+
+    def metrics_migration_pending(self) -> bool:
+        return self.metadata("poc_backfill_status") == "pending"
+
+    def translation_migration_pending(self) -> bool:
+        return self.metadata("catalog_translation_backfill_status") == "pending"
+
+    def migrate_catalog_incrementally(self, stop: Event) -> None:
+        # Populate dashboard metrics first so a large legacy catalog does not
+        # report zero PoCs while the slower encryption migration is running.
+        self.migrate_poc_metrics_incrementally(stop)
+        if not stop.is_set():
+            self.migrate_encrypted_catalog_incrementally(stop)
+        if not stop.is_set():
+            self.migrate_catalog_translations_incrementally(stop)
+
+    def migrate_catalog_translations_incrementally(
+        self,
+        stop: Event,
+        *,
+        batch_size: int = 24,
+        pause_seconds: float = 0.02,
+    ) -> None:
+        """Backfill translations for catalogs created before translate-on-write."""
+
+        if not self.translation_migration_pending():
+            return
+        cursor = self.metadata("catalog_translation_backfill_cursor")
+        while not stop.is_set():
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT canonical_id, record_json
+                    FROM vulnerabilities
+                    WHERE canonical_id > ?
+                    ORDER BY canonical_id
+                    LIMIT ?
+                    """,
+                    (cursor, max(1, min(int(batch_size), 100))),
+                ).fetchall()
+            if not rows:
+                with self._lock, self._connect() as connection:
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "complete")
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
+                return
+
+            decoded = [self._decode_record(str(row["record_json"])) for row in rows]
+            localized, audit = translate_records_for_storage(decoded, session_id="catalog-translation-backfill")
+            pending = int(audit.get("pending_records") or 0)
+            if pending:
+                # No configured model or a transient translation failure: retain
+                # the pending marker and retry from the beginning next startup.
+                with self._lock, self._connect() as connection:
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "pending")
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
+                return
+
+            with self._lock, self._connect() as connection:
+                connection.executemany(
+                    "UPDATE vulnerabilities SET record_json = ? WHERE canonical_id = ?",
+                    [
+                        (self._encode_record(record), str(row["canonical_id"]))
+                        for row, record in zip(rows, localized, strict=True)
+                    ],
+                )
+                cursor = str(rows[-1]["canonical_id"])
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", cursor)
+            if stop.wait(max(0.0, float(pause_seconds))):
+                return
 
     def migrate_encrypted_catalog_incrementally(
         self,
@@ -235,6 +427,45 @@ class _VulnerabilityCatalog:
             if stop.wait(max(0.0, float(pause_seconds))):
                 return
 
+    def migrate_poc_metrics_incrementally(
+        self,
+        stop: Event,
+        *,
+        batch_size: int = 5_000,
+        pause_seconds: float = 0.001,
+    ) -> None:
+        if not self.metrics_migration_pending():
+            return
+        cursor = self.metadata("poc_backfill_cursor")
+        while not stop.is_set():
+            with self._lock, self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT canonical_id, record_json
+                    FROM vulnerabilities
+                    WHERE canonical_id > ?
+                    ORDER BY canonical_id
+                    LIMIT ?
+                    """,
+                    (cursor, max(1, min(int(batch_size), 5_000))),
+                ).fetchall()
+                if not rows:
+                    self._set_metadata_in_connection(connection, "poc_backfill_status", "complete")
+                    self._set_metadata_in_connection(connection, "poc_backfill_cursor", "")
+                    return
+                updates = [
+                    (1 if _record_has_poc(self._decode_record(str(row["record_json"]))) else 0, str(row["canonical_id"]))
+                    for row in rows
+                ]
+                connection.executemany(
+                    "UPDATE vulnerabilities SET has_poc = ? WHERE canonical_id = ?",
+                    updates,
+                )
+                cursor = str(rows[-1]["canonical_id"])
+                self._set_metadata_in_connection(connection, "poc_backfill_cursor", cursor)
+            if stop.wait(max(0.0, float(pause_seconds))):
+                return
+
     def _set_metadata_in_connection(self, connection: sqlite3.Connection, key: str, value: str) -> None:
         secure_key = secure_metadata_key(key)
         connection.execute(
@@ -244,11 +475,13 @@ class _VulnerabilityCatalog:
         if secure_key != key:
             connection.execute("DELETE FROM catalog_metadata WHERE key = ?", (key,))
 
-    def upsert(self, records: list[dict[str, Any]]) -> None:
+    def upsert(self, records: list[dict[str, Any]], *, user_id: str = "default") -> list[dict[str, Any]]:
         if not records:
-            return
+            return []
+        localized_records, translation_audit = translate_records_for_storage(records, user_id=user_id)
+        stored_records: list[dict[str, Any]] = []
         with self._lock, self._connect() as connection:
-            for incoming in records:
+            for incoming in localized_records:
                 aliases = {
                     str(value or "").upper()
                     for value in [incoming.get("id"), *incoming.get("aliases", [])]
@@ -291,12 +524,13 @@ class _VulnerabilityCatalog:
 
                 connection.execute(
                     """
-                    INSERT INTO vulnerabilities(canonical_id, severity, record_date, updated_at, record_json)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO vulnerabilities(canonical_id, severity, record_date, updated_at, has_poc, record_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(canonical_id) DO UPDATE SET
                         severity = excluded.severity,
                         record_date = excluded.record_date,
                         updated_at = excluded.updated_at,
+                        has_poc = excluded.has_poc,
                         record_json = excluded.record_json
                     """,
                     (
@@ -304,6 +538,7 @@ class _VulnerabilityCatalog:
                         str(record.get("severity") or "UNKNOWN").upper(),
                         _catalog_timestamp(record),
                         str(record.get("updated_at") or now_iso()),
+                        1 if _record_has_poc(record) else 0,
                         self._encode_record(record),
                     ),
                 )
@@ -319,10 +554,106 @@ class _VulnerabilityCatalog:
                         "INSERT OR REPLACE INTO vulnerability_components(component_key, canonical_id) VALUES (?, ?)",
                         [(component_key, canonical_id) for component_key in component_keys],
                     )
+                stored_records.append(deepcopy(record))
             connection.execute(
                 "INSERT OR REPLACE INTO catalog_metadata(key, value) VALUES (?, ?)",
                 (secure_metadata_key("last_sync"), self._encode_metadata_value(secure_metadata_key("last_sync"), now_iso())),
             )
+            if int(translation_audit.get("pending_records") or 0):
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "pending")
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
+        return stored_records
+
+    def persist_summary_translations(self, translations: list[dict[str, str]]) -> int:
+        """Write verified display translations without changing upstream facts.
+
+        Report export receives public catalog rows, so feeding those rows back
+        through ``upsert`` would incorrectly turn the localized display text
+        into the upstream source text.  This narrow write-through path updates
+        only ``summary_zh`` after checking that the supplied source summary
+        still matches the encrypted catalog record.
+        """
+
+        candidates = {
+            str(item.get("id") or "").strip().upper(): {
+                "source_summary": str(item.get("source_summary") or "").strip(),
+                "summary_zh": str(item.get("summary_zh") or "").strip(),
+            }
+            for item in translations
+            if isinstance(item, dict)
+            and str(item.get("id") or "").strip()
+            and re.search(r"[\u3400-\u9fff]", str(item.get("summary_zh") or ""))
+        }
+        if not candidates:
+            return 0
+
+        persisted = 0
+        translated_at = now_iso()
+        with self._lock, self._connect() as connection:
+            for identifier, candidate in candidates.items():
+                alias = connection.execute(
+                    "SELECT canonical_id FROM vulnerability_aliases WHERE alias = ?",
+                    (identifier,),
+                ).fetchone()
+                canonical_id = str(alias["canonical_id"] if alias else identifier)
+                row = connection.execute(
+                    "SELECT record_json FROM vulnerabilities WHERE canonical_id = ?",
+                    (canonical_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                record = self._decode_record(str(row["record_json"]))
+                source_summary = str(record.get("summary_original") or record.get("summary") or "").strip()
+                if not source_summary or source_summary != candidate["source_summary"]:
+                    continue
+                summary_zh = candidate["summary_zh"]
+                if summary_zh == source_summary or not re.search(r"[\u3400-\u9fff]", summary_zh):
+                    continue
+                source_title = str(record.get("title_original") or record.get("title") or "").strip()
+                record["summary_zh"] = summary_zh
+                record["catalog_translation"] = {
+                    "version": CATALOG_TRANSLATION_VERSION,
+                    "target_language": CATALOG_TRANSLATION_LANGUAGE,
+                    "status": "translated",
+                    "translated_at": translated_at,
+                    "source_title": source_title,
+                    "source_summary": source_summary,
+                    "translation_status": "translated",
+                    "storage_stage": "report-write-through",
+                }
+                connection.execute(
+                    "UPDATE vulnerabilities SET record_json = ? WHERE canonical_id = ?",
+                    (self._encode_record(record), canonical_id),
+                )
+                persisted += 1
+            if persisted:
+                # Stored range snapshots contain the old public summaries.
+                # Rebuild them on the next query instead of serving stale text.
+                connection.execute("DELETE FROM range_query_snapshots")
+        return persisted
+
+    def replace_known_exploited(self, entries: list[dict[str, Any]]) -> None:
+        rows = [
+            (
+                str(entry.get("cve_id") or "").strip().upper(),
+                str(entry.get("date_added") or "").strip(),
+                str(entry.get("updated_at") or now_iso()).strip(),
+            )
+            for entry in entries
+            if CVE_ID.fullmatch(str(entry.get("cve_id") or "").strip().upper())
+        ]
+        if not rows:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM known_exploited_vulnerabilities")
+            connection.executemany(
+                """
+                INSERT INTO known_exploited_vulnerabilities(cve_id, date_added, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                rows,
+            )
+            self._set_metadata_in_connection(connection, "kev_last_sync", now_iso())
 
     def find_by_identifier(self, identifier: str, limit: int = 10) -> list[dict[str, Any]]:
         clean = str(identifier or "").strip().upper()
@@ -343,36 +674,75 @@ class _VulnerabilityCatalog:
         return [self._decode_record(str(row["record_json"])) for row in rows]
 
     def find_by_dependencies(self, dependencies: list[dict[str, Any]], limit: int = 30) -> list[dict[str, Any]]:
-        key_to_dependency: dict[str, dict[str, Any]] = {}
+        """Return severity-prioritized vulnerability records for dependency coordinates.
+
+        Each dependency is queried with its own row budget so a component with
+        many published CVEs cannot starve the others at the SQL layer. All
+        candidates that pass the affected-version check are then ranked by
+        severity, known exploitation, and recency before the caller's limit is
+        applied. The previous date-first cap dropped older but critical
+        vulnerabilities (for example Log4Shell) whenever a noisy co-dependency
+        produced enough newer rows.
+        """
+        dependency_keys: list[tuple[dict[str, Any], list[str]]] = []
         for dependency in dependencies:
-            for key in _dependency_component_keys(dependency):
-                key_to_dependency.setdefault(key, dependency)
-        if not key_to_dependency:
+            if not isinstance(dependency, dict):
+                continue
+            keys = _dependency_component_keys(dependency)
+            if keys:
+                dependency_keys.append((dependency, keys))
+        if not dependency_keys:
             return []
-        keys = list(key_to_dependency)
+        safe_limit = max(1, int(limit))
+        row_budget = max(120, min(400, safe_limit * 8))
+        merged: dict[str, dict[str, Any]] = {}
         with self._connect() as connection:
-            placeholders = ",".join("?" for _ in keys)
-            rows = connection.execute(
-                f"""
-                SELECT DISTINCT v.record_json, c.component_key
-                FROM vulnerability_components c
-                JOIN vulnerabilities v ON v.canonical_id = c.canonical_id
-                WHERE c.component_key IN ({placeholders})
-                ORDER BY v.record_date DESC, v.updated_at DESC
-                LIMIT ?
-                """,
-                (*keys, max(100, int(limit) * 5)),
-            ).fetchall()
-        records: list[dict[str, Any]] = []
-        for row in rows:
-            record = self._decode_record(str(row["record_json"]))
-            dependency = key_to_dependency.get(str(row["component_key"]) or "")
-            if dependency and _record_affects_dependency(record, dependency):
-                record = _tag_dependency_record(record, dependency)
-                records.append(record)
-            if len(records) >= max(1, int(limit)):
+            for dependency, keys in dependency_keys:
+                placeholders = ",".join("?" for _ in keys)
+                rows = connection.execute(
+                    f"""
+                    SELECT DISTINCT v.record_json, c.component_key
+                    FROM vulnerability_components c
+                    JOIN vulnerabilities v ON v.canonical_id = c.canonical_id
+                    WHERE c.component_key IN ({placeholders})
+                    ORDER BY v.record_date DESC, v.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (*keys, row_budget),
+                ).fetchall()
+                for row in rows:
+                    record = self._decode_record(str(row["record_json"]))
+                    if not _record_affects_dependency(record, dependency):
+                        continue
+                    record = _tag_dependency_record(record, dependency)
+                    canonical_id = _canonical_vulnerability_id(record)
+                    if not canonical_id:
+                        continue
+                    existing = merged.get(canonical_id)
+                    if existing is None:
+                        merged[canonical_id] = record
+                    else:
+                        _merge_record(existing, record)
+        ranked = sorted(merged.values(), key=_vulnerability_match_priority, reverse=True)
+        # Every dependency keeps its most severe hits before the global limit
+        # fills remaining slots with the next best records across dependencies.
+        per_dependency_limit = max(1, -(-safe_limit // len(dependency_keys)))
+        quotas: dict[str, int] = {}
+        selected: list[dict[str, Any]] = []
+        overflow: list[dict[str, Any]] = []
+        for record in ranked:
+            owner = _record_dependency_owner(record)
+            used = quotas.get(owner, 0)
+            if used < per_dependency_limit:
+                quotas[owner] = used + 1
+                selected.append(record)
+            else:
+                overflow.append(record)
+        for record in overflow:
+            if len(selected) >= safe_limit:
                 break
-        return _records_by_canonical_vulnerability_id(_merge_records(records))
+            selected.append(record)
+        return _records_by_canonical_vulnerability_id(_merge_records(selected[:safe_limit]))
 
     def find_component_vulnerabilities(
         self,
@@ -452,6 +822,31 @@ class _VulnerabilityCatalog:
             if secure_key != key:
                 connection.execute("DELETE FROM catalog_metadata WHERE key = ?", (key,))
 
+    def save_query_snapshot(self, snapshot_key: str, generated_at: str, result: dict[str, Any]) -> None:
+        """Persist a range-query snapshot so every worker process answers
+        identical questions from the same immutable result within the TTL."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).replace(microsecond=0).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO range_query_snapshots(snapshot_key, generated_at, result_json) VALUES (?, ?, ?)",
+                (snapshot_key, generated_at, self._encode_record(result)),
+            )
+            connection.execute("DELETE FROM range_query_snapshots WHERE generated_at < ?", (cutoff,))
+
+    def load_query_snapshot(self, snapshot_key: str) -> tuple[str, dict[str, Any]] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT generated_at, result_json FROM range_query_snapshots WHERE snapshot_key = ?",
+                (snapshot_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            result = self._decode_record(str(row["result_json"]))
+        except Exception:  # noqa: BLE001 - a corrupt snapshot row must not break queries.
+            return None
+        return str(row["generated_at"]), result
+
     def snapshot(self, *, start: datetime | None = None, end: datetime | None = None) -> dict[str, Any]:
         clauses: list[str] = []
         values: list[str] = []
@@ -466,6 +861,10 @@ class _VulnerabilityCatalog:
         severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         with self._connect() as connection:
             total = int(connection.execute(f"SELECT COUNT(*) FROM vulnerabilities{where}", values).fetchone()[0])
+            poc_clause = "has_poc = 1"
+            poc_where = f" WHERE {' AND '.join([*clauses, poc_clause])}"
+            poc_count = int(connection.execute(f"SELECT COUNT(*) FROM vulnerabilities{poc_where}", values).fetchone()[0])
+            kev_count = int(connection.execute("SELECT COUNT(*) FROM known_exploited_vulnerabilities").fetchone()[0])
             rows = connection.execute(
                 f"SELECT severity, COUNT(*) AS count FROM vulnerabilities{where} GROUP BY severity",
                 values,
@@ -480,9 +879,24 @@ class _VulnerabilityCatalog:
                 f"SELECT record_json FROM vulnerabilities{recent_where} ORDER BY record_date DESC, updated_at DESC LIMIT 5",
                 values,
             ).fetchall()
+            today = datetime.now(timezone.utc).date()
+            trend_dates = [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+            trend_rows = connection.execute(
+                """
+                SELECT substr(updated_at, 1, 10) AS update_date, COUNT(*) AS count
+                FROM vulnerabilities
+                WHERE substr(updated_at, 1, 10) >= ? AND substr(updated_at, 1, 10) <= ?
+                GROUP BY substr(updated_at, 1, 10)
+                """,
+                (trend_dates[0], trend_dates[-1]),
+            ).fetchall()
+            trend_counts = {str(row["update_date"]): int(row["count"]) for row in trend_rows}
         return {
             "total": total,
             "severity": severity,
+            "kev_count": kev_count,
+            "poc_count": poc_count,
+            "trend": [{"date": value, "count": trend_counts.get(value, 0)} for value in trend_dates],
             "records": [self._decode_record(str(row["record_json"])) for row in recent_rows],
         }
 
@@ -548,7 +962,7 @@ class RealtimeIntelligenceService:
 
     def __init__(self, catalog_path: Path | None = None) -> None:
         self._lock = RLock()
-        self._catalog = _VulnerabilityCatalog(catalog_path or (DATA_DIR / "vulnerability_catalog.sqlite3"))
+        self._catalog = _VulnerabilityCatalog(catalog_path or _default_catalog_path())
         self._recent: list[dict[str, Any]] = []
         self._batch_records: list[dict[str, Any]] = []
         self._batch_sources: list[dict[str, Any]] = []
@@ -567,6 +981,7 @@ class RealtimeIntelligenceService:
         limit: int = 10,
         sources: list[str] | None = None,
         response_language: str = "zh-Hans",
+        user_id: str = "default",
     ) -> dict[str, Any]:
         clean_query = " ".join(str(query or "").split())
         if not clean_query:
@@ -583,11 +998,15 @@ class RealtimeIntelligenceService:
         repair_local_catalog = False
         if identifier:
             local_records = self._catalog.find_by_identifier(identifier.group(0).upper(), limit)
+            if local_records and language == "zh-Hans" and not records_translation_ready(local_records, language):
+                localized = self._catalog.upsert(local_records, user_id=user_id)
+                if localized:
+                    local_records = localized
             if local_records and not any(_record_needs_realtime_enrichment(record) for record in local_records):
                 merged = _merge_records(local_records)[:limit]
                 merged = _enrich_records_with_reference_patches(merged)
                 graph = build_knowledge_graph(merged, clean_query, language=language)
-                public_records = _public_records(merged)
+                public_records = _public_records(merged, language)
                 trace.append(_trace("query_local_catalog", f"本地漏洞 catalog 命中 {len(public_records)} 条记录。"))
                 trace.append(_trace("enrich_knowledge_graph", f"已生成 {len(graph['nodes'])} 个节点和 {len(graph['edges'])} 条关联。"))
                 result = {
@@ -599,6 +1018,7 @@ class RealtimeIntelligenceService:
                     "trace": [*trace, _trace("compose_result", "已优先使用本地漏洞情报生成结果。", "success")],
                     "persistence": "local-catalog",
                     "persisted": {"inserted": 0, "updated": 0},
+                    "catalog_translation": _catalog_translation_status(merged, language),
                     "generated_at": now_iso(),
                 }
                 self._remember(result)
@@ -644,13 +1064,41 @@ class RealtimeIntelligenceService:
         trace.append(_trace("normalize_records", f"按漏洞编号和别名归并为 {len(merged)} 条记录。"))
         persisted = {"inserted": 0, "updated": 0}
         persistence = "api-only"
-        if repair_local_catalog and merged:
-            self._catalog.upsert(merged)
-            persisted["updated"] = len(merged)
-            persistence = "local-catalog-refreshed"
-            trace.append(_trace("refresh_local_catalog", f"已补全 {len(merged)} 条本地漏洞事实。"))
+        if merged:
+            stored = self._catalog.upsert(merged, user_id=user_id)
+            if stored:
+                merged = stored
+            translation_ready = _catalog_translation_status(merged, language)["status"] == "completed"
+            if repair_local_catalog:
+                persisted["updated"] = len(merged)
+                persistence = "local-catalog-refreshed"
+                trace.append(
+                    _trace(
+                        "refresh_local_catalog",
+                        (
+                            f"已翻译并补全 {len(merged)} 条本地漏洞事实。"
+                            if translation_ready
+                            else f"已补全并写入 {len(merged)} 条漏洞事实，中文译文等待后续重试。"
+                        ),
+                        "completed" if translation_ready else "warning",
+                    )
+                )
+            else:
+                persisted["inserted"] = len(merged)
+                persistence = "local-catalog-written"
+                trace.append(
+                    _trace(
+                        "persist_local_catalog",
+                        (
+                            f"已在入库前完成中文化并写入 {len(merged)} 条漏洞事实。"
+                            if translation_ready
+                            else f"已写入 {len(merged)} 条漏洞事实，中文译文等待后续重试。"
+                        ),
+                        "completed" if translation_ready else "warning",
+                    )
+                )
         graph = build_knowledge_graph(merged, clean_query, language=language)
-        public_records = _public_records(merged)
+        public_records = _public_records(merged, language)
         trace.append(_trace("enrich_knowledge_graph", f"已生成 {len(graph['nodes'])} 个节点和 {len(graph['edges'])} 条关联。"))
         status = "success" if merged else "warning"
         result = {
@@ -662,6 +1110,7 @@ class RealtimeIntelligenceService:
             "trace": [*trace, _trace("compose_result", "实时查询与图谱富化完成。", status)],
             "persistence": persistence,
             "persisted": persisted,
+            "catalog_translation": _catalog_translation_status(merged, language),
             "generated_at": now_iso(),
         }
         self._remember(result)
@@ -673,6 +1122,7 @@ class RealtimeIntelligenceService:
         *,
         limit_per_dependency: int = 5,
         response_language: str = "zh-Hans",
+        user_id: str = "default",
     ) -> dict[str, Any]:
         clean_dependencies = _normalize_dependency_facts(dependencies)
         language = _normalize_response_language(response_language)
@@ -732,6 +1182,10 @@ class RealtimeIntelligenceService:
             )
 
         records: list[dict[str, Any]] = self._catalog.find_by_dependencies(queried_dependencies, limit=max(10, len(queried_dependencies) * limit_per_dependency))
+        if records and language == "zh-Hans" and not records_translation_ready(records, language):
+            localized = self._catalog.upsert(records, user_id=user_id)
+            if localized:
+                records = localized
         local_record_count = len(records)
         source_status: list[dict[str, Any]] = []
         if records:
@@ -814,7 +1268,23 @@ class RealtimeIntelligenceService:
 
         merged = _records_by_canonical_vulnerability_id(_merge_records(records))
         merged = [record for record in merged if not record.get("lookup_error")]
-        public_records = _public_records(merged)
+        if api_records and merged:
+            stored = self._catalog.upsert(merged, user_id=user_id)
+            if stored:
+                merged = stored
+            translation_ready = _catalog_translation_status(merged, language)["status"] == "completed"
+            trace.append(
+                _trace(
+                    "persist_local_catalog",
+                    (
+                        f"已在入库前翻译并写回 {len(merged)} 条依赖漏洞事实。"
+                        if translation_ready
+                        else f"已写回 {len(merged)} 条依赖漏洞事实，中文译文等待后续重试。"
+                    ),
+                    "completed" if translation_ready else "warning",
+                )
+            )
+        public_records = _public_records(merged, language)
         graph = build_knowledge_graph(merged, "dependency-scan", language=language)
         trace.append(_trace("query_dependencies", f"依赖漏洞匹配命中 {len(public_records)} 条归并记录。", "completed" if public_records else "warning"))
         trace.append(_trace("enrich_knowledge_graph", f"已生成 {len(graph['nodes'])} 个节点和 {len(graph['edges'])} 条关联。", "completed" if graph.get("node_count") else "warning"))
@@ -826,8 +1296,12 @@ class RealtimeIntelligenceService:
             "dependencies": clean_dependencies,
             "source_status": _public_source_status(source_status),
             "trace": [*trace, _trace("compose_result", "依赖漏洞报告生成完成。", "success" if public_records else "warning")],
-            "persistence": "local-first" if local_record_count else "api-only",
-            "persisted": {"inserted": 0, "updated": 0},
+            "persistence": "local-first" if local_record_count else "local-catalog-written" if api_records else "api-only",
+            "persisted": {
+                "inserted": len(merged) if api_records and not local_record_count else 0,
+                "updated": len(merged) if api_records and local_record_count else 0,
+            },
+            "catalog_translation": _catalog_translation_status(merged, language),
             "generated_at": now_iso(),
         }
         self._remember(result)
@@ -841,14 +1315,18 @@ class RealtimeIntelligenceService:
         ecosystem: str = "",
         include_realtime: bool = True,
         preview_limit: int = 200,
+        response_language: str = "zh-Hans",
+        user_id: str = "default",
     ) -> dict[str, Any]:
+        language = _normalize_response_language(response_language)
         records, metadata = self._resolve_component_vulnerabilities(
             name,
             version,
             ecosystem=ecosystem,
             include_realtime=include_realtime,
+            user_id=user_id,
         )
-        public_records = _public_records(records)
+        public_records = _public_records(records, language)
         visible_limit = max(1, min(int(preview_limit), _COMPONENT_GRAPH_RECORD_LIMIT))
         graph_records = records[:visible_limit]
         query = f"{metadata['name']}@{metadata['version']}"
@@ -865,8 +1343,9 @@ class RealtimeIntelligenceService:
             "preview_limit": visible_limit,
             "truncated": metadata["truncated"],
             "ecosystems": metadata["ecosystems"],
-            "graph": build_knowledge_graph(graph_records, query),
+            "graph": build_knowledge_graph(graph_records, query, language=language),
             "source": metadata["source"],
+            "catalog_translation": _catalog_translation_status(records, language),
             "generated_at": metadata["generated_at"],
         }
 
@@ -880,33 +1359,53 @@ class RealtimeIntelligenceService:
         component_names: list[str] | None = None,
         include_realtime: bool = True,
         limit: int = 5000,
+        response_language: str = "zh-Hans",
     ) -> dict[str, Any]:
         range_start, range_end = _dashboard_date_range(start_date, end_date)
         if range_start is None or range_end is None:
             raise ValueError("组件漏洞目录必须提供开始日期和结束日期")
         safe_limit = max(1, min(int(limit), _COMPONENT_EXPORT_RECORD_LIMIT))
+        ecosystem_filter = {str(value).strip().casefold() for value in ecosystems or [] if str(value).strip()}
+        severity_filter = {str(value).strip().upper() for value in severities or [] if str(value).strip()}
+        name_filter = {str(value).strip().casefold() for value in component_names or [] if str(value).strip()}
+        language = _normalize_response_language(response_language)
+        query = f"component-catalog:{start_date}:{end_date}:{language}"
+        if include_realtime:
+            # Repeated identical questions inside the TTL return the exact same
+            # snapshot, immune to background ingestion that lands between asks.
+            cached = self._recent_catalog_snapshot(query, ecosystem_filter, severity_filter, name_filter)
+            if cached is not None:
+                return cached
         source_status: list[dict[str, Any]] = []
         realtime_refreshed = False
         if include_realtime:
-            try:
-                refreshed = self.refresh_dashboard_batch(
-                    start_date=start_date,
-                    end_date=end_date,
-                    limit=min(safe_limit, _BATCH_LIMIT),
-                )
-                source_status = list(refreshed.get("sources") or [])
-                realtime_refreshed = True
-            except Exception:  # noqa: BLE001 - the encrypted catalog remains queryable when upstream sources fail.
+            refresh_key = f"range_refresh:{str(start_date)[:10]}:{str(end_date)[:10]}"
+            last_refresh = _parse_catalog_timestamp(self._catalog.metadata(refresh_key))
+            refresh_age = (
+                (datetime.now(timezone.utc) - last_refresh).total_seconds() if last_refresh is not None else None
+            )
+            if refresh_age is not None and refresh_age < _RANGE_REFRESH_TTL_SECONDS:
+                # The range was refreshed moments ago: answer from the stable
+                # local snapshot so repeated questions return identical counts.
                 source_status = self.sources_status()
+            else:
+                try:
+                    refreshed = self.refresh_dashboard_batch(
+                        start_date=start_date,
+                        end_date=end_date,
+                        limit=min(safe_limit, _BATCH_LIMIT),
+                    )
+                    source_status = list(refreshed.get("sources") or [])
+                    realtime_refreshed = True
+                    self._catalog.set_metadata(refresh_key, now_iso())
+                except Exception:  # noqa: BLE001 - the encrypted catalog remains queryable when upstream sources fail.
+                    source_status = self.sources_status()
 
         records, catalog_truncated = self._catalog.component_records_in_range(
             start=range_start,
             end=range_end,
             limit=_COMPONENT_EXPORT_RECORD_LIMIT,
         )
-        ecosystem_filter = {str(value).strip().casefold() for value in ecosystems or [] if str(value).strip()}
-        severity_filter = {str(value).strip().upper() for value in severities or [] if str(value).strip()}
-        name_filter = {str(value).strip().casefold() for value in component_names or [] if str(value).strip()}
         filtered: list[dict[str, Any]] = []
         for record in records:
             if severity_filter and str(record.get("severity") or "UNKNOWN").upper() not in severity_filter:
@@ -951,9 +1450,8 @@ class RealtimeIntelligenceService:
                 name = str(component.get("name") or "未提供组件名称").strip() or "未提供组件名称"
                 component_keys.add(f"{ecosystem.casefold()}|{name.casefold()}")
                 ecosystem_counts[ecosystem] = ecosystem_counts.get(ecosystem, 0) + 1
-        query = f"component-catalog:{start_date}:{end_date}"
-        graph_records = visible[: min(200, len(visible))]
-        public_records = _public_records(visible)
+        graph_records = visible[: min(_COMPONENT_GRAPH_RECORD_LIMIT, len(visible))]
+        public_records = _public_records(visible, language)
         from app.vulnerability_export import component_catalog_result_fingerprint
 
         result = {
@@ -975,6 +1473,7 @@ class RealtimeIntelligenceService:
             "graph": build_knowledge_graph(graph_records, query),
             "source_status": _public_source_status(source_status),
             "source": "local-catalog+realtime" if realtime_refreshed else "local-catalog",
+            "catalog_translation": _catalog_translation_status(visible, language),
             "generated_at": now_iso(),
             "result_sha256": component_catalog_result_fingerprint(
                 public_records,
@@ -988,7 +1487,21 @@ class RealtimeIntelligenceService:
             ),
         }
         self._remember(result)
+        self._remember_catalog_snapshot(result)
         return deepcopy(result)
+
+    def persist_component_summary_translations(self, translations: list[dict[str, str]]) -> int:
+        """Persist report-time translations and evict stale range snapshots."""
+
+        persisted = self._catalog.persist_summary_translations(translations)
+        if persisted:
+            with self._lock:
+                self._recent = [
+                    item
+                    for item in self._recent
+                    if not str(item.get("query") or "").startswith("component-catalog:")
+                ]
+        return persisted
 
     @staticmethod
     def export_component_vulnerability_catalog(
@@ -1094,6 +1607,7 @@ class RealtimeIntelligenceService:
         *,
         ecosystem: str,
         include_realtime: bool,
+        user_id: str = "default",
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         clean_name = " ".join(str(name or "").split())
         clean_version = str(version or "").strip()
@@ -1124,8 +1638,10 @@ class RealtimeIntelligenceService:
                 truncated = truncated or len(realtime_records) >= _COMPONENT_REALTIME_RECORD_LIMIT
 
         merged = _records_by_canonical_vulnerability_id(_merge_records(records))[:_COMPONENT_EXPORT_RECORD_LIMIT]
-        if realtime_records and merged:
-            self._catalog.upsert(merged)
+        if merged and (realtime_records or not records_translation_ready(merged, "zh-Hans")):
+            stored = self._catalog.upsert(merged, user_id=user_id)
+            if stored:
+                merged = stored
         ecosystems = sorted({*discovered_ecosystems, *([clean_ecosystem] if clean_ecosystem else [])})
         return merged, {
             "name": clean_name,
@@ -1141,31 +1657,49 @@ class RealtimeIntelligenceService:
         with self._lock:
             return deepcopy(self._recent)
 
-    def start_batch_scheduler(self, interval_seconds: int = _BATCH_INTERVAL_SECONDS) -> None:
+    def start_batch_scheduler(
+        self,
+        interval_seconds: int = _BATCH_INTERVAL_SECONDS,
+        startup_delay_seconds: float | None = None,
+    ) -> None:
         with self._lock:
             if self._scheduler_thread and self._scheduler_thread.is_alive():
                 return
+            configured_delay = startup_delay_seconds
+            if configured_delay is None:
+                try:
+                    configured_delay = float(os.getenv("SECFLOW_BACKGROUND_STARTUP_DELAY_SECONDS", "0") or 0)
+                except ValueError:
+                    configured_delay = 0.0
+            startup_delay = max(0.0, float(configured_delay))
             stop = Event()
             self._scheduler_stop = stop
             self._scheduler_thread = Thread(
                 target=self._batch_scheduler_loop,
-                args=(max(60, int(interval_seconds)), stop),
+                args=(max(60, int(interval_seconds)), stop, startup_delay),
                 daemon=True,
                 name="secflow-intelligence-batch-refresh",
             )
             self._scheduler_thread.start()
-            if self._catalog.encryption_migration_pending():
+            if (
+                self._catalog.encryption_migration_pending()
+                or self._catalog.metrics_migration_pending()
+                or self._catalog.translation_migration_pending()
+            ):
                 self._catalog_migration_thread = Thread(
-                    target=self._catalog.migrate_encrypted_catalog_incrementally,
-                    args=(stop,),
+                    target=self._run_delayed_background_job,
+                    args=(stop, startup_delay, self._catalog.migrate_catalog_incrementally),
                     daemon=True,
                     name="secflow-catalog-encryption-migration",
                 )
                 self._catalog_migration_thread.start()
-            if self._catalog.metadata("baseline_complete") != "true":
+            if (
+                _environment_flag("SECFLOW_ENABLE_FULL_CATALOG_BOOTSTRAP", default=True)
+                and self._catalog.metadata("baseline_complete") != "true"
+            ):
                 self._bootstrap_thread = Thread(
-                    target=self._bootstrap_catalog,
-                    args=(stop,),
+                    target=self._run_delayed_background_job,
+                    args=(stop, startup_delay, self._bootstrap_catalog),
                     daemon=True,
                     name="secflow-vulnerability-catalog-bootstrap",
                 )
@@ -1188,6 +1722,9 @@ class RealtimeIntelligenceService:
     ) -> dict[str, Any]:
         limit = max(1, min(int(limit), 1000))
         days = max(1, min(int(days), 30))
+        if self._catalog.metrics_migration_pending():
+            self._refresh_cisa_kev()
+            return self.dashboard(start_date=start_date, end_date=end_date)
         range_start, range_end = _dashboard_date_range(start_date, end_date)
         if range_start is None:
             query_end = datetime.now(timezone.utc)
@@ -1204,7 +1741,7 @@ class RealtimeIntelligenceService:
         try:
             records: list[dict[str, Any]] = []
             source_status: list[dict[str, Any]] = []
-            executor = ThreadPoolExecutor(max_workers=2)
+            executor = ThreadPoolExecutor(max_workers=3)
             batch_stop = Event()
             try:
                 futures = {
@@ -1216,6 +1753,7 @@ class RealtimeIntelligenceService:
                         date_field,
                         batch_stop,
                     ): "github_advisory",
+                    executor.submit(self._query_cisa_kev): "cisa_kev",
                 }
                 completed, timed_out_sources = _collect_futures_with_budget(futures, _dashboard_refresh_budget_seconds())
             finally:
@@ -1224,12 +1762,19 @@ class RealtimeIntelligenceService:
 
             for source, outcome in completed:
                 if isinstance(outcome, Exception):
+                    if source == "cisa_kev":
+                        continue
                     source_status.append({"id": source, "status": "failed", "count": 0, "message": "接口查询失败"})
+                    continue
+                if source == "cisa_kev":
+                    self._catalog.replace_known_exploited(outcome)
                     continue
                 source_records = outcome
                 records.extend(source_records)
                 source_status.append({"id": source, "status": "success", "count": len(source_records), "message": "查询完成"})
             for source in timed_out_sources:
+                if source == "cisa_kev":
+                    continue
                 source_status.append({"id": source, "status": "warning", "count": 0, "message": "接口查询超时，已跳过"})
 
             identifiers = _record_identifiers(records)[: min(limit, 100)]
@@ -1249,8 +1794,10 @@ class RealtimeIntelligenceService:
                 source_status.append({"id": "osv", "status": "failed", "count": 0, "message": "接口查询失败"})
 
             merged = _records_by_canonical_vulnerability_id(_merge_records(records))
-            self._catalog.upsert(merged)
-            public_records = _public_records(merged)
+            stored = self._catalog.upsert(merged)
+            if stored:
+                merged = stored
+            public_records = _public_records(merged, "zh-Hans")
             public_sources = _public_source_status(source_status)
             graph = build_knowledge_graph(merged[:20], "batch-dashboard")
             generated_at = now_iso()
@@ -1264,6 +1811,18 @@ class RealtimeIntelligenceService:
         finally:
             with self._lock:
                 self._batch_refreshing = False
+
+    def _refresh_cisa_kev(self) -> None:
+        try:
+            self._catalog.replace_known_exploited(self._query_cisa_kev())
+        except Exception:  # noqa: BLE001 - preserve the last successful cached catalog.
+            pass
+
+    def _wait_for_metrics_migration(self, stop: Event) -> bool:
+        while self._catalog.metrics_migration_pending():
+            if stop.wait(0.1):
+                return False
+        return not stop.is_set()
 
     def dashboard(
         self,
@@ -1292,6 +1851,11 @@ class RealtimeIntelligenceService:
             "query_count": snapshot["total"],
             "graph_node_count": int(graph.get("node_count") or 0),
             "severity": severity,
+            "known_exploited_count": snapshot["kev_count"],
+            "kev_count": snapshot["kev_count"],
+            "poc_count": snapshot["poc_count"],
+            "exploited_count": snapshot["poc_count"],
+            "recent_update_trend": snapshot["trend"],
             "recent_records": _public_records(snapshot["records"]),
             "sources": sources if sources else self.sources_status(),
             "persistence": "local-catalog",
@@ -1302,6 +1866,7 @@ class RealtimeIntelligenceService:
             "catalog_status": catalog_status,
             "catalog_progress": max(0, min(catalog_progress, 100)),
             "catalog_count": catalog_snapshot["total"],
+            "catalog_error": self._catalog.metadata("baseline_error", ""),
         }
 
     def sources_status(self, latest: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -1321,7 +1886,88 @@ class RealtimeIntelligenceService:
             self._recent.insert(0, deepcopy(result))
             self._recent = self._recent[:30]
 
-    def _batch_scheduler_loop(self, interval_seconds: int, stop: Event) -> None:
+    @staticmethod
+    def _catalog_snapshot_key(query: str, expected_filters: dict[str, list[str]]) -> str:
+        material = json.dumps({"query": query, "filters": expected_filters}, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(f"secflow-range-snapshot:{material}".encode("utf-8")).hexdigest()
+
+    def _recent_catalog_snapshot(
+        self,
+        query: str,
+        ecosystem_filter: set[str],
+        severity_filter: set[str],
+        name_filter: set[str],
+    ) -> dict[str, Any] | None:
+        expected_filters = {
+            "ecosystems": sorted(ecosystem_filter),
+            "severities": sorted(severity_filter),
+            "component_names": sorted(name_filter),
+        }
+
+        def _fresh(entry: dict[str, Any], generated_at: str) -> dict[str, Any] | None:
+            generated = _parse_catalog_timestamp(generated_at)
+            if generated is None:
+                return None
+            age = (datetime.now(timezone.utc) - generated).total_seconds()
+            if age < 0 or age >= _RANGE_REFRESH_TTL_SECONDS:
+                return None
+            return deepcopy(entry)
+
+        with self._lock:
+            recent = list(self._recent)
+        for entry in recent:
+            if str(entry.get("query") or "") != query:
+                continue
+            if dict(entry.get("filters") or {}) != expected_filters:
+                continue
+            fresh = _fresh(entry, str(entry.get("generated_at") or ""))
+            if fresh is not None:
+                return fresh
+        # Fall back to the catalog-shared snapshot so sibling worker processes
+        # answer identical questions from the same immutable result.
+        shared = self._catalog.load_query_snapshot(self._catalog_snapshot_key(query, expected_filters))
+        if shared is None:
+            return None
+        generated_at, result = shared
+        return _fresh(result, generated_at)
+
+    def _remember_catalog_snapshot(self, result: dict[str, Any]) -> None:
+        query = str(result.get("query") or "")
+        if not query.startswith("component-catalog:"):
+            return
+        filters = result.get("filters") if isinstance(result.get("filters"), dict) else {}
+        expected_filters = {
+            "ecosystems": sorted(str(v) for v in filters.get("ecosystems") or []),
+            "severities": sorted(str(v) for v in filters.get("severities") or []),
+            "component_names": sorted(str(v) for v in filters.get("component_names") or []),
+        }
+        generated_at = str(result.get("generated_at") or "").strip() or now_iso()
+        try:
+            self._catalog.save_query_snapshot(
+                self._catalog_snapshot_key(query, expected_filters),
+                generated_at,
+                result,
+            )
+        except Exception:  # noqa: BLE001 - snapshot persistence is best-effort.
+            pass
+
+    @staticmethod
+    def _run_delayed_background_job(stop: Event, startup_delay_seconds: float, job) -> None:
+        if startup_delay_seconds and stop.wait(startup_delay_seconds):
+            return
+        job(stop)
+
+    def _batch_scheduler_loop(
+        self,
+        interval_seconds: int,
+        stop: Event,
+        startup_delay_seconds: float = 0.0,
+    ) -> None:
+        if startup_delay_seconds and stop.wait(startup_delay_seconds):
+            return
+        self._refresh_cisa_kev()
+        if not self._wait_for_metrics_migration(stop):
+            return
         while not stop.is_set():
             try:
                 self.refresh_dashboard_batch()
@@ -1331,6 +1977,8 @@ class RealtimeIntelligenceService:
                 return
 
     def _bootstrap_catalog(self, stop: Event) -> None:
+        if not self._wait_for_metrics_migration(stop):
+            return
         self._cleanup_plaintext_feed_archives()
         feeds_dir = DATA_DIR / ".secflow-feed-cache"
         feeds_dir.mkdir(parents=True, exist_ok=True)
@@ -1339,6 +1987,7 @@ class RealtimeIntelligenceService:
         total_steps = end_year - start_year + 2
         completed_steps = 0
         self._catalog.set_metadata("baseline_status", "building")
+        self._catalog.set_metadata("baseline_error", "")
         try:
             for year in range(start_year, end_year + 1):
                 if stop.is_set():
@@ -1372,8 +2021,10 @@ class RealtimeIntelligenceService:
             self._catalog.set_metadata("baseline_progress", "100")
             self._catalog.set_metadata("baseline_status", "ready")
             self._catalog.set_metadata("baseline_complete", "true")
-        except Exception:  # noqa: BLE001 - the incremental API path remains available while bootstrap retries later.
+        except Exception as exc:  # noqa: BLE001 - the incremental API path remains available while bootstrap retries later.
             self._catalog.set_metadata("baseline_status", "retrying")
+            error_type = type(exc).__name__
+            self._catalog.set_metadata("baseline_error", f"{error_type}：完整漏洞目录同步失败，将在下次启动时断点续传。")
 
     @staticmethod
     def _download_archive(url: str, destination: Path, stop: Event) -> None:
@@ -1470,6 +2121,30 @@ class RealtimeIntelligenceService:
                     start_index += len(vulnerabilities)
                 window_start = window_end
         return records
+
+    @staticmethod
+    def _query_cisa_kev() -> list[dict[str, Any]]:
+        response = httpx.get(
+            _CISA_KEV_URL,
+            headers=default_headers(),
+            timeout=12.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        vulnerabilities = payload.get("vulnerabilities") if isinstance(payload, dict) else []
+        if not isinstance(vulnerabilities, list):
+            return []
+        released_at = str(payload.get("dateReleased") or now_iso())
+        return [
+            {
+                "cve_id": str(item.get("cveID") or "").strip().upper(),
+                "date_added": str(item.get("dateAdded") or "").strip(),
+                "updated_at": released_at,
+            }
+            for item in vulnerabilities
+            if isinstance(item, dict) and CVE_ID.fullmatch(str(item.get("cveID") or "").strip().upper())
+        ]
 
     @staticmethod
     def _query_github_batch(
@@ -1719,8 +2394,8 @@ def build_knowledge_graph(records: list[dict[str, Any]], query: str = "", langua
             severity=record.get("severity", "UNKNOWN"),
             severity_zh=_severity_label(record.get("severity", "UNKNOWN"), language),
             cvss_score=record.get("cvss_score"),
-            title=record.get("title", ""),
-            summary=record.get("summary", ""),
+            title=record_title_for_language(record, language),
+            summary=record_summary_for_language(record, language),
             summary_zh=_localized_vulnerability_summary(record, language) if localize_summary else "",
             affected_versions=record.get("affected_versions") or [],
             fixed_versions=record.get("fixed_versions") or [],
@@ -1837,7 +2512,10 @@ def _not_specified(language: str) -> str:
 
 def _localized_vulnerability_summary(record: dict[str, Any], language: str = "zh-Hans") -> str:
     language = _normalize_response_language(language)
-    summary = str(record.get("summary") or record.get("title") or "").strip()
+    summary = str(
+        record_summary_for_language(record, language)
+        or record_title_for_language(record, language)
+    ).strip()
     if not summary:
         return _fallback_vulnerability_summary(record, language)
     if language == "zh-Hans" and _contains_cjk(summary):
@@ -1861,7 +2539,10 @@ def localized_vulnerability_summary(
     """Return a public, sanitized description in the requested report language."""
 
     language = _normalize_response_language(language)
-    summary = str(record.get("summary") or record.get("title") or "").strip()
+    summary = str(
+        record_summary_for_language(record, language)
+        or record_title_for_language(record, language)
+    ).strip()
     if prefer_translation and summary:
         requires_translation = (language == "zh-Hans" and not _contains_cjk(summary)) or (
             language == "en" and _contains_cjk(summary)
@@ -1892,6 +2573,7 @@ def _translate_vulnerability_summary(summary: str, language: str = "zh-Hans") ->
             },
             {"role": "user", "content": summary[:1800]},
         ],
+        source="intelligence_translation",
     )
     if result.get("status") != "success":
         return ""
@@ -2474,6 +3156,7 @@ def _osv_record(item: dict[str, Any]) -> dict[str, Any]:
         "cwes": _unique([str(value).upper() for value in database.get("cwe_ids") or []]),
         "components": components,
         "references": _unique(references),
+        "has_poc": _references_have_poc(item.get("references") or references),
         "published_at": item.get("published") or "",
         "updated_at": item.get("modified") or now_iso(),
         "provenance": ["osv"],
@@ -2591,6 +3274,28 @@ def _records_by_canonical_vulnerability_id(records: list[dict[str, Any]]) -> lis
     return result
 
 
+def _vulnerability_match_priority(record: dict[str, Any]) -> tuple[int, int, int, float, str]:
+    """Rank matched records so severe, exploited vulnerabilities survive caps."""
+
+    try:
+        cvss = float(record.get("cvss_score"))
+    except (TypeError, ValueError):
+        cvss = 0.0
+    return (
+        _SEVERITY_RANK.get(str(record.get("severity") or "UNKNOWN").upper(), 0),
+        1 if record.get("known_exploited") else 0,
+        1 if record.get("has_poc") else 0,
+        cvss,
+        str(record.get("updated_at") or record.get("published_at") or ""),
+    )
+
+
+def _record_dependency_owner(record: dict[str, Any]) -> str:
+    matched = record.get("matched_dependencies") or []
+    first = matched[0] if matched and isinstance(matched[0], dict) else {}
+    return f"{first.get('ecosystem') or ''}:{first.get('name') or ''}".lower()
+
+
 def _canonical_vulnerability_id(record: dict[str, Any]) -> str:
     values = [record.get("id"), *record.get("aliases", [])]
     for value in values:
@@ -2609,6 +3314,8 @@ def _merge_record(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     cve = next((value for value in target["aliases"] if str(value).startswith("CVE-")), None)
     if cve:
         target["id"] = cve
+    target["known_exploited"] = bool(target.get("known_exploited") or incoming.get("known_exploited"))
+    target["has_poc"] = _record_has_poc(target) or _record_has_poc(incoming)
     for key in ("affected_versions", "fixed_versions", "code_snippets", "fixed_code_snippets", "cwes", "references", "provenance", "matched_dependencies"):
         target[key] = _unique([*target.get(key, []), *incoming.get(key, [])])
     component_map = {f"{item.get('ecosystem')}:{item.get('name')}".lower(): deepcopy(item) for item in target.get("components", [])}
@@ -2633,9 +3340,22 @@ def _merge_record(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     for key in ("title", "summary"):
         if not target.get(key) and incoming.get(key):
             target[key] = incoming[key]
+    # Keep an accepted catalog translation across source merges.  New upstream
+    # facts replace a pending translation, while a transient translation outage
+    # must not erase a previously stored Chinese rendering.
+    if record_translation_ready(incoming) and not record_translation_ready(target):
+        for key in ("title_original", "summary_original", "title_zh", "summary_zh", "catalog_translation"):
+            if key in incoming:
+                target[key] = deepcopy(incoming[key])
+    # Window queries key on published_at (record_date). Multiple sources report
+    # different publication dates for the same vulnerability (CVE assignment
+    # date vs. advisory publication date). min() let an older source yank a
+    # record out of its month depending on batch order, making identical
+    # range queries alternate between two totals. max() is order-independent
+    # and idempotent: once any source places the record in a month, it stays.
     published_values = [str(value) for value in (target.get("published_at"), incoming.get("published_at")) if value]
     if published_values:
-        target["published_at"] = min(published_values)
+        target["published_at"] = max(published_values)
     updated_values = [str(value) for value in (target.get("updated_at"), incoming.get("updated_at")) if value]
     if updated_values:
         target["updated_at"] = max(updated_values)
@@ -2986,8 +3706,15 @@ def _positive_float_env(name: str, default: float, *, minimum: float, maximum: f
 
 def _public_source_status(statuses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     order = {source: index for index, source in enumerate(_FIXED_SOURCE_ORDER)}
+    source_labels = {
+        "nvd": ("NVD 漏洞数据库", "漏洞数据库"),
+        "github_advisory": ("GitHub 安全公告", "开源安全公告"),
+        "osv": ("OSV 开源漏洞库", "开源漏洞数据库"),
+    }
     result: list[dict[str, Any]] = []
-    for index, item in enumerate(sorted(statuses, key=lambda value: order.get(str(value.get("id")), 99)), start=1):
+    for item in sorted(statuses, key=lambda value: order.get(str(value.get("id")), 99)):
+        source_id = str(item.get("id") or "")
+        name, kind = source_labels.get(source_id, ("公开漏洞情报", "漏洞情报来源"))
         status = str(item.get("status") or "ready")
         count = int(item.get("count") or item.get("last_count") or 0)
         if status == "success":
@@ -3000,9 +3727,9 @@ def _public_source_status(statuses: list[dict[str, Any]]) -> list[dict[str, Any]
             message = "等待查询"
         result.append(
             {
-                "id": f"intel_{index}",
-                "name": f"情报接口 {index}",
-                "kind": "固定接口",
+                "id": source_id,
+                "name": name,
+                "kind": kind,
                 "enabled": True,
                 "status": status,
                 "count": count,
@@ -3013,16 +3740,43 @@ def _public_source_status(statuses: list[dict[str, Any]]) -> list[dict[str, Any]
     return result
 
 
-def _public_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") -> list[dict[str, Any]]:
     """Remove upstream provenance from records returned to the desktop client."""
 
-    private_keys = {"source", "sources", "provenance", "references", "collection", "collection_name", "provider"}
+    language = _normalize_response_language(language)
+    private_keys = {
+        "source",
+        "sources",
+        "provenance",
+        "references",
+        "collection",
+        "collection_name",
+        "provider",
+        "title_original",
+        "summary_original",
+        "title_zh",
+        "summary_zh",
+        "catalog_translation",
+    }
     result: list[dict[str, Any]] = []
     for record in records:
         item = {key: deepcopy(value) for key, value in record.items() if key not in private_keys}
+        item["title"] = record_title_for_language(record, language)
+        item["summary"] = record_summary_for_language(record, language)
         item["reference_links"] = _public_reference_links(record)
         result.append(item)
     return result
+
+
+def _catalog_translation_status(records: list[dict[str, Any]], language: str) -> dict[str, Any]:
+    ready = records_translation_ready(records, language)
+    return {
+        "status": "completed" if ready else "pending",
+        "target_language": _normalize_response_language(language),
+        "storage_stage": "before-persist",
+        "record_count": len(records),
+        "ready_records": sum(record_translation_ready(record, language) for record in records),
+    }
 
 
 def _catalog_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -3030,10 +3784,48 @@ def _catalog_record(record: dict[str, Any]) -> dict[str, Any]:
 
     item = deepcopy(record)
     item["normalization_version"] = _RECORD_NORMALIZATION_VERSION
+    item["has_poc"] = _record_has_poc(item)
     item["references"] = _public_reference_links(item, limit=100)
     item.pop("reference_links", None)
     item.pop("lookup_error", None)
     return item
+
+
+def _record_has_poc(record: dict[str, Any]) -> bool:
+    if any(bool(record.get(key)) for key in ("poc", "has_poc", "exploit_available", "public_exploit")):
+        return True
+    return _references_have_poc(record.get("references") or record.get("reference_links") or [])
+
+
+def _references_have_poc(references: Any) -> bool:
+    values = references if isinstance(references, list) else [references]
+    for reference in values:
+        if isinstance(reference, dict):
+            tags = {str(tag or "").strip().casefold() for tag in reference.get("tags") or []}
+            if "exploit" in tags or "proof of concept" in tags or "poc" in tags:
+                return True
+            value = str(reference.get("url") or "")
+        else:
+            value = str(reference or "")
+        lowered = value.strip().casefold()
+        if not lowered.startswith(("https://", "http://")):
+            continue
+        if any(
+            marker in lowered
+            for marker in (
+                "exploit-db.com/exploits/",
+                "packetstormsecurity.com/files/",
+                "rapid7.com/db/modules/exploit/",
+                "github.com/offensive-security/exploitdb/",
+                "/proof-of-concept/",
+                "/proof_of_concept/",
+                "/poc/",
+                "-poc/",
+                "_poc/",
+            )
+        ):
+            return True
+    return False
 
 
 def _trace(node: str, message: str, status: str = "completed") -> dict[str, Any]:

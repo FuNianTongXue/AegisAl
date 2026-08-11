@@ -40,56 +40,67 @@ struct APIClient {
         baseURL = url
     }
 
-    func loadConfig() async throws -> ConfigSnapshot {
-        try await request("api/config")
+    func loadConfig(userID: String = "default") async throws -> ConfigSnapshot {
+        try await request("api/config", queryItems: userQuery(userID))
     }
 
-    func loadRuntime() async throws -> RuntimeStatus {
-        try await request("api/system/runtime")
+    func loadRuntime(userID: String = "default") async throws -> RuntimeStatus {
+        try await request("api/system/runtime", queryItems: userQuery(userID))
     }
 
     func loadTrialStatus() async throws -> TrialStatusSnapshot {
         try await request("api/trial/status")
     }
 
-    func loadLLMConfig() async throws -> LLMConfigSnapshot {
-        try await request("api/llm/config")
+    func loadLLMConfig(userID: String = "default") async throws -> LLMConfigSnapshot {
+        try await request("api/llm/config", queryItems: userQuery(userID))
     }
 
-    func saveLLMConfig(_ payload: LLMConfigPayload) async throws -> LLMConfigSnapshot {
-        try await request("api/llm/config", method: "PATCH", body: payload)
+    func saveLLMConfig(_ payload: LLMConfigPayload, userID: String = "default") async throws -> LLMConfigSnapshot {
+        try await request("api/llm/config", method: "PATCH", queryItems: userQuery(userID), body: payload)
     }
 
-    func testLLMConfig(_ payload: LLMConfigPayload) async throws -> LLMTestResult {
-        try await request("api/llm/test", method: "POST", body: payload)
+    func testLLMConfig(_ payload: LLMConfigPayload, userID: String = "default") async throws -> LLMTestResult {
+        try await request("api/llm/test", method: "POST", queryItems: userQuery(userID), body: payload)
     }
 
-    func loadLLMModels(_ payload: LLMModelsPayload) async throws -> LLMModelCatalog {
-        try await request("api/llm/models", method: "POST", body: payload)
+    func loadLLMModels(_ payload: LLMModelsPayload, userID: String = "default") async throws -> LLMModelCatalog {
+        try await request("api/llm/models", method: "POST", queryItems: userQuery(userID), body: payload)
     }
 
-    func loadSettings() async throws -> SettingsSnapshot {
-        try await request("api/settings")
+    func loadSettings(userID: String = "default") async throws -> SettingsSnapshot {
+        try await request("api/settings", queryItems: userQuery(userID))
     }
 
-    func loadProfileSettings() async throws -> UserProfileSettingsSnapshot {
-        try await request("api/settings/profile")
+    func loadProfileSettings(userID: String = "default") async throws -> UserProfileSettingsSnapshot {
+        try await request("api/settings/profile", queryItems: userQuery(userID))
     }
 
-    func saveProfileSettings(_ payload: UserProfileSettingsPayload) async throws -> UserProfileSettingsSnapshot {
-        try await request("api/settings/profile", method: "PATCH", body: payload)
+    func saveProfileSettings(_ payload: UserProfileSettingsPayload, userID: String = "default") async throws -> UserProfileSettingsSnapshot {
+        try await request("api/settings/profile", method: "PATCH", queryItems: userQuery(userID), body: payload)
     }
 
-    func uploadProfileAvatar(_ payload: AvatarUploadPayload) async throws -> UserProfileSettingsSnapshot {
-        try await request("api/settings/profile/avatar", method: "POST", body: payload, timeoutInterval: 90)
+    func uploadProfileAvatar(_ payload: AvatarUploadPayload, userID: String = "default") async throws -> UserProfileSettingsSnapshot {
+        try await request(
+            "api/settings/profile/avatar",
+            method: "POST",
+            queryItems: userQuery(userID),
+            body: payload,
+            timeoutInterval: 90
+        )
     }
 
-    func deleteProfileAvatar() async throws -> UserProfileSettingsSnapshot {
-        try await request("api/settings/profile/avatar", method: "DELETE")
+    func deleteProfileAvatar(userID: String = "default") async throws -> UserProfileSettingsSnapshot {
+        try await request("api/settings/profile/avatar", method: "DELETE", queryItems: userQuery(userID))
     }
 
-    func downloadProfileAvatar() async throws -> Data {
-        let url = baseURL.appending(path: "api/settings/profile/avatar")
+    func downloadProfileAvatar(userID: String = "default") async throws -> Data {
+        var components = URLComponents(
+            url: baseURL.appending(path: "api/settings/profile/avatar"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = userQuery(userID)
+        guard let url = components?.url else { throw APIClientError.invalidServerURL }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 65
@@ -300,7 +311,7 @@ struct APIClient {
 
     func streamAsk(
         _ payload: AskPayload,
-        onTrace: @escaping @MainActor (TraceItem) -> Void,
+        onTrace: @escaping @MainActor ([TraceItem]) -> Void,
         onContent: @escaping @MainActor (String) -> Void = { _ in }
     ) async throws -> AskResult {
         let url = baseURL.appending(path: "api/assistant/questions/stream")
@@ -322,12 +333,14 @@ struct APIClient {
             )
         }
 
+        let batcher = AssistantStreamEventBatcher(onTrace: onTrace, onContent: onContent)
+
         func handle(_ event: ServerSentEvent) async throws -> AskResult? {
             switch event.name {
             case "trace":
                 do {
                     let item = try JSONDecoder.secFlow.decode(TraceItem.self, from: Data(event.data.utf8))
-                    await onTrace(item)
+                    await batcher.append(trace: item)
                     return nil
                 } catch {
                     throw APIClientError.decoding(String(describing: error))
@@ -338,18 +351,20 @@ struct APIClient {
                         AssistantStreamContentPayload.self,
                         from: Data(event.data.utf8)
                     )
-                    await onContent(payload.delta)
+                    await batcher.append(content: payload.delta)
                     return nil
                 } catch {
                     throw APIClientError.decoding(String(describing: error))
                 }
             case "result":
                 do {
+                    await batcher.flush()
                     return try JSONDecoder.secFlow.decode(AskResult.self, from: Data(event.data.utf8))
                 } catch {
                     throw APIClientError.decoding(String(describing: error))
                 }
             case "error":
+                await batcher.flush()
                 let payload = try? JSONDecoder.secFlow.decode(
                     AssistantStreamErrorPayload.self,
                     from: Data(event.data.utf8)
@@ -371,6 +386,7 @@ struct APIClient {
         if let event = parser.finish(), let result = try await handle(event) {
             return result
         }
+        await batcher.flush()
         throw APIClientError.stream("智能分析连接已提前结束，请重试。")
     }
 
@@ -471,6 +487,70 @@ struct APIClient {
             "api/agent/tasks/\(cleanID)",
             queryItems: [URLQueryItem(name: "user_id", value: userID)]
         )
+    }
+
+    @discardableResult
+    func streamAgentTaskEvents(
+        id: String,
+        userID: String,
+        after sequence: Int,
+        onEvent: @escaping @MainActor (AgentTaskEvent) -> Void
+    ) async throws -> Int {
+        let cleanID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        var components = URLComponents(
+            url: baseURL.appending(path: "api/agent/tasks/\(cleanID)/events"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "user_id", value: userID),
+            URLQueryItem(name: "after", value: String(max(0, sequence))),
+        ]
+        guard let url = components?.url else { throw APIClientError.invalidServerURL }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12 * 60 * 60
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        if sequence > 0 {
+            request.setValue(String(sequence), forHTTPHeaderField: "Last-Event-ID")
+        }
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIClientError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIClientError.server(
+                status: http.statusCode,
+                message: HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            )
+        }
+
+        var lastSequence = max(0, sequence)
+        var parser = ServerSentEventParser()
+
+        func handle(_ event: ServerSentEvent) async throws {
+            if event.name == "error" {
+                let payload = try? JSONDecoder.secFlow.decode(
+                    AssistantStreamErrorPayload.self,
+                    from: Data(event.data.utf8)
+                )
+                throw APIClientError.stream(payload?.message ?? "任务事件流异常结束。")
+            }
+            let item = try JSONDecoder.secFlow.decode(AgentTaskEvent.self, from: Data(event.data.utf8))
+            guard item.sequence > lastSequence else { return }
+            lastSequence = item.sequence
+            await onEvent(item)
+        }
+
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard let event = parser.consume(line: line) else { continue }
+            try await handle(event)
+        }
+        if let event = parser.finish() {
+            try await handle(event)
+        }
+        return lastSequence
     }
 
     func cancelAgentTask(id: String, userID: String) async throws -> AgentTaskSnapshot {
@@ -622,13 +702,14 @@ struct APIClient {
     private func request<Value: Decodable, Body: Encodable>(
         _ path: String,
         method: String,
+        queryItems: [URLQueryItem] = [],
         body: Body,
         timeoutInterval: TimeInterval = 65
     ) async throws -> Value {
         try await request(
             path,
             method: method,
-            queryItems: [],
+            queryItems: queryItems,
             bodyData: JSONEncoder.secFlow.encode(body),
             timeoutInterval: timeoutInterval
         )
@@ -696,6 +777,10 @@ struct APIClient {
             throw APIClientError.decoding(String(describing: error))
         }
     }
+
+    private func userQuery(_ userID: String) -> [URLQueryItem] {
+        [URLQueryItem(name: "user_id", value: userID)]
+    }
 }
 
 private struct ErrorPayload: Decodable {
@@ -716,11 +801,13 @@ private struct AssistantStreamContentPayload: Decodable {
 }
 
 struct ServerSentEvent: Equatable {
+    let id: String?
     let name: String
     let data: String
 }
 
 struct ServerSentEventParser {
+    private var eventID: String?
     private var eventName = "message"
     private var dataLines: [String] = []
 
@@ -729,9 +816,13 @@ struct ServerSentEventParser {
             return finish()
         }
         guard !line.hasPrefix(":") else { return nil }
-        if line.hasPrefix("event:") {
+        if line.hasPrefix("id:") {
             let pending = finish()
-            eventName = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespaces)
+            eventID = Self.fieldValue(line, prefix: "id:")
+            return pending
+        } else if line.hasPrefix("event:") {
+            let pending = finish()
+            eventName = Self.fieldValue(line, prefix: "event:")
             return pending
         } else if line.hasPrefix("data:") {
             var value = String(line.dropFirst("data:".count))
@@ -748,9 +839,78 @@ struct ServerSentEventParser {
             eventName = "message"
             return nil
         }
-        let event = ServerSentEvent(name: eventName, data: dataLines.joined(separator: "\n"))
+        let event = ServerSentEvent(id: eventID, name: eventName, data: dataLines.joined(separator: "\n"))
+        eventID = nil
         eventName = "message"
         dataLines.removeAll(keepingCapacity: true)
         return event
+    }
+
+    private static func fieldValue(_ line: String, prefix: String) -> String {
+        var value = String(line.dropFirst(prefix.count))
+        if value.first == " " {
+            value.removeFirst()
+        }
+        return value
+    }
+}
+
+private actor AssistantStreamEventBatcher {
+    private static let flushNanoseconds: UInt64 = 50_000_000
+
+    private let onTrace: @MainActor ([TraceItem]) -> Void
+    private let onContent: @MainActor (String) -> Void
+    private var content = ""
+    private var tracesByID: [String: TraceItem] = [:]
+    private var traceOrder: [String] = []
+    private var scheduledFlush: Task<Void, Never>?
+
+    init(
+        onTrace: @escaping @MainActor ([TraceItem]) -> Void,
+        onContent: @escaping @MainActor (String) -> Void
+    ) {
+        self.onTrace = onTrace
+        self.onContent = onContent
+    }
+
+    func append(content delta: String) {
+        content.append(delta)
+        scheduleFlush()
+    }
+
+    func append(trace: TraceItem) {
+        if tracesByID[trace.id] == nil {
+            traceOrder.append(trace.id)
+        }
+        tracesByID[trace.id] = trace
+        scheduleFlush()
+    }
+
+    func flush() async {
+        scheduledFlush?.cancel()
+        scheduledFlush = nil
+        let traces = traceOrder.compactMap { tracesByID[$0] }
+        let contentUpdate = content
+        content = ""
+        tracesByID.removeAll(keepingCapacity: true)
+        traceOrder.removeAll(keepingCapacity: true)
+        if !traces.isEmpty {
+            await onTrace(traces)
+        }
+        if !contentUpdate.isEmpty {
+            await onContent(contentUpdate)
+        }
+    }
+
+    private func scheduleFlush() {
+        guard scheduledFlush == nil else { return }
+        scheduledFlush = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.flushNanoseconds)
+            } catch {
+                return
+            }
+            await self?.flush()
+        }
     }
 }

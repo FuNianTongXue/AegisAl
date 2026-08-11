@@ -13,6 +13,21 @@ func isExpectedCancellation(_ error: Error) -> Bool {
         && nsError.code == CocoaError.Code.userCancelled.rawValue
 }
 
+func mergingTraceItems(_ existing: [TraceItem], updates: [TraceItem]) -> [TraceItem] {
+    guard !updates.isEmpty else { return existing }
+    var merged = existing
+    var indexes = Dictionary(uniqueKeysWithValues: merged.enumerated().map { ($1.id, $0) })
+    for item in updates {
+        if let index = indexes[item.id] {
+            merged[index] = item
+        } else {
+            indexes[item.id] = merged.count
+            merged.append(item)
+        }
+    }
+    return merged
+}
+
 @MainActor
 func resolveInformationRefresh(
     initial: InformationSnapshot,
@@ -42,6 +57,9 @@ func resolveInformationRefresh(
 
 @MainActor
 final class AppModel: ObservableObject {
+    let assistantStore = AssistantStore()
+    let agentTaskStore = AgentTaskStore()
+
     @Published private(set) var serverURL: String
     @Published var config: ConfigSnapshot?
     @Published var runtime: RuntimeStatus?
@@ -68,18 +86,9 @@ final class AppModel: ObservableObject {
     @Published var knowledgeGraph: KnowledgeGraphPayload?
     @Published var assistantGraph: GraphSpec?
     @Published var collectorGraph: GraphSpec?
-    @Published var answer: AskResult?
-    @Published var conversationTurns: [ConversationTurn] = []
-    @Published var assistantConversations: [AssistantConversationSummary] = []
-    @Published var archivedAssistantConversations: [AssistantConversationSummary] = []
-    @Published var agentTasks: [AgentTaskSnapshot] = []
-    @Published var archivedAgentTasks: [AgentTaskSnapshot] = []
-    @Published var activeAgentTask: AgentTaskSnapshot?
     @Published var reports: [AnalysisReportSummary] = []
     @Published var selectedReport: AnalysisReportDetail?
-    @Published var activeTrace: [TraceItem] = []
     @Published var isRefreshing = false
-    @Published var isAsking = false
     @Published var busyActions: Set<String> = []
     @Published var errorMessage: String?
     @Published var statusMessage: String?
@@ -95,6 +104,43 @@ final class AppModel: ObservableObject {
 
     private let localBackend = LocalBackendManager.shared
     private var assistantConversationCache: [String: [ConversationTurn]] = [:]
+
+    var answer: AskResult? {
+        get { assistantStore.answer }
+        set { assistantStore.answer = newValue }
+    }
+    var conversationTurns: [ConversationTurn] {
+        get { assistantStore.conversationTurns }
+        set { assistantStore.conversationTurns = newValue }
+    }
+    var assistantConversations: [AssistantConversationSummary] {
+        get { assistantStore.conversations }
+        set { assistantStore.conversations = newValue }
+    }
+    var archivedAssistantConversations: [AssistantConversationSummary] {
+        get { assistantStore.archivedConversations }
+        set { assistantStore.archivedConversations = newValue }
+    }
+    var activeTrace: [TraceItem] {
+        get { assistantStore.activeTrace }
+        set { assistantStore.activeTrace = newValue }
+    }
+    var isAsking: Bool {
+        get { assistantStore.isAsking }
+        set { assistantStore.isAsking = newValue }
+    }
+    var agentTasks: [AgentTaskSnapshot] {
+        get { agentTaskStore.tasks }
+        set { agentTaskStore.tasks = newValue }
+    }
+    var archivedAgentTasks: [AgentTaskSnapshot] {
+        get { agentTaskStore.archivedTasks }
+        set { agentTaskStore.archivedTasks = newValue }
+    }
+    var activeAgentTask: AgentTaskSnapshot? {
+        get { agentTaskStore.activeTask }
+        set { agentTaskStore.activeTask = newValue }
+    }
 
     var dataDirectoryURL: URL { localBackend.dataDirectoryURL }
     var allAgentTasks: [AgentTaskSnapshot] { agentTasks + archivedAgentTasks }
@@ -134,14 +180,14 @@ final class AppModel: ObservableObject {
                 initialSetupState = .failed(trialStatus.message)
                 return
             }
-            async let configRequest = client.loadConfig()
-            async let llmConfigRequest: LLMConfigSnapshot? = try? await client.loadLLMConfig()
+            async let configRequest = client.loadConfig(userID: userID)
+            async let llmConfigRequest: LLMConfigSnapshot? = try? await client.loadLLMConfig(userID: userID)
             async let graphRequest: GraphSpec? = try? await client.loadGraph()
             async let collectorGraphRequest: GraphSpec? = try? await client.loadCollectorGraph()
             async let dashboardRequest: DashboardSnapshot? = try? await client.loadDashboard()
             async let recentRequest: [IntelligenceQueryResult]? = try? await client.loadRecentIntelligence()
             async let reportsRequest: [AnalysisReportSummary]? = try? await client.loadReports()
-            async let settingsRequest: SettingsSnapshot? = try? await client.loadSettings()
+            async let settingsRequest: SettingsSnapshot? = try? await client.loadSettings(userID: userID)
             async let conversationsRequest: [AssistantConversationSummary]? = try? await client.loadAssistantConversations(
                 userID: userID
             )
@@ -168,7 +214,7 @@ final class AppModel: ObservableObject {
             if let snapshotRuntime = loadedConfig.runtime {
                 runtime = snapshotRuntime
             } else {
-                runtime = try? await client.loadRuntime()
+                runtime = try? await client.loadRuntime(userID: userID)
             }
             intelligenceSources = dashboard?.sources ?? []
             if let recent = await recentRequest {
@@ -189,7 +235,9 @@ final class AppModel: ObservableObject {
                 archivedAssistantConversations = loadedArchivedConversations
             }
             if let loadedSettings {
-                profileAvatarImageData = loadedSettings.profile.avatarAvailable ? (try? await client.downloadProfileAvatar()) : nil
+                profileAvatarImageData = loadedSettings.profile.avatarAvailable
+                    ? (try? await client.downloadProfileAvatar(userID: userID))
+                    : nil
             }
             statusMessage = uiText("本机数据服务已连接")
         } catch {
@@ -248,9 +296,9 @@ final class AppModel: ObservableObject {
     func loadLLMConfig() async {
         do {
             let client = try await connectedClient()
-            llmConfig = try await client.loadLLMConfig()
+            llmConfig = try await client.loadLLMConfig(userID: userID)
             updateInitialSetupState()
-            runtime = try? await client.loadRuntime()
+            runtime = try? await client.loadRuntime(userID: userID)
         } catch {
             presentError(error)
         }
@@ -262,7 +310,7 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("llm-test") }
         do {
             let client = try await connectedClient()
-            let result = try await client.testLLMConfig(payload)
+            let result = try await client.testLLMConfig(payload, userID: userID)
             statusMessage = localizedMessage(result.message)
             return result
         } catch {
@@ -277,10 +325,10 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("llm-save") }
         do {
             let client = try await connectedClient()
-            llmConfig = try await client.saveLLMConfig(payload)
+            llmConfig = try await client.saveLLMConfig(payload, userID: userID)
             updateInitialSetupState()
-            runtime = try? await client.loadRuntime()
-            config = try? await client.loadConfig()
+            runtime = try? await client.loadRuntime(userID: userID)
+            config = try? await client.loadConfig(userID: userID)
             statusMessage = payload.enabled ? uiText("大模型配置已保存并启用") : uiText("大模型连接已断开")
         } catch {
             presentError(error)
@@ -293,7 +341,7 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("llm-models") }
         do {
             let client = try await connectedClient()
-            llmModelCatalog = try await client.loadLLMModels(payload)
+            llmModelCatalog = try await client.loadLLMModels(payload, userID: userID)
             statusMessage = localizedMessage(llmModelCatalog?.message)
         } catch {
             presentError(error)
@@ -306,10 +354,12 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("settings-load") }
         do {
             let client = try await connectedClient()
-            let loadedSettings = try await client.loadSettings()
+            let loadedSettings = try await client.loadSettings(userID: userID)
             applySettingsSnapshot(loadedSettings)
             updateInitialSetupState()
-            profileAvatarImageData = loadedSettings.profile.avatarAvailable ? (try? await client.downloadProfileAvatar()) : nil
+            profileAvatarImageData = loadedSettings.profile.avatarAvailable
+                ? (try? await client.downloadProfileAvatar(userID: userID))
+                : nil
         } catch {
             presentError(error)
         }
@@ -322,7 +372,7 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("settings-profile-save") }
         do {
             let client = try await connectedClient()
-            profileSettings = try await client.saveProfileSettings(payload)
+            profileSettings = try await client.saveProfileSettings(payload, userID: userID)
             settings = rebuildSettingsSnapshot()
             updateInitialSetupState()
             statusMessage = uiText("用户资料已保存")
@@ -340,8 +390,8 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("settings-avatar-upload") }
         do {
             let client = try await connectedClient()
-            profileSettings = try await client.uploadProfileAvatar(payload)
-            profileAvatarImageData = try? await client.downloadProfileAvatar()
+            profileSettings = try await client.uploadProfileAvatar(payload, userID: userID)
+            profileAvatarImageData = try? await client.downloadProfileAvatar(userID: userID)
             settings = rebuildSettingsSnapshot()
             statusMessage = uiText("头像已上传")
             return true
@@ -358,7 +408,7 @@ final class AppModel: ObservableObject {
         defer { busyActions.remove("settings-avatar-delete") }
         do {
             let client = try await connectedClient()
-            profileSettings = try await client.deleteProfileAvatar()
+            profileSettings = try await client.deleteProfileAvatar(userID: userID)
             profileAvatarImageData = nil
             settings = rebuildSettingsSnapshot()
             statusMessage = uiText("头像已移除")
@@ -566,7 +616,7 @@ final class AppModel: ObservableObject {
     func ask(
         question: String,
         topK: Int,
-        onTrace: ((TraceItem) -> Void)? = nil,
+        onTrace: (([TraceItem]) -> Void)? = nil,
         onContent: ((String) -> Void)? = nil
     ) async -> AskResult? {
         let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -586,13 +636,12 @@ final class AppModel: ObservableObject {
                     sessionId: requestSessionID,
                     responseLanguage: appLanguage.apiCode
                 )
-            ) { [weak self] item in
+            ) { [weak self] items in
                 guard let self else { return }
-                if self.sessionID == requestSessionID,
-                   !self.activeTrace.contains(where: { $0.id == item.id }) {
-                    self.activeTrace.append(item)
+                if self.sessionID == requestSessionID {
+                    self.activeTrace = mergingTraceItems(self.activeTrace, updates: items)
                 }
-                onTrace?(item)
+                onTrace?(items)
             } onContent: { delta in
                 onContent?(delta)
             }
@@ -604,6 +653,10 @@ final class AppModel: ObservableObject {
             if let report = result.report {
                 reports.removeAll { $0.id == report.id }
                 reports.insert(report, at: 0)
+            }
+            if let task = result.agentTask {
+                upsertAgentTask(task)
+                activeAgentTask = task
             }
             Task { await refreshStateAfterAnswer() }
             return result
@@ -812,16 +865,44 @@ final class AppModel: ObservableObject {
     }
 
     func followAgentTask(id: String) async {
+        guard let initial = await refreshAgentTask(id: id) else { return }
+        if !initial.isActive { return }
+
+        var sequence = initial.events.map(\.sequence).max() ?? 0
+        var consecutiveSSEFailures = 0
+        let retryDelays: [UInt64] = [2, 5, 10]
+
         while !Task.isCancelled {
-            guard let task = await refreshAgentTask(id: id) else {
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-                continue
-            }
-            if !task.isActive { return }
             do {
-                try await Task.sleep(nanoseconds: 700_000_000)
+                let client = try await connectedClient()
+                sequence = try await client.streamAgentTaskEvents(
+                    id: id,
+                    userID: userID,
+                    after: sequence
+                ) { [weak self] event in
+                    self?.applyAgentTaskEvent(taskID: id, event: event)
+                }
+                consecutiveSSEFailures = 0
+
+                guard let task = await refreshAgentTask(id: id) else { return }
+                sequence = max(sequence, task.events.map(\.sequence).max() ?? 0)
+                if !task.isActive { return }
             } catch {
-                return
+                if isExpectedCancellation(error) || Task.isCancelled { return }
+                consecutiveSSEFailures += 1
+
+                if consecutiveSSEFailures >= 3 {
+                    guard let task = await refreshAgentTask(id: id) else { return }
+                    sequence = max(sequence, task.events.map(\.sequence).max() ?? 0)
+                    if !task.isActive { return }
+                }
+
+                let delay = retryDelays[min(consecutiveSSEFailures - 1, retryDelays.count - 1)]
+                do {
+                    try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                } catch {
+                    return
+                }
             }
         }
     }
@@ -1076,11 +1157,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func applyAgentTaskEvent(taskID: String, event: AgentTaskEvent) {
+        let current = activeAgentTask?.id == taskID
+            ? activeAgentTask
+            : allAgentTasks.first { $0.id == taskID }
+        guard let current else { return }
+        let updated = current.applying(event: event)
+        guard updated != current else { return }
+        upsertAgentTask(updated)
+        if activeAgentTask?.id == taskID {
+            activeAgentTask = updated
+        }
+    }
+
     private func refreshStateAfterAnswer() async {
         do {
             let client = try await connectedClient()
             let range = dashboardRangeStrings
-            async let runtimeRequest: RuntimeStatus? = try? await client.loadRuntime()
+            async let runtimeRequest: RuntimeStatus? = try? await client.loadRuntime(userID: userID)
             async let dashboardRequest: DashboardSnapshot? = try? await client.loadDashboard(startDate: range.start, endDate: range.end)
             async let recentRequest: [IntelligenceQueryResult]? = try? await client.loadRecentIntelligence()
             async let reportsRequest: [AnalysisReportSummary]? = try? await client.loadReports()
@@ -1329,7 +1423,7 @@ final class AppModel: ObservableObject {
             rememberQueryLog(result)
             let range = dashboardRangeStrings
             dashboard = try? await client.loadDashboard(startDate: range.start, endDate: range.end)
-            config = try? await client.loadConfig()
+            config = try? await client.loadConfig(userID: userID)
             statusMessage = uiText("API 返回 %d 条漏洞记录", result.records.count)
         } catch {
             presentError(error)
@@ -1667,7 +1761,7 @@ final class AppModel: ObservableObject {
         do {
             let client = try await connectedClient()
             try await operation(client)
-            config = try await client.loadConfig()
+            config = try await client.loadConfig(userID: userID)
         } catch {
             presentError(error)
         }

@@ -45,23 +45,25 @@ _SEVERITY_MAP = {
     "中危": "中危",
     "LOW": "低危",
     "低危": "低危",
+    "INFO": "提示",
+    "INFORMATIONAL": "提示",
+    "提示": "提示",
+    "NONE": "无风险",
+    "无风险": "无风险",
     "UNKNOWN": "未知",
     "未知": "未知",
 }
 
 _PROVIDER_PATTERN = re.compile(
-    "|".join(
-        [
-            "".join(("Git", "Hub")) + r"\s+Advisory",
-            "".join(("Git", "Hub")) + r"\s+Security\s+Advisory",
-            "".join(("N", "VD")) + r"(?:\s+CVE)?",
-            "".join(("O", "SV")) + r"(?:\.dev)?",
-            r"Milvus",
-            r"RAG",
-            r"向量库",
-            r"实时\s*CVE\s*接口",
-            r"CVE\s*接口",
-        ]
+    (
+        r"(?<![A-Za-z0-9_])(?:"
+        + "".join(("Git", "Hub"))
+        + r"\s+(?:Security\s+)?Advisory|"
+        + "".join(("N", "VD"))
+        + r"(?:\s+CVE)?|"
+        + "".join(("O", "SV"))
+        + r"(?:\.dev)?|Milvus|RAG)(?![A-Za-z0-9_])"
+        + r"|向量库|实时\s*CVE\s*接口|CVE\s*接口"
     ),
     flags=re.IGNORECASE,
 )

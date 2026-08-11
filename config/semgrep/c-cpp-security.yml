@@ -81,6 +81,7 @@ rules:
       cwe: [CWE-120]
       owasp: [A06:2021]
       confidence: MEDIUM
+      profile: review
       remediation: 使用显式容量检查的接口，并确保目标缓冲区大小覆盖终止符。
     pattern-either:
       - pattern: strcpy(...)

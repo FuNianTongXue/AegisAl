@@ -3,6 +3,79 @@ import WebKit
 @testable import SecFlowMac
 
 final class ModelDecodingTests: XCTestCase {
+    func testReportDownloadAllFormatsIgnoresEmptyReportObject() throws {
+        let json = #"""
+        {
+          "status": "completed",
+          "thread_id": "report-download-all",
+          "interrupt": null,
+          "summary": "下载制品已准备好。",
+          "report": {},
+          "artifacts": [{
+            "id": "report-artifact-bundle",
+            "kind": "report",
+            "file_name": "SecFlow-report-bundle.zip",
+            "media_type": "application/zip",
+            "download_path": "/api/assistant/artifacts/report-artifact-bundle",
+            "sha256": "abc123",
+            "size": 4096,
+            "generated_at": "2026-07-31T03:12:00+00:00"
+          }],
+          "error": "",
+          "answer": null,
+          "report_mcp": {},
+          "report_mcps": []
+        }
+        """#.data(using: .utf8)!
+
+        let result = try JSONDecoder.secFlow.decode(ReportActionResult.self, from: json)
+
+        XCTAssertNil(result.report)
+        XCTAssertEqual(result.artifacts.first?.fileName, "SecFlow-report-bundle.zip")
+        XCTAssertEqual(result.artifacts.first?.mediaType, "application/zip")
+    }
+
+    func testAssistantDecodesRecoveredProjectScanTask() throws {
+        let json = #"""
+        {
+          "mode": "project_scan",
+          "summary": "已恢复源码工作区并创建扫描任务。",
+          "fields": {"工作区状态": "已验证可访问"},
+          "agent_task": {
+            "id": "task-recovered",
+            "objective": "我想做代码漏洞的扫描",
+            "workspace_path": "/tmp/kafka-4.3.1-src",
+            "workspace_name": "kafka-4.3.1-src",
+            "workspace_type": "directory",
+            "user_id": "analyst",
+            "status": "queued",
+            "current_node": "queued",
+            "languages": [],
+            "plan": [],
+            "events": [],
+            "result": null,
+            "report_ready": false,
+            "report_decision": "unavailable",
+            "report": null,
+            "error": "",
+            "archived": false,
+            "archived_at": null,
+            "created_at": "2026-07-30T05:00:00+00:00",
+            "updated_at": "2026-07-30T05:00:00+00:00"
+          },
+          "confidence": 0.98,
+          "trace": [],
+          "generated_at": "2026-07-30T05:00:00+00:00"
+        }
+        """#.data(using: .utf8)!
+
+        let result = try JSONDecoder.secFlow.decode(AskResult.self, from: json)
+
+        XCTAssertEqual(result.agentTask?.id, "task-recovered")
+        XCTAssertEqual(result.agentTask?.workspaceName, "kafka-4.3.1-src")
+        XCTAssertEqual(result.agentTask?.status, "queued")
+    }
+
     func testAssistantIgnoresLegacyEmptyComponentDetail() throws {
         let json = #"""
         {
@@ -538,6 +611,7 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(
             parser.consume(line: ""),
             ServerSentEvent(
+                id: nil,
                 name: "trace",
                 data: "{\"node\":\"call_llm\",\n\"status\":\"completed\"}"
             )
@@ -551,14 +625,26 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertNil(parser.consume(line: "data: {\"node\":\"classify_query\"}"))
         XCTAssertEqual(
             parser.consume(line: "event: result"),
-            ServerSentEvent(name: "trace", data: "{\"node\":\"classify_query\"}")
+            ServerSentEvent(id: nil, name: "trace", data: "{\"node\":\"classify_query\"}")
         )
         XCTAssertNil(parser.consume(line: "data: {\"summary\":\"ok\"}"))
         XCTAssertEqual(
             parser.finish(),
-            ServerSentEvent(name: "result", data: "{\"summary\":\"ok\"}")
+            ServerSentEvent(id: nil, name: "result", data: "{\"summary\":\"ok\"}")
         )
         XCTAssertNil(parser.finish())
+    }
+
+    func testServerSentEventParserPreservesEventID() {
+        var parser = ServerSentEventParser()
+
+        XCTAssertNil(parser.consume(line: "id: 42"))
+        XCTAssertNil(parser.consume(line: "event: node.completed"))
+        XCTAssertNil(parser.consume(line: "data: {\"sequence\":42}"))
+        XCTAssertEqual(
+            parser.consume(line: ""),
+            ServerSentEvent(id: "42", name: "node.completed", data: "{\"sequence\":42}")
+        )
     }
 
     func testServerSentEventParserPreservesStreamingMarkdownContent() throws {
@@ -619,8 +705,8 @@ final class ModelDecodingTests: XCTestCase {
                 sessionId: "swift-stream-test",
                 responseLanguage: "zh-Hans"
             )
-        ) { item in
-            trace.append(item)
+        ) { items in
+            trace.append(contentsOf: items)
         }
 
         XCTAssertEqual(result.mode, "identity")
@@ -780,6 +866,19 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(envelope.data.result?.adaptation?.iterations, 1)
         XCTAssertEqual(envelope.data.result?.adaptation?.currentMetrics?.reviewFindings, 0)
         XCTAssertEqual(envelope.data.result?.adaptation?.overlayFingerprints, ["overlay-sha"])
+
+        let completion = AgentTaskEvent(
+            sequence: 2,
+            type: "task.completed",
+            node: "compose_result",
+            status: "completed",
+            message: "扫描图执行完成",
+            time: "2026-07-22T10:00:02+00:00"
+        )
+        let incrementallyCompleted = envelope.data.applying(event: completion)
+        XCTAssertEqual(incrementallyCompleted.events.map(\.sequence), [1, 2])
+        XCTAssertFalse(incrementallyCompleted.isReportReady)
+        XCTAssertEqual(incrementallyCompleted.applying(event: completion), incrementallyCompleted)
     }
 
     func testInformationArtworkUsesSharedSourceLogoForMissingCover() {

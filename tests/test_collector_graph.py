@@ -51,7 +51,7 @@ class CollectorGraphTests(unittest.TestCase):
         self.assertEqual(self.store.read()["records"][0]["title"], "Updated title")
         self.assertEqual(
             [item["node"] for item in result["trace"]],
-            ["validate_config", "fetch_records", "normalize_records", "persist_records", "compose_result"],
+            ["validate_config", "fetch_records", "normalize_records", "translate_records", "persist_records", "compose_result"],
         )
 
     def test_missing_credential_still_allows_api_query(self) -> None:
@@ -68,7 +68,7 @@ class CollectorGraphTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(
             [item["node"] for item in result["trace"]],
-            ["validate_config", "fetch_records", "normalize_records", "persist_records", "compose_result"],
+            ["validate_config", "fetch_records", "normalize_records", "translate_records", "persist_records", "compose_result"],
         )
 
     def test_year_collection_keeps_successful_year_when_another_fails(self) -> None:

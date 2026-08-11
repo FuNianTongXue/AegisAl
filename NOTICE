@@ -6,16 +6,3 @@ Copyright (c) 2026 ShenSiQi.
 This project is source-available under a commercial non-redistribution
 license. Public visibility on GitHub does not grant redistribution rights.
 
-Project license:
-  LICENSE
-
-Plain-language licensing guide (Chinese):
-  docs/LICENSING.md
-
-Third-party notices and license texts:
-  licenses/THIRD-PARTY-NOTICES.txt
-  licenses/
-
-The project LICENSE governs original SecFlow code. Third-party components
-remain subject to their respective licenses. If this NOTICE or the licensing
-guide conflicts with LICENSE, LICENSE controls for original SecFlow code.

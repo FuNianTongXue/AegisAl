@@ -353,6 +353,61 @@ class SemgrepTool:
             },
         }
 
+    def validate_rule_paths(self, rule_paths: list[str]) -> dict[str, Any]:
+        """Compile-check project-scoped rules before they can replace a good scan.
+
+        Structural validation of an LLM-produced overlay is not enough: a pattern
+        may be safe text while still being invalid for Semgrep's language parser.
+        Keep this check in the same bundled runtime used for the real scan so the
+        validation result cannot diverge from the packaged client.
+        """
+
+        cli_path = self._cli_path()
+        if not cli_path:
+            return {
+                "status": "unavailable",
+                "valid": False,
+                "diagnostics": ["静态分析 CLI 不可用，项目 Overlay 未应用。"],
+            }
+        selected_rules = [Path(path) for path in rule_paths if Path(path).is_file()]
+        if not selected_rules or len(selected_rules) != len(rule_paths):
+            return {
+                "status": "failed",
+                "valid": False,
+                "diagnostics": ["项目 Overlay 规则文件缺失，未应用该 Overlay。"],
+            }
+        timeout = max(1, int(os.getenv("SECFLOW_SEMGREP_VALIDATE_TIMEOUT_SECONDS", "60")))
+        command = [cli_path, "validate", *(str(path) for path in selected_rules)]
+        try:
+            validated = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env=_semgrep_subprocess_env(),
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "timeout",
+                "valid": False,
+                "diagnostics": [f"Overlay 规则预检超过 {timeout}s，已保留首轮扫描结果。"],
+            }
+        except Exception as exc:  # noqa: BLE001 - fail closed to the verified baseline.
+            return {
+                "status": "failed",
+                "valid": False,
+                "diagnostics": [f"Overlay 规则预检执行失败：{exc}"],
+            }
+        if validated.returncode == 0:
+            return {"status": "completed", "valid": True, "diagnostics": []}
+        detail = (validated.stderr or validated.stdout or "").strip().splitlines()[-8:]
+        return {
+            "status": "failed",
+            "valid": False,
+            "diagnostics": ["Overlay 规则未通过 Semgrep 语法预检：" + " / ".join(detail)],
+        }
+
     def analyze(
         self,
         attachments: list[dict[str, Any]],
@@ -380,20 +435,29 @@ class SemgrepTool:
             **_project_preprocessor_definitions(project_files),
             **_project_overlay_preprocessor_definitions(dependency_scan),
         }
-        syntax_analysis = [
-            analyze_source_structure(
-                item["file_name"],
-                item["content"],
-                language_hint=item.get("language_hint"),
-                preprocessor_definitions={
-                    **project_preprocessor_definitions,
-                    **_compile_definitions_for_file(item["file_name"], compile_definitions),
-                },
-            )
-            for item in code_files
-        ]
-        scenarios = _select_scenarios(dependency_scan, records, code_files)
         diagnostics: list[str] = []
+        syntax_analysis: list[dict[str, Any]] = []
+        for item in code_files:
+            # Every per-file phase must honor user cancellation so a stopped task
+            # cannot keep parsing or analyzing in the background.
+            if _analysis_cancelled(cancelled):
+                diagnostics.append("静态分析已由用户停止。")
+                return _cancelled_analysis_result(rule_paths, diagnostics)
+            syntax_analysis.append(
+                analyze_source_structure(
+                    item["file_name"],
+                    item["content"],
+                    language_hint=item.get("language_hint"),
+                    preprocessor_definitions={
+                        **project_preprocessor_definitions,
+                        **_compile_definitions_for_file(item["file_name"], compile_definitions),
+                    },
+                )
+            )
+        scenarios = _select_scenarios(dependency_scan, records, code_files)
+        if _analysis_cancelled(cancelled):
+            diagnostics.append("静态分析已由用户停止。")
+            return _cancelled_analysis_result(rule_paths, diagnostics)
         heuristic_findings = _heuristic_findings(code_files, dependency_scan, records, scenarios)
         interprocedural_findings: list[dict[str, Any]] = []
         go_semantic_findings: list[dict[str, Any]] = []
@@ -411,13 +475,15 @@ class SemgrepTool:
                 complete_scan=include_all_attachments,
             )
             diagnostics.extend(cli_diagnostics)
+            if cli_status == "cancelled":
+                return _cancelled_analysis_result(rule_paths, diagnostics)
         elif not code_files:
             diagnostics.append("未上传代码文件，静态 source/sink 分析已跳过，仅生成依赖情报报告。")
         else:
             diagnostics.append("已使用内置 AST/CFG/DFG 分析，用户无需安装额外工具。")
 
         java_files = [item for item in code_files if _language_for_file(item["file_name"]) == "java"]
-        if java_files:
+        if java_files and not _analysis_cancelled(cancelled):
             try:
                 path_analysis = analyze_java_interprocedural(
                     java_files,
@@ -434,13 +500,16 @@ class SemgrepTool:
                 diagnostics.append(f"跨方法数据流分析失败，已保留基础扫描结果：{exc}")
 
         go_files = [item for item in code_files if _language_for_file(item["file_name"]) == "go"]
-        if go_files:
+        if go_files and not _analysis_cancelled(cancelled):
             try:
                 go_analysis = analyze_go_semantics(go_files)
                 diagnostics.extend(str(item) for item in go_analysis.get("diagnostics") or [] if item)
                 go_semantic_findings = list(go_analysis.get("findings") or [])
             except Exception as exc:  # noqa: BLE001
                 diagnostics.append(f"Go 语义分析失败，已保留 Semgrep 结果：{exc}")
+        if _analysis_cancelled(cancelled):
+            diagnostics.append("静态分析已由用户停止。")
+            return _cancelled_analysis_result(rule_paths, diagnostics)
 
         primary_findings = cli_findings if cli_status == "completed" else heuristic_findings
         correlated_paths = _correlate_interprocedural_findings(
@@ -528,7 +597,10 @@ class SemgrepTool:
             return "failed", [], ["当前语言对应的离线安全规则缺失，已使用内置 AST/CFG/DFG 分析。"]
         configs = selected_rules or [rules_path]
         diagnostics: list[str] = []
-        with tempfile.TemporaryDirectory(prefix="secflow-semgrep-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="secflow-semgrep-",
+            dir=_scan_temp_parent(),
+        ) as temp_dir:
             root = Path(temp_dir)
             source_root = root / "src"
             result_path = root / "results.json"
@@ -564,14 +636,14 @@ class SemgrepTool:
                         text=True,
                         timeout=timeout,
                         check=False,
-                        env={**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"},
+                        env=_semgrep_subprocess_env(),
                     )
                 else:
                     analyzed = _run_cancelable_process(
                         analyze_cmd,
                         cwd=source_root,
                         timeout=timeout,
-                        env={**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"},
+                        env=_semgrep_subprocess_env(),
                         cancelled=cancelled,
                     )
                     if analyzed is None:
@@ -603,6 +675,50 @@ class SemgrepTool:
         return str(bundled) if bundled else ""
 
 
+def _analysis_cancelled(cancelled: Callable[[], bool] | None) -> bool:
+    if cancelled is None:
+        return False
+    try:
+        return bool(cancelled())
+    except Exception:  # noqa: BLE001 - a broken cancel callback must not crash the scan.
+        return False
+
+
+def _cancelled_analysis_result(rule_paths: list[str] | None, diagnostics: list[str]) -> dict[str, Any]:
+    return {
+        "status": "cancelled",
+        "tool": "SecFlow Static Analyzer",
+        "cli_status": "cancelled",
+        "mode": "cancelled",
+        "rule_paths": list(rule_paths or []),
+        "generated_at": now_iso(),
+        "files": [],
+        "syntax_summary": {
+            "languages": [],
+            "parsed_files": 0,
+            "parse_error_files": 0,
+            "raw_parse_error_files": 0,
+            "recovered_parse_error_files": 0,
+            "parse_error_file_names": [],
+            "ast_node_count": 0,
+            "cfg_node_count": 0,
+            "cfg_edge_count": 0,
+            "dfg_edge_count": 0,
+        },
+        "scenario_nodes": [],
+        "conditional_edges": [],
+        "findings": [],
+        "finding_count": 0,
+        "review_findings": [],
+        "review_finding_count": 0,
+        "prompts": {
+            "ast_cfg_dfg": AST_CFG_DFG_ANALYSIS_PROMPT,
+            "selected_scenarios": [],
+        },
+        "diagnostics": list(diagnostics),
+    }
+
+
 def analyze_static_paths(
     attachments: list[dict[str, Any]],
     dependency_scan: dict[str, Any],
@@ -622,6 +738,16 @@ def semgrep_rule_paths_for_language(language: str) -> list[str]:
         for file_name in LANGUAGE_SEMGREP_RULE_FILES.get(language, ())
         if (path := root / file_name).is_file()
     ]
+
+
+def _semgrep_subprocess_env() -> dict[str, str]:
+    env = {**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"}
+    if getattr(sys, "frozen", False):
+        # The backend and Semgrep are separate PyInstaller applications. Without
+        # this reset the child may reuse the backend's archive metadata and fail
+        # before validating or scanning any rules.
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
 
 
 def _run_cancelable_process(
@@ -673,6 +799,21 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
             process.wait(timeout=3)
         except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+def _scan_temp_parent() -> str | None:
+    configured = os.getenv("SECFLOW_SCAN_TEMP_ROOT", "").strip()
+    if not configured:
+        return None
+    try:
+        path = Path(configured).resolve(strict=True)
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        path.relative_to(temp_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not path.is_dir() or not path.name.startswith("secflow-code-scan-runtime-"):
+        return None
+    return str(path)
 
 
 def _code_attachments(
@@ -2692,6 +2833,22 @@ def _fixed_code_for_finding(finding: dict[str, Any], sink_snippet: str) -> str:
             f"{indent}}}"
         )
     if scenario == "command_execution":
+        file_name = str(
+            finding.get("file")
+            or (finding.get("sink") or {}).get("file")
+            or (finding.get("source") or {}).get("file")
+            or ""
+        )
+        suffix = Path(file_name).suffix.casefold()
+        argument = _last_call_argument(snippet) or "command"
+        if suffix == ".py":
+            return (
+                f'{indent}allowed_commands = {{"status": ["/usr/bin/fixed-tool", "--status"]}}\n'
+                f"{indent}arguments = allowed_commands.get({argument})\n"
+                f"{indent}if arguments is None:\n"
+                f'{indent}    raise ValueError("unsupported command")\n'
+                f"{indent}subprocess.run(arguments, check=True, shell=False)"
+            )
         return (
             f"{indent}if (!ALLOWED_ARGUMENTS.contains(validatedArgument)) {{\n"
             f'{indent}    throw new IllegalArgumentException("unsupported argument");\n'

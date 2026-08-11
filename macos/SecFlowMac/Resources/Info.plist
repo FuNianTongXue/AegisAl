@@ -10,6 +10,8 @@
     <string>SecFlowMac</string>
     <key>CFBundleIdentifier</key>
     <string>ai.secflow.knowledge-assistant</string>
+    <key>CFBundleIconFile</key>
+    <string>SecFlow.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

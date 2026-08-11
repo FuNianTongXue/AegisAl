@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from app.intelligence import _VulnerabilityCatalog
 from app.memory import LongTermMemoryService
+from app.secure_storage import _load_keychain_key
 from app.storage import StateStore, default_state
 from app.task_store import AgentTaskStore
 
@@ -17,6 +19,29 @@ TEST_MASTER_KEY = "unit-test-secflow-local-storage-key"
 
 
 class SecureStorageTests(unittest.TestCase):
+    def test_keychain_lookup_timeout_falls_back_without_aborting_startup(self) -> None:
+        with (
+            patch("app.secure_storage.sys.platform", "darwin"),
+            patch("app.secure_storage.Path.exists", return_value=True),
+            patch(
+                "app.secure_storage.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="security", timeout=5),
+            ),
+        ):
+            self.assertIsNone(_load_keychain_key())
+
+    def test_keychain_create_timeout_falls_back_without_aborting_startup(self) -> None:
+        lookup_failed = subprocess.CompletedProcess(args=["security"], returncode=44, stdout="", stderr="")
+        with (
+            patch("app.secure_storage.sys.platform", "darwin"),
+            patch("app.secure_storage.Path.exists", return_value=True),
+            patch(
+                "app.secure_storage.subprocess.run",
+                side_effect=[lookup_failed, subprocess.TimeoutExpired(cmd="security", timeout=5)],
+            ),
+        ):
+            self.assertIsNone(_load_keychain_key())
+
     def test_stores_recover_when_ciphertext_uses_an_unavailable_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

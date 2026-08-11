@@ -1,0 +1,114 @@
+{
+  "version": "go-external-cwe-adjudications-v1",
+  "description": "Case-level adjudications for residual Go external-corpus label artifacts and conflicts observed after v85. This is a development truth overlay, not a sealed qualification set.",
+  "metric_scope": "adjudicated_cwe_truth_partial",
+  "methodology": {
+    "negative_label_scope": "adjudicated_partial",
+    "cwe_complete_negative_labels": false,
+    "qualification_eligible": false,
+    "source_results": "docs/go-external-development-recall-v85-results.json",
+    "source_attribution": "docs/go-external-development-recall-v85-failure-attribution.json",
+    "policy": "Only override cases where source code evidence shows an upstream fixed-file artifact, an isomorphic positive/negative label conflict, or an already-safe flow. Do not broaden product rules to satisfy these upstream labels."
+  },
+  "cases": [
+    {
+      "id": "gosec:G104:g104_samples.go:0:1",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-703"],
+      "classification": "label_conflict",
+      "product_action": "do_not_add_broad_rule",
+      "evidence": "Bare ioutil.WriteFile(...) ignoring error is isomorphic to gosec:G104:g104_samples.go:0:5, which the same external set labels negative."
+    },
+    {
+      "id": "gosec:G118:g118_samples.go:0:81",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-400"],
+      "classification": "safe_or_bounded_flow",
+      "product_action": "do_not_flag",
+      "evidence": "cancel is stored in interface{} and invoked through defer iface.(func())(), so the context release path exists."
+    },
+    {
+      "id": "gosec:G120:g120_samples.go:0:11",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-400"],
+      "classification": "safe_or_bounded_flow",
+      "product_action": "do_not_flag",
+      "evidence": "r.Body is limited with http.MaxBytesReader before ParseMultipartForm."
+    },
+    {
+      "id": "semgrep-rules:go/lang/security/audit/crypto/math_random.fixed.go:6:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-338"],
+      "classification": "upstream_autofix_artifact",
+      "product_action": "do_not_flag",
+      "evidence": "The fixed file imports crypto/rand, not math/rand."
+    },
+    {
+      "id": "semgrep-rules:go/lang/security/audit/crypto/math_random.fixed.go:8:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-338"],
+      "classification": "upstream_autofix_artifact",
+      "product_action": "do_not_flag",
+      "evidence": "The fixed file imports crypto/rand, not math/rand."
+    },
+    {
+      "id": "semgrep-rules:go/lang/security/audit/crypto/math_random.fixed.go:10:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-338"],
+      "classification": "upstream_autofix_artifact",
+      "product_action": "do_not_flag",
+      "evidence": "The fixed file imports crypto/rand, not math/rand."
+    },
+    {
+      "id": "semgrep-rules:go/lang/security/audit/net/use-tls.fixed.go:16:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-319"],
+      "classification": "upstream_autofix_artifact",
+      "product_action": "do_not_flag",
+      "evidence": "The fixed file uses http.ListenAndServeTLS(...), not plaintext ListenAndServe."
+    },
+    {
+      "id": "semgrep-rules:go/lang/security/audit/xss/import-text-template.fixed.go:8:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-79"],
+      "classification": "upstream_autofix_artifact",
+      "product_action": "do_not_flag",
+      "evidence": "The fixed file imports html/template; importing html/template is not XSS by itself."
+    },
+    {
+      "id": "semgrep-rules:go/lang/security/audit/xss/no-direct-write-to-responsewriter.go:43:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-79"],
+      "classification": "label_conflict",
+      "product_action": "do_not_add_broad_rule",
+      "evidence": "The line formats internal constant movie quote data into HTML and is isomorphic to raw-html-format.go:43, which the same external set labels negative."
+    },
+    {
+      "id": "semgrep-rules:go/template/security/insecure-types.go:18:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-79"],
+      "classification": "overbroad_upstream_rule",
+      "product_action": "do_not_flag",
+      "evidence": "Static template.JS literal without external input or dynamic data flow."
+    },
+    {
+      "id": "semgrep-rules:go/template/security/insecure-types.go:21:positive",
+      "action": "override",
+      "vulnerable": false,
+      "cwes": ["CWE-79"],
+      "classification": "overbroad_upstream_rule",
+      "product_action": "do_not_flag",
+      "evidence": "Static template.JSStr literal without external input or dynamic data flow."
+    }
+  ]
+}

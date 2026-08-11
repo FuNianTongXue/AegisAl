@@ -284,6 +284,143 @@ def scan_dependency_attachments(
     }
 
 
+def read_project_identities(attachments: list[dict[str, Any]]) -> list[str]:
+    """Extract the project's own coordinates from its build manifests.
+
+    Source-import inference must never report the project's own packages as
+    external dependencies. The identities returned here (Maven groupId,
+    Gradle group, package.json name, go.mod module path, pyproject/setup.py
+    name, Cargo package name) act as self-reference prefixes.
+    """
+    identities: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        clean = str(value or "").strip().strip("'\"").lower()
+        if not clean or clean in seen:
+            return
+        seen.add(clean)
+        identities.append(clean)
+        # Python/Rust import names use underscores where package names use dashes.
+        if "-" in clean:
+            dashed = clean.replace("-", "_")
+            if dashed not in seen:
+                seen.add(dashed)
+                identities.append(dashed)
+
+    for attachment in attachments:
+        file_name = str(attachment.get("file_name") or attachment.get("fileName") or "").strip()
+        content = str(attachment.get("content") or "")
+        if not file_name or not content:
+            continue
+        basename = PurePosixPath(file_name.replace("\\", "/")).name.lower()
+        if basename == "pom.xml":
+            add(_pom_project_group_id(content))
+        elif is_gradle_build_file_name(file_name):
+            match = re.search(r"""(?m)^\s*group\s*[= ]\s*['"]([^'"]+)['"]""", content)
+            if match:
+                add(match.group(1))
+        elif basename == "gradle.properties":
+            match = re.search(r"(?m)^\s*group\s*[=:]\s*(\S+)", content)
+            if match:
+                add(match.group(1))
+        elif basename == "go.mod":
+            match = re.search(r"(?m)^\s*module\s+(\S+)", content)
+            if match:
+                add(match.group(1))
+        elif basename == "package.json":
+            try:
+                add(json.loads(content).get("name"))
+            except (ValueError, AttributeError):
+                continue
+        elif basename == "pyproject.toml":
+            try:
+                parsed = tomllib.loads(content)
+            except (tomllib.TOMLDecodeError, ValueError):
+                continue
+            project = parsed.get("project") if isinstance(parsed, dict) else None
+            if isinstance(project, dict):
+                add(project.get("name"))
+            poetry = parsed.get("tool", {}).get("poetry") if isinstance(parsed, dict) else None
+            if isinstance(poetry, dict):
+                add(poetry.get("name"))
+        elif basename == "setup.py":
+            match = re.search(r"""(?m)^\s*name\s*=\s*['"]([^'"]+)['"]""", content)
+            if match:
+                add(match.group(1))
+        elif basename == "cargo.toml":
+            try:
+                parsed = tomllib.loads(content)
+            except (tomllib.TOMLDecodeError, ValueError):
+                continue
+            package = parsed.get("package") if isinstance(parsed, dict) else None
+            if isinstance(package, dict):
+                add(package.get("name"))
+    return identities
+
+
+def _pom_project_group_id(content: str) -> str:
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return ""
+    properties = collect_pom_properties(root)
+    group_id = resolve_pom_value(child_text(root, "groupId"), properties)
+    if group_id:
+        return group_id
+    parent = next(iter(direct_children(root, "parent")), None)
+    if parent is not None:
+        return resolve_pom_value(child_text(parent, "groupId"), properties)
+    return ""
+
+
+def is_self_reference(name: str, identities: list[str]) -> bool:
+    candidate = str(name or "").strip().lower()
+    if not candidate:
+        return False
+    group = candidate.split(":", 1)[0]
+    for identity in identities:
+        if (
+            candidate == identity
+            or candidate.startswith(f"{identity}.")
+            or candidate.startswith(f"{identity}/")
+            or identity.startswith(f"{candidate}.")
+            or group == identity
+            or group.startswith(f"{identity}.")
+        ):
+            return True
+    return False
+
+
+def split_dependency_layers(
+    dependencies: list[dict[str, Any]],
+    identities: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split merged dependency facts into SBOM-declared and code-inferred layers.
+
+    Declared facts come from build manifests/lock files and are the only SBOM
+    and vulnerability-matching basis. Inferred facts come from source imports.
+    Self-references to the project's own coordinates are dropped from both
+    layers: own packages from imports, and own-group manifest entries such as
+    historical self artifacts pulled in by compatibility test matrices.
+    """
+    declared: list[dict[str, Any]] = []
+    inferred: list[dict[str, Any]] = []
+    for item in dependencies:
+        if not isinstance(item, dict):
+            continue
+        record = dict(item)
+        if identities and is_self_reference(str(record.get("name") or ""), identities):
+            continue
+        if str(record.get("source_type") or "") in BUILD_MANIFEST_SOURCE_TYPES:
+            record["layer"] = "declared"
+            declared.append(record)
+            continue
+        record["layer"] = "inferred"
+        inferred.append(record)
+    return declared, inferred
+
+
 def raw_dependency_attachment_priority(attachment: dict[str, Any]) -> tuple[int, str]:
     file_name = str(attachment.get("file_name") or attachment.get("fileName") or "").strip()
     kind = attachment_kind(file_name) if file_name and is_allowed_attachment_name(file_name) else "code"
@@ -675,6 +812,109 @@ def resolve_pom_value(value: str, properties: dict[str, str]) -> str:
     return value.strip()
 
 
+GRADLE_CENTRALIZED_MAP_ENTRY = re.compile(r"""(?m)^\s*([A-Za-z_][\w]*)\s*:\s*(.+?),?\s*$""")
+
+
+def extract_gradle_map_bodies(content: str, map_name: str) -> list[str]:
+    """Return the bracket bodies of `<map_name> = [...]` / `<map_name> += [...]` literals."""
+    pattern = re.compile(rf"""(?<![\w.]){re.escape(map_name)}\s*(?:\+=|=)\s*\[""")
+    bodies: list[str] = []
+    for match in pattern.finditer(content):
+        depth = 1
+        index = match.end()
+        start = index
+        quote = ""
+        while index < len(content) and depth:
+            char = content[index]
+            if quote:
+                if char == quote and content[index - 1] != "\\":
+                    quote = ""
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+            index += 1
+        bodies.append(content[start : index - 1])
+    return bodies
+
+
+def _gradle_map_entry_value(expression: str) -> str:
+    """Extract the effective literal from a centralized map entry expression.
+
+    Plain entries are one quoted string; conditional expressions such as
+    `project.hasProperty('x') ? x : "1.2.3"` fall back to their last quoted
+    literal (the default branch).
+    """
+    quoted = re.findall(r"""['"]([^'"]+)['"]""", expression)
+    return quoted[-1] if quoted else ""
+
+
+def parse_gradle_centralized_dependency_maps(
+    file_name: str,
+    content: str,
+) -> dict[str, GradleCatalogDependency]:
+    """Parse kafka-style centralized `versions`/`libs` maps from gradle scripts.
+
+    Projects such as Apache Kafka declare dependencies in
+    `gradle/dependencies.gradle` as `versions += [name: "1.2.3"]` and
+    `libs += [alias: "group:artifact:$versions.name"]`, then reference them
+    from build scripts as `implementation libs.alias`. Loading these maps as
+    catalog libraries lets the regular accessor resolution emit the
+    components with their resolved versions.
+    """
+    clean = strip_gradle_comments(content)
+    variables = extract_gradle_variables(clean)
+    versions: dict[str, str] = {}
+    for body in extract_gradle_map_bodies(clean, "versions"):
+        for match in GRADLE_CENTRALIZED_MAP_ENTRY.finditer(body):
+            value = _gradle_map_entry_value(match.group(2))
+            if value:
+                versions[match.group(1)] = value
+    for match in re.finditer(
+        r"""versions\s*\[\s*['"]([A-Za-z_]\w*)['"]\s*\]\s*=\s*([^\n]+)""",
+        clean,
+    ):
+        value = _gradle_map_entry_value(match.group(2)) or variables.get(match.group(2).strip(), "")
+        if value:
+            versions.setdefault(match.group(1), value)
+
+    def substitute_versions(coordinate: str) -> str:
+        return re.sub(
+            r"\$\{?versions\.([A-Za-z_]\w*)\}?",
+            lambda item: versions.get(item.group(1), item.group(0)),
+            coordinate,
+        )
+
+    libraries: dict[str, GradleCatalogDependency] = {}
+    for body in extract_gradle_map_bodies(clean, "libs"):
+        for match in GRADLE_CENTRALIZED_MAP_ENTRY.finditer(body):
+            alias = match.group(1)
+            raw_coordinate = _gradle_map_entry_value(match.group(2))
+            if not raw_coordinate:
+                continue
+            resolved = substitute_versions(raw_coordinate)
+            parsed = parse_gradle_coordinate_parts(resolved)
+            if not parsed:
+                continue
+            group, artifact, version = parsed
+            if "$" in group or "$" in artifact:
+                continue
+            if "$" in version:
+                version = ""
+            dependency = GradleCatalogDependency(
+                alias=alias,
+                name=f"{group}:{artifact}",
+                version=version,
+                source_file=file_name,
+                declaration=resolved,
+            )
+            for key in gradle_accessor_lookup_keys(alias):
+                libraries[key] = dependency
+    return libraries
+
+
 def collect_attachment_gradle_context(attachments: list[tuple[str, str, str]]) -> GradleDependencyContext:
     variables: dict[str, str] = {}
     catalog_libraries: dict[str, GradleCatalogDependency] = {}
@@ -684,6 +924,7 @@ def collect_attachment_gradle_context(attachments: list[tuple[str, str, str]]) -
             variables.update(parse_gradle_properties(content))
         elif kind == "gradle":
             variables.update(extract_gradle_variables(content))
+            catalog_libraries.update(parse_gradle_centralized_dependency_maps(file_name, content))
         elif kind == "gradle_version_catalog":
             libraries, bundles = parse_gradle_version_catalog(file_name, content)
             catalog_libraries.update(libraries)
@@ -1718,17 +1959,17 @@ def parse_jvm_import_dependencies(file_name: str, content: str) -> list[Dependen
     for imported in imports:
         if imported.startswith(STANDARD_IMPORT_PREFIXES):
             continue
-        mapped = map_jvm_import_to_dependency(imported)
+        mapped = classify_jvm_import(imported)
         if not mapped:
             continue
-        ecosystem, name = mapped
+        ecosystem, name, confidence = mapped
         fact = DependencyFact(
             ecosystem=ecosystem,
             name=name,
             source_file=file_name,
             source_type="code",
             declaration=f"import {imported}",
-            confidence="medium",
+            confidence=confidence,
         )
         if fact.key not in seen:
             result.append(fact)
@@ -1736,15 +1977,37 @@ def parse_jvm_import_dependencies(file_name: str, content: str) -> list[Dependen
     return result
 
 
-def map_jvm_import_to_dependency(imported: str) -> tuple[str, str] | None:
+def classify_jvm_import(imported: str) -> tuple[str, str, str] | None:
+    """Map a JVM import to (ecosystem, package, confidence).
+
+    Known prefixes resolve to exact Maven coordinates at medium confidence.
+    The fallback cuts the import at the first class-like (Capitalized) segment
+    so class/method names never leak into the guessed group id, then keeps up
+    to three leading package segments at low confidence.
+    """
     for prefix, ecosystem, package in JAVA_IMPORT_MAPPINGS:
         if imported.startswith(prefix):
-            return ecosystem, package
-    parts = imported.split(".")
+            return ecosystem, package, "medium"
+    parts = [part for part in imported.split(".") if part]
+    cut = len(parts)
+    for index, part in enumerate(parts):
+        if part[:1].isupper():
+            cut = index
+            break
+    parts = parts[:cut]
     if len(parts) >= 3:
-        group = ".".join(parts[:3])
-        return "Maven", group
+        return "Maven", ".".join(parts[:3]), "low"
+    if len(parts) == 2:
+        return "Maven", ".".join(parts), "low"
     return None
+
+
+def map_jvm_import_to_dependency(imported: str) -> tuple[str, str] | None:
+    classified = classify_jvm_import(imported)
+    if not classified:
+        return None
+    ecosystem, name, _confidence = classified
+    return ecosystem, name
 
 
 def parse_python_import_dependencies(file_name: str, content: str) -> list[DependencyFact]:

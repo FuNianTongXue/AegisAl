@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 from app.semgrep_tool import (
     DEFAULT_SEMGREP_RULES,
@@ -45,6 +49,51 @@ class SemgrepToolTests(unittest.TestCase):
         self.assertTrue(_is_review_finding({"confidence": "high", "rule_profile": "review"}))
         self.assertFalse(_is_review_finding({"confidence": "low", "rule_profile": "recall"}))
         self.assertFalse(_is_review_finding({"confidence": "high", "rule_profile": "standard"}))
+
+    def test_analyze_stops_immediately_when_cancelled(self) -> None:
+        attachments = [
+            {"file_name": f"src/Service{index}.java", "content": f"class Service{index} {{}}\n"}
+            for index in range(16)
+        ]
+        tool = SemgrepTool()
+
+        result = tool.analyze(
+            attachments,
+            {"dependencies": []},
+            [],
+            cancelled=lambda: True,
+            language_hint="java",
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["cli_status"], "cancelled")
+        self.assertEqual(result["finding_count"], 0)
+        self.assertEqual(result["files"], [])
+        self.assertIn("静态分析已由用户停止。", " ".join(result["diagnostics"]))
+
+    def test_analyze_honors_cancellation_during_per_file_syntax_phase(self) -> None:
+        attachments = [
+            {"file_name": f"src/Service{index}.java", "content": f"class Service{index} {{}}\n"}
+            for index in range(16)
+        ]
+        checks = {"count": 0}
+
+        def cancelled() -> bool:
+            checks["count"] += 1
+            return checks["count"] > 3
+
+        tool = SemgrepTool()
+        result = tool.analyze(
+            attachments,
+            {"dependencies": []},
+            [],
+            cancelled=cancelled,
+            language_hint="java",
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertLess(checks["count"], len(attachments))
+        self.assertIn("静态分析已由用户停止。", " ".join(result["diagnostics"]))
 
     def test_complete_scan_processes_all_attachments(self) -> None:
         attachments = [
@@ -775,6 +824,49 @@ class ReportStoreTests(unittest.TestCase):
             detail = store.get_report(saved["id"])
             self.assertIn("source", detail["content"])
 
+    def test_report_localizes_dependency_and_code_finding_severity_labels(self) -> None:
+        records = [
+            {
+                "id": "CVE-2026-10001",
+                "title": "Demo dependency vulnerability",
+                "severity": "HIGH",
+                "summary_zh": "Dependency issue summary",
+            }
+        ]
+        static_analysis = {
+            "finding_count": 1,
+            "findings": [
+                {
+                    "id": "finding-1",
+                    "title": "Command injection",
+                    "severity": "CRITICAL",
+                    "file": "demo.py",
+                    "risk_line": 7,
+                    "vulnerable_snippet": "os.system(command)",
+                    "remediation": "Use a safe process API.",
+                }
+            ],
+        }
+        arguments = {
+            "question": "Scan demo",
+            "dependency_scan": {"files": [{"file_name": "demo.py", "kind": "code"}], "dependencies": []},
+            "records": records,
+            "static_analysis": static_analysis,
+            "summary": "Scan completed.",
+        }
+
+        chinese = build_dependency_markdown_report(**arguments, language="zh-Hans")
+        english = build_dependency_markdown_report(**arguments, language="en")
+
+        self.assertIn("- 严重等级：高危", chinese)
+        self.assertIn("- 严重等级：严重", chinese)
+        self.assertNotIn("严重等级：HIGH", chinese)
+        self.assertNotIn("严重等级：CRITICAL", chinese)
+        self.assertIn("- Severity: High", english)
+        self.assertIn("- Severity: Critical", english)
+        self.assertNotIn("- Severity: HIGH", english)
+        self.assertNotIn("- Severity: CRITICAL", english)
+
     def test_report_store_uses_project_datetime_name_and_exports_three_formats(self) -> None:
         content = build_dependency_markdown_report(
             question="扫描资金项目",
@@ -801,7 +893,7 @@ class ReportStoreTests(unittest.TestCase):
             )
 
             self.assertRegex(saved["file_name"], r"^PaymentWalletApplicationAPI_\d{8}-\d{6}\.md$")
-            self.assertEqual(set(saved["available_formats"]), {"html", "md", "docx", "pdf"})
+            self.assertEqual(set(saved["available_formats"]), {"html", "md", "docx", "xlsx", "pdf"})
             md_path, md_name = store.resolve_download(saved["id"])
             html_path, html_name, html_type = store.resolve_download(saved["id"], "html")
             pdf_path, pdf_name, pdf_type = store.resolve_download(saved["id"], "pdf")
@@ -814,6 +906,80 @@ class ReportStoreTests(unittest.TestCase):
             self.assertIn("安全智脑报告", html_path.read_text(encoding="utf-8"))
             self.assertTrue(pdf_path.read_bytes().startswith(b"%PDF"))
             self.assertTrue(md_path.read_text(encoding="utf-8").startswith("# "))
+
+    def test_binary_reports_render_mermaid_as_structured_content(self) -> None:
+        long_path = "src/main/java/com/example/payment/checkout/OrderController.java:10000"
+        markdown = f"""# 项目代码安全扫描报告
+
+## 1. 执行摘要
+
+- 风险位置：`{long_path}`
+
+```mermaid
+flowchart LR
+  SOURCE["HTTP 请求参数"]
+  SINK["OrderController.java:10000"]
+  SOURCE -->|污点传播| SINK
+```
+
+## 2. 证据代码
+
+```java
+ 9999 | String command = request.getParameter("command");
+10000 | Runtime.getRuntime().exec(commandWithAnIntentionallyLongNameThatMustWrapWithoutBeingClipped);
+10001 | audit(command);
+```
+
+| 序号 | 生态 | 组件 | 当前版本 | 漏洞编号 | 严重度 | 漏洞描述 | 修复版本 | 情报来源 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Maven | org.example:payment-component-with-a-long-name | 1.0.0 | CVE-2026-10000 | 高危 | 组件存在可被外部输入触发的远程命令执行风险 | 1.0.1 | NVD、GitHub Advisory |
+"""
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_STORAGE_MASTER_KEY": "unit-test-report-key"},
+        ):
+            store = ReportStore(Path(temp_dir))
+            saved = store.save_markdown(
+                "项目代码安全扫描报告",
+                markdown,
+                mode="code_scan_report",
+                vulnerability_count=1,
+                finding_count=1,
+                metadata={"language": "zh-Hans"},
+            )
+            md_path, _ = store.resolve_download(saved["id"])
+            docx_path, _, _ = store.resolve_download(saved["id"], "docx")
+            pdf_path, _, _ = store.resolve_download(saved["id"], "pdf")
+
+            markdown_output = md_path.read_text(encoding="utf-8")
+            self.assertIn("```mermaid", markdown_output)
+            self.assertIn("flowchart LR", markdown_output)
+
+            with zipfile.ZipFile(docx_path) as archive:
+                document_xml = archive.read("word/document.xml")
+            root = ElementTree.fromstring(document_xml)
+            docx_text = " ".join(root.itertext())
+            self.assertNotIn("flowchart LR", docx_text)
+            self.assertNotIn("SOURCE -->", docx_text)
+            self.assertIn("HTTP 请求参数", docx_text)
+            self.assertIn("OrderController.java:10000", docx_text)
+            self.assertIn(long_path, docx_text)
+            self.assertIn("Runtime.getRuntime().exec", docx_text)
+
+            pdftotext = shutil.which("pdftotext")
+            if pdftotext:
+                extracted_path = Path(temp_dir) / "report.txt"
+                subprocess.run(
+                    [pdftotext, "-layout", str(pdf_path), str(extracted_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                pdf_text = extracted_path.read_text(encoding="utf-8", errors="replace")
+                self.assertNotIn("flowchart LR", pdf_text)
+                self.assertNotIn("SOURCE -->", pdf_text)
+                self.assertIn("OrderController.java:10000", pdf_text)
+                self.assertIn("Runtime.getRuntime().exec", pdf_text)
 
     def test_identical_upload_fingerprint_reuses_one_downloadable_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {"SECFLOW_STORAGE_MASTER_KEY": "unit-test-report-key"}):
@@ -972,7 +1138,9 @@ class ReportStoreTests(unittest.TestCase):
     def test_pdf_path_keeps_file_name_and_line_together(self) -> None:
         rendered = _pdf_inline_markdown("src/main/java/Demo.java:42")
 
-        self.assertIn("/<br/>Demo.java:&nbsp;42", rendered)
+        self.assertEqual(rendered, "src/main/java/Demo.java:42")
+        self.assertNotIn("<br/>", rendered)
+        self.assertNotIn("&nbsp;", rendered)
 
     def test_html_report_uses_native_secflow_font_cascade(self) -> None:
         rendered = _build_html_report("# Demo", {"language": "zh-Hans"})
@@ -992,8 +1160,35 @@ class ReportStoreTests(unittest.TestCase):
     def test_report_generation_time_uses_china_standard_time(self) -> None:
         self.assertEqual(
             _report_china_time("2026-07-28T06:13:21+00:00"),
-            "2026-07-28 14:13:21 UTC+08:00",
+            "2026-07-28 14:13",
         )
+        self.assertEqual(_report_china_time("2026-07-28 14:13:21 UTC+08:00"), "2026-07-28 14:13")
+
+    def test_agent_execution_events_use_china_time_without_iso_timestamps(self) -> None:
+        report = build_agent_task_markdown_report(
+            {
+                "workspace_name": "demo",
+                "workspace_path": "/tmp/demo",
+                "workspace_type": "directory",
+                "objective": "scan project",
+                "events": [
+                    {
+                        "sequence": 1,
+                        "time": "2026-07-30T01:33:17+00:00",
+                        "node": "scan_python",
+                        "status": "completed",
+                        "message": "扫描完成。",
+                    }
+                ],
+                "result": {"languages": [], "language_results": {}},
+            },
+            mcp_audit={"status": "completed", "fact_count": 1, "invoked_at": "2026-07-30T01:32:45+00:00"},
+        )
+
+        self.assertIn("调用时间 2026-07-30 09:32", report)
+        self.assertIn("| 1 | 2026-07-30 09:33 | scan_python | completed | 扫描完成。 |", report)
+        self.assertNotIn("2026-07-30T01:33:17+00:00", report)
+        self.assertNotIn("2026-07-30T01:32:45+00:00", report)
 
     def test_code_report_removes_file_rule_section_and_visible_scan_mode(self) -> None:
         report = build_agent_task_markdown_report(
@@ -1047,7 +1242,7 @@ class ReportStoreTests(unittest.TestCase):
 
         cleaned = _sanitize_report_content(legacy)
 
-        self.assertIn("2026-07-28 14:13:21 UTC+08:00", cleaned)
+        self.assertIn("2026-07-28 14:13", cleaned)
         self.assertNotIn("扫描文件与规则", cleaned)
         self.assertNotIn("python-security.yml", cleaned)
         self.assertNotIn("扫描模式", cleaned)
@@ -1069,7 +1264,7 @@ class ReportStoreTests(unittest.TestCase):
 
         rendered = _build_html_report("# demo 代码安全漏洞扫描报告\n\n## 1. 摘要\n\n完成。", metadata)
 
-        self.assertIn("生成时间: 2026-07-28 14:13:21 UTC+08:00", rendered)
+        self.assertIn("生成时间: 2026-07-28 14:13", rendered)
         self.assertIn("<b>高危</b><span>1 · 25.0%</span>", rendered)
         self.assertIn("<b>中危</b><span>3 · 75.0%</span>", rendered)
         self.assertNotIn("HTML / PDF / Markdown", rendered)
@@ -1168,7 +1363,7 @@ class ReportStoreTests(unittest.TestCase):
                 finding_count=0,
             )
 
-            self.assertEqual(set(saved["available_formats"]), {"html", "md", "docx"})
+            self.assertEqual(set(saved["available_formats"]), {"html", "md", "docx", "xlsx"})
             with self.assertRaises(ValueError):
                 store.resolve_download(saved["id"], "pdf")
 

@@ -41,6 +41,7 @@ class TrialManagerTests(unittest.TestCase):
             os.environ,
             {
                 "SECFLOW_TRIAL_ENABLED": "1",
+                "SECFLOW_TRIAL_DURATION_HOURS": "72",
                 "SECFLOW_STORAGE_MASTER_KEY": TEST_MASTER_KEY,
                 "SECFLOW_DISABLE_BATCH_SCHEDULER": "1",
             },
@@ -79,6 +80,25 @@ class TrialManagerTests(unittest.TestCase):
             self.assertFalse(status["usable"])
             self.assertEqual(status["state"], "expired")
             self.assertEqual(status["secondsRemaining"], 0)
+
+    def test_mac_package_can_configure_a_seven_day_trial(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SECFLOW_TRIAL_DURATION_HOURS": "168"},
+        ):
+            clock = MutableClock(datetime(2026, 7, 20, 2, 0, tzinfo=timezone.utc))
+            manager = TrialManager(Path(temp_dir) / "trial.dat", now=clock, binding="test-binding")
+
+            active = manager.status()
+            self.assertEqual(active["durationHours"], 168)
+            self.assertEqual(active["secondsRemaining"], 168 * 60 * 60)
+            self.assertEqual(active["expiresAt"], "2026-07-27T02:00:00Z")
+            self.assertEqual(active["message"], "7 天试用版可用。")
+
+            clock.value += timedelta(hours=168)
+            expired = manager.status()
+            self.assertFalse(expired["usable"])
+            self.assertEqual(expired["state"], "expired")
 
     def test_missing_primary_copy_is_restored_without_resetting_trial(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

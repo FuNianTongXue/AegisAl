@@ -566,6 +566,57 @@ class JavaFlowAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["chunk_count"], 2)
         self.assertEqual(result["findings"][0]["scenario"], "command_execution")
 
+    def test_complete_analysis_has_no_time_or_method_limit_and_reaches_fixed_point(self) -> None:
+        wrappers = "\n".join(
+            f"void level{index}(String value) {{ level{index + 1}(value); }}"
+            for index in range(1, 8)
+        )
+        source = f"""
+        import org.springframework.web.bind.annotation.GetMapping;
+        import org.springframework.web.bind.annotation.RequestParam;
+        class DeepController {{
+          @GetMapping void entry(@RequestParam String value) {{ level1(value); }}
+          {wrappers}
+          void level8(String value) {{ Runtime.getRuntime().exec(value); }}
+        }}
+        """
+        files = [{"file_name": "src/main/java/DeepController.java", "content": source}]
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SECFLOW_JAVA_FLOW_MAX_SECONDS": "2",
+                "SECFLOW_JAVA_FLOW_MAX_METHODS": "100",
+                "SECFLOW_JAVA_FLOW_MAX_ITERATIONS": "6",
+            },
+        ):
+            bounded = analyze_java_interprocedural(files)
+            complete = analyze_java_interprocedural(files, complete_analysis=True)
+
+        self.assertEqual(JavaFlowAnalyzer(files, complete_analysis=True).max_seconds, None)
+        self.assertFalse(any(item.get("scenario") == "command_execution" for item in bounded["findings"]))
+        self.assertTrue(any(item.get("scenario") == "command_execution" for item in complete["findings"]))
+        self.assertGreater(complete["iterations"], 6)
+        self.assertEqual(complete["status"], "completed")
+
+    def test_complete_analysis_remains_user_cancellable_without_timeout(self) -> None:
+        source = "class Demo { void one() {} void two() {} }"
+        checks = 0
+
+        def cancelled() -> bool:
+            nonlocal checks
+            checks += 1
+            return checks >= 3
+
+        result = analyze_java_interprocedural(
+            [{"file_name": "Demo.java", "content": source}],
+            complete_analysis=True,
+            cancelled=cancelled,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertIn("用户停止", " ".join(result["diagnostics"]))
+
 
 if __name__ == "__main__":
     unittest.main()

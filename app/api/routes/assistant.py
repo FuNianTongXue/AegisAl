@@ -17,6 +17,7 @@ from app.agent.assistant_service import (
 )
 from app.langgraph.assistant_graph import knowledge_graph
 from app.langgraph.checkpoints import InterruptStateConflictError
+from app.langgraph.multi_agent_graph import assistant_multi_agent_supervisor
 from app.mcp.component_query import artifact_store as component_artifact_store
 from app.mcp.sbom import artifact_store as sbom_artifact_store
 from app.memory import memory_service
@@ -26,7 +27,7 @@ from app.models import (
     AssistantConversationArchiveRequest,
     AssistantInterruptResumeRequest,
 )
-from app.privacy import public_answer_payload, sanitize_public_text
+from app.privacy import sanitize_public_text
 from app.reports import report_artifact_store
 
 
@@ -39,7 +40,10 @@ def _ok(data: Any = None, message: str = "ok") -> ApiResponse:
 
 @router.get("/graph", response_model=ApiResponse)
 def assistant_graph() -> ApiResponse:
-    return _ok(knowledge_graph.graph_spec(), "Assistant LangGraph loaded.")
+    return _ok(
+        assistant_multi_agent_supervisor.graph_spec(knowledge_graph=knowledge_graph),
+        "Assistant multi-agent LangGraph loaded.",
+    )
 
 
 @router.post("/questions", response_model=ApiResponse)
@@ -55,25 +59,28 @@ async def ask_stream(payload: AskRequest) -> StreamingResponse:
     async def stream():
         queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        emitted_content = [False]
 
         def emit_trace(item: dict[str, Any]) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, ("trace", item))
 
+        def emit_content(delta: str) -> None:
+            if not delta:
+                return
+            emitted_content[0] = True
+            loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
+
         def run_graph() -> None:
             try:
-                result = public_answer_payload(
-                    knowledge_graph.invoke(
-                        payload.question,
-                        payload.top_k,
-                        user_id=payload.user_id,
-                        session_id=payload.session_id,
-                        response_language=payload.response_language,
-                        attachments=[attachment.model_dump() for attachment in payload.attachments],
-                        event_sink=emit_trace,
-                    )
+                result = invoke_assistant_question(
+                    payload,
+                    graph=knowledge_graph,
+                    event_sink=emit_trace,
+                    content_sink=emit_content,
                 )
-                for delta in assistant_content_chunks(str(result.get("summary") or "")):
-                    loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
+                if not emitted_content[0]:
+                    for delta in assistant_content_chunks(str(result.get("summary") or "")):
+                        loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
                 loop.call_soon_threadsafe(queue.put_nowait, ("result", result))
             except Exception as exc:  # noqa: BLE001
                 message = sanitize_public_text(str(exc)).strip() or "Assistant response generation failed."
@@ -133,7 +140,7 @@ def resume_interrupt(payload: AssistantInterruptResumeRequest) -> ApiResponse:
     except InterruptStateConflictError as exc:
         raise HTTPException(status_code=409, detail="该确认卡片已失效，流程已进入下一阶段，请刷新当前对话。") from exc
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Unknown or unauthorized assistant interrupt.") from exc
+        raise HTTPException(status_code=404, detail="该确认卡片不属于当前会话或已失效，请切换到发起任务的对话后重试。") from exc
     return _ok(outcome, "Assistant interrupt resumed.")
 
 
@@ -182,6 +189,20 @@ def delete_conversation(
         return _ok(memory_service.delete_conversation(user_id, session_id), "Conversation deleted.")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+
+@router.delete("/short-term-sessions/{session_id}", response_model=ApiResponse)
+def clear_short_term_session(
+    session_id: str,
+    user_id: str = Query(default="default", min_length=1, max_length=120),
+) -> ApiResponse:
+    _validate_session_id(session_id)
+    if not session_id.startswith("information:"):
+        raise HTTPException(status_code=422, detail="Invalid short-term consultation session.")
+    return _ok(
+        memory_service.clear_short_term_session(user_id, session_id),
+        "Short-term consultation cleared.",
+    )
 
 
 def _validate_session_id(session_id: str) -> None:

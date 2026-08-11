@@ -171,42 +171,48 @@ def _load_keychain_key() -> bytes | None:
     if not security.exists():
         return None
 
-    existing = subprocess.run(
-        [
-            str(security),
-            "find-generic-password",
-            "-s",
-            _keychain_service(),
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
+    try:
+        existing = subprocess.run(
+            [
+                str(security),
+                "find-generic-password",
+                "-s",
+                _keychain_service(),
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if existing.returncode == 0 and existing.stdout.strip():
         return _decode_or_derive_key(existing.stdout.strip())
 
     encoded = base64.b64encode(os.urandom(32)).decode("ascii")
-    created = subprocess.run(
-        [
-            str(security),
-            "add-generic-password",
-            "-U",
-            "-s",
-            _keychain_service(),
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-            encoded,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
+    try:
+        created = subprocess.run(
+            [
+                str(security),
+                "add-generic-password",
+                "-U",
+                "-s",
+                _keychain_service(),
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+                encoded,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if created.returncode == 0:
         return _decode_or_derive_key(encoded)
     return None

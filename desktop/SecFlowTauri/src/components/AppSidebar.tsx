@@ -1,0 +1,232 @@
+import {
+  Archive,
+  ChevronDown,
+  FileSearch,
+  FolderKanban,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  Search,
+  Settings,
+  ShieldCheck,
+  Trash2,
+  Workflow,
+} from "lucide-react";
+import { useMemo, useState } from "react";
+
+import { useI18n } from "../i18n";
+import { api } from "../lib/api";
+import { openNewTaskWindow } from "../lib/platform";
+import { useAppStore } from "../store/appStore";
+import type { AgentTask, ConversationSummary } from "../types";
+import { BrandMark } from "./BrandMark";
+import { ProfileAvatar } from "./ProfileAvatar";
+
+export function AppSidebar() {
+  const [projectsOpen, setProjectsOpen] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [sidebarView, setSidebarView] = useState<"projects" | "tasks">("tasks");
+  const state = useAppStore();
+  const { t } = useI18n();
+  const projects = useMemo(() => groupProjects(state.tasks), [state.tasks]);
+
+  const openTask = (task: AgentTask) => {
+    state.set({ view: "assistant", activeTaskId: task.id, workspacePath: task.workspace_path, workspaceName: task.workspace_name });
+    state.appendTurn({
+      id: `task:${task.id}`,
+      role: "assistant",
+      content: task.objective,
+      createdAt: task.updated_at,
+      state: task.status === "failed" ? "error" : "completed",
+      task,
+    });
+  };
+
+  const openConversation = async (conversation: ConversationSummary) => {
+    const sessionId = conversation.session_id || conversation.id;
+    const detail = await api.conversation(sessionId, state.userId);
+    const current = useAppStore.getState();
+    const conversationStillExists = current.conversations.some((item) => (
+      item.id === conversation.id || (item.session_id || item.id) === sessionId
+    ));
+    if (!conversationStillExists) return;
+    state.set({
+      view: "assistant",
+      activeSessionId: sessionId,
+      activeTaskId: "",
+      workspacePath: "",
+      workspaceName: "",
+      turns: detail.exchanges.flatMap((exchange) => {
+        // Newer backends persist the complete structured answer as
+        // `answer_payload`; older desktop data used `result`. Reading only the
+        // legacy field silently discarded trace/tool actions after navigation.
+        const result = exchange.answer_payload || exchange.result;
+        return [
+          { id: `${exchange.id}:user`, role: "user" as const, content: exchange.question, createdAt: exchange.created_at || detail.updated_at },
+          {
+            id: `${exchange.id}:assistant`,
+            role: "assistant" as const,
+            content: exchange.answer,
+            createdAt: exchange.created_at || detail.updated_at,
+            result,
+            trace: result?.trace,
+            state: "completed" as const,
+          },
+        ];
+      }),
+    });
+  };
+
+  return (
+    <aside className="app-sidebar" aria-label={t("项目与任务导航")}>
+      <div className="sidebar-spacer" data-tauri-drag-region>
+        <button
+          className="sidebar-collapse-button"
+          aria-label={t(state.sidebarOpen ? "收起侧边栏" : "展开侧边栏")}
+          title={t(state.sidebarOpen ? "收起侧边栏" : "展开侧边栏")}
+          onClick={() => state.set({ sidebarOpen: !state.sidebarOpen })}
+        >
+          {state.sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+        </button>
+      </div>
+      <div className="sidebar-brand">
+        <BrandMark />
+        <strong>安全智脑</strong>
+      </div>
+      <button className="sidebar-command primary" onClick={() => void openNewTaskWindow()}>
+        <Plus size={17} />
+        <span>{t("新建任务")}</span>
+        <kbd>⌘ N</kbd>
+      </button>
+
+      <nav className="sidebar-shortcuts" aria-label={t("功能入口")}>
+        <button onClick={() => state.set({ commandOpen: true })}>
+          <Search size={17} />
+          <span>{t("搜索")}</span>
+          <kbd>⌘ K</kbd>
+        </button>
+        <button className={state.view === "intelligence" ? "active" : ""} onClick={() => state.set({ view: "intelligence" })}>
+          <ShieldCheck size={17} />
+          <span>{t("漏洞情报")}</span>
+        </button>
+        <button className={state.view === "records" ? "active" : ""} onClick={() => state.set({ view: "records" })}>
+          <FileSearch size={17} />
+          <span>{t("漏洞库")}</span>
+        </button>
+      </nav>
+
+      <div className="sidebar-view-switch" role="tablist" aria-label={t("导航视图")}>
+        <button role="tab" aria-selected={sidebarView === "projects"} className={sidebarView === "projects" ? "active" : ""} onClick={() => setSidebarView("projects")}><FolderKanban size={14} /><span>{t("项目")}</span></button>
+        <button
+          role="tab"
+          aria-selected={sidebarView === "tasks"}
+          className={sidebarView === "tasks" ? "active" : ""}
+          onClick={() => {
+            setSidebarView("tasks");
+            state.returnToTaskHome();
+          }}
+        >
+          <Workflow size={14} /><span>{t("任务")}</span>
+        </button>
+      </div>
+
+      <div className="sidebar-scroll">
+        {sidebarView === "projects" ? (
+          <SidebarSection title={t("项目")} open={projectsOpen} onToggle={() => setProjectsOpen((value) => !value)} icon={<FolderKanban size={14} />}>
+            {projects.length ? (
+              projects.map((project) => (
+                <div className="project-group" key={project.path}>
+                  <div className="project-title"><span>{project.name}</span><small>{project.tasks.length}</small></div>
+                  {project.tasks.slice(0, 8).map((task) => (
+                    <ItemMenu
+                      key={task.id}
+                      title={task.objective}
+                      meta={taskStatusLabel(task.status, t)}
+                      active={state.activeTaskId === task.id}
+                      onOpen={() => openTask(task)}
+                      onArchive={() => void api.archiveTask(task.id, state.userId, true).then(() => state.set({ tasks: state.tasks.filter((item) => item.id !== task.id) }))}
+                      onDelete={() => void api.deleteTask(task.id, state.userId).then(() => state.removeTask(task.id))}
+                    />
+                  ))}
+                </div>
+              ))
+            ) : <p className="sidebar-empty">{t("尚未打开项目")}</p>}
+          </SidebarSection>
+        ) : (
+          <SidebarSection title={t("任务")} open={historyOpen} onToggle={() => setHistoryOpen((value) => !value)}>
+            {state.conversations.length ? state.conversations.map((conversation) => (
+              <ItemMenu
+                key={conversation.id}
+                title={conversation.title || conversation.preview || t("未命名对话")}
+                meta={formatRelative(conversation.updated_at, t)}
+                active={state.activeSessionId === (conversation.session_id || conversation.id)}
+                onOpen={() => void openConversation(conversation)}
+                onArchive={() => void api.archiveConversation(conversation.session_id || conversation.id, state.userId, true).then(() => state.set({ conversations: state.conversations.filter((item) => item.id !== conversation.id) }))}
+                onDelete={() => {
+                  const sessionId = conversation.session_id || conversation.id;
+                  void api.deleteConversation(sessionId, state.userId).then(() => state.removeConversation(sessionId, conversation.id));
+                }}
+              />
+            )) : <p className="sidebar-empty">{t("暂无历史任务")}</p>}
+          </SidebarSection>
+        )}
+
+        <button className="archive-entry" onClick={() => state.set({ view: "archive" })}>
+          <Archive size={15} /><span>{t("归档")}</span><small>{state.archivedTasks.length + state.archivedConversations.length}</small>
+        </button>
+      </div>
+
+      <div className="sidebar-footer">
+        <button className="user-footer" onClick={() => state.set({ view: "settings" })}>
+          <ProfileAvatar profile={state.settings?.profile} userId={state.userId} className="user-footer-avatar" />
+          <span><strong>{state.settings?.profile.display_name || t("本机用户")}</strong><small>{state.llm?.model || t("连接使用")}</small></span>
+        </button>
+        <button className="sidebar-settings" aria-label={t("设置")} title={t("设置")} onClick={() => state.set({ view: "settings" })}><Settings size={17} /></button>
+      </div>
+    </aside>
+  );
+}
+
+function SidebarSection({ title, open, onToggle, icon, children }: React.PropsWithChildren<{ title: string; open: boolean; onToggle: () => void; icon?: React.ReactNode }>) {
+  return (
+    <section className="sidebar-section">
+      <button className="section-heading" onClick={onToggle} aria-expanded={open}>
+        {icon}<span>{title}</span><ChevronDown size={14} className={open ? "" : "rotated"} />
+      </button>
+      {open && <div className="section-content">{children}</div>}
+    </section>
+  );
+}
+
+function ItemMenu({ title, meta, active, onOpen, onArchive, onDelete }: { title: string; meta: string; active: boolean; onOpen: () => void; onArchive: () => void; onDelete: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className={`sidebar-item ${active ? "active" : ""}`}>
+      <button className="item-main" onClick={onOpen}><span>{title}</span><small>{meta}</small></button>
+      <details className="item-menu">
+        <summary aria-label={t("更多操作")}><MoreHorizontal size={14} /></summary>
+        <div className="context-menu">
+          <button onClick={onArchive}><Archive size={14} />{t("归档")}</button>
+          <button className="danger" onClick={onDelete}><Trash2 size={14} />{t("删除")}</button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function groupProjects(tasks: AgentTask[]) {
+  const grouped = new Map<string, AgentTask[]>();
+  tasks.forEach((task) => grouped.set(task.workspace_path, [...(grouped.get(task.workspace_path) || []), task]));
+  return [...grouped.entries()].map(([path, items]) => ({ path, name: items[0]?.workspace_name || path.split("/").pop() || path, tasks: items }));
+}
+
+const taskStatusLabel = (status: string, t: (source: string) => string) => t(({ queued: "排队", running: "分析中", completed: "完成", failed: "失败", cancelled: "已停止" }[status] || status));
+
+function formatRelative(value: string, t: (source: string, replacements?: Record<string, string | number>) => string) {
+  const delta = Date.now() - new Date(value).getTime();
+  if (delta < 60_000) return t("刚刚");
+  if (delta < 3_600_000) return t("{count} 分钟", { count: Math.floor(delta / 60_000) });
+  if (delta < 86_400_000) return t("{count} 小时", { count: Math.floor(delta / 3_600_000) });
+  return t("{count} 天", { count: Math.floor(delta / 86_400_000) });
+}

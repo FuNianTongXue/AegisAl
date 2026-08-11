@@ -1,7 +1,30 @@
+import Combine
 import XCTest
 @testable import SecFlowMac
 
 final class AssistantInputTests: XCTestCase {
+    @MainActor
+    func testAssistantAndTaskStoresDoNotInvalidateTheGlobalAppModel() {
+        let model = AppModel()
+        var appModelUpdates = 0
+        var assistantUpdates = 0
+        var taskUpdates = 0
+        let appToken = model.objectWillChange.sink { appModelUpdates += 1 }
+        let assistantToken = model.assistantStore.objectWillChange.sink { assistantUpdates += 1 }
+        let taskToken = model.agentTaskStore.objectWillChange.sink { taskUpdates += 1 }
+
+        model.isAsking = true
+        model.activeTrace = [
+            TraceItem(node: "classify_query", status: "running", message: "分析意图", time: "now")
+        ]
+        model.agentTasks = []
+
+        XCTAssertEqual(appModelUpdates, 0)
+        XCTAssertEqual(assistantUpdates, 2)
+        XCTAssertEqual(taskUpdates, 1)
+        withExtendedLifetime([appToken, assistantToken, taskToken]) {}
+    }
+
     func testPunctuationOnlyQuestionIsNotMeaningful() {
         XCTAssertFalse(isMeaningfulAssistantQuestion("?"))
         XCTAssertFalse(isMeaningfulAssistantQuestion("？"))

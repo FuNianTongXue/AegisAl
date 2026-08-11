@@ -21,6 +21,56 @@ ONE_BY_ONE_PNG = base64.b64encode(
 
 
 class SettingsApiTests(unittest.TestCase):
+    def test_profile_and_avatar_are_isolated_by_user_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            local_store = StateStore(root / "state.json")
+            with (
+                patch("app.settings.store", local_store),
+                patch("app.settings.DATA_DIR", root),
+            ):
+                client = TestClient(app)
+                saved_a = client.patch(
+                    "/api/settings/profile",
+                    params={"user_id": "alice@example.com"},
+                    json={"display_name": "Alice", "email": "alice@example.com"},
+                )
+                avatar_a = client.post(
+                    "/api/settings/profile/avatar",
+                    params={"user_id": "alice@example.com"},
+                    json={
+                        "file_name": "avatar.png",
+                        "content_base64": ONE_BY_ONE_PNG,
+                        "content_type": "image/png",
+                    },
+                )
+                profile_b = client.get(
+                    "/api/settings/profile",
+                    params={"user_id": "bob@example.com"},
+                )
+                avatar_b = client.get(
+                    "/api/settings/profile/avatar",
+                    params={"user_id": "bob@example.com"},
+                )
+                saved_b = client.patch(
+                    "/api/settings/profile",
+                    params={"user_id": "bob@example.com"},
+                    json={"display_name": "Bob", "email": "bob@example.com"},
+                )
+                profile_a = client.get(
+                    "/api/settings/profile",
+                    params={"user_id": "alice@example.com"},
+                )
+
+        self.assertEqual(saved_a.status_code, 200)
+        self.assertTrue(avatar_a.json()["data"]["avatar_available"])
+        self.assertNotEqual(profile_b.json()["data"]["display_name"], "Alice")
+        self.assertFalse(profile_b.json()["data"]["avatar_available"])
+        self.assertEqual(avatar_b.status_code, 404)
+        self.assertEqual(saved_b.json()["data"]["display_name"], "Bob")
+        self.assertEqual(profile_a.json()["data"]["display_name"], "Alice")
+        self.assertTrue(profile_a.json()["data"]["avatar_available"])
+
     def test_profile_preferences_and_avatar_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -32,7 +82,7 @@ class SettingsApiTests(unittest.TestCase):
                 client = TestClient(app)
                 profile = client.get("/api/settings/profile")
                 self.assertEqual(profile.status_code, 200)
-                self.assertEqual(profile.json()["data"]["display_name"], "李明哲")
+                self.assertEqual(profile.json()["data"]["display_name"], "")
 
                 updated = client.patch(
                     "/api/settings/profile",

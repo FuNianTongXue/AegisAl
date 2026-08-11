@@ -185,7 +185,9 @@ class EngineFinding:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate idempotency findings through the normal /api/ask upload path.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate idempotency findings through the normal /api/assistant/questions upload path."
+    )
     parser.add_argument(
         "--manifest",
         type=Path,
@@ -593,7 +595,7 @@ def ask_project(
         "response_language": "zh-Hans",
         "attachments": attachments,
     }
-    envelope = post_json(f"{server_url.rstrip('/')}/api/ask", payload, timeout)
+    envelope = post_json(f"{server_url.rstrip('/')}/api/assistant/questions", payload, timeout)
     if envelope.get("status") != "success":
         raise RuntimeError(str(envelope))
     return envelope.get("data") or {}
@@ -727,7 +729,7 @@ def write_markdown(report: dict[str, Any], markdown: Path) -> None:
         "",
         f"- 生成时间：{report.get('generated_at')}",
         f"- 项目数：{summary.get('requested_projects')} 请求 / {summary.get('completed_projects')} 完成",
-        f"- 上传路径：`POST /api/ask`，按 mac 客户端目录拖入规则限制 300 文件、单文件 120k 字符、总 600 万字符",
+        f"- 上传路径：`POST /api/assistant/questions`，按 mac 客户端目录拖入规则限制 300 文件、单文件 120k 字符、总 600 万字符",
         f"- 启发式复核候选：{summary.get('heuristic_candidates')}",
         f"- 引擎幂等性命中：{summary.get('engine_idempotency_findings')}",
         f"- 引擎资金逻辑总命中：{summary.get('engine_finance_findings')}",
@@ -802,7 +804,7 @@ def main() -> int:
         "server_url": args.server_url,
         "run_label": args.run_label,
         "evaluation_policy": {
-            "upload_path": "POST /api/ask",
+            "upload_path": "POST /api/assistant/questions",
             "ground_truth": "none for unlabeled GitHub projects; candidate agreement is not an accuracy metric",
             "focus": "finance idempotency missing on unsafe REST money/trading endpoints",
         },

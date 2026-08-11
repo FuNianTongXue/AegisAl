@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid5
 
-from app.intelligence import intelligence_service, localized_vulnerability_summary
+from app.intelligence import _vulnerability_match_priority, intelligence_service, localized_vulnerability_summary
 from app.storage import now_iso
 
 
@@ -28,6 +28,7 @@ def build_cyclonedx_sbom(
     project_name: str,
     workspace_path: str = "",
     generated_at: str = "",
+    license_scan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dependencies = [
         _normalize_dependency(item)
@@ -48,12 +49,31 @@ def build_cyclonedx_sbom(
         "project": project,
         "dependencies": dependencies,
         "files": list(dependency_scan.get("files") or []),
+        "licenses": [
+            {
+                "spdx_id": str(item.get("spdx_id") or ""),
+                "source_files": list(item.get("source_files") or []),
+                "detection_methods": list(item.get("detection_methods") or []),
+            }
+            for item in (license_scan or {}).get("licenses") or []
+            if isinstance(item, dict)
+        ],
     }
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     components = [_cyclonedx_component(item) for item in dependencies]
-    return {
+    project_component: dict[str, Any] = {
+        "type": "application",
+        "bom-ref": f"project:{fingerprint[:24]}",
+        "name": project,
+    }
+    project_licenses, project_license_properties = _cyclonedx_project_licenses(license_scan or {})
+    if project_licenses:
+        project_component["licenses"] = project_licenses
+    if project_license_properties:
+        project_component["properties"] = project_license_properties
+    result = {
         "bomFormat": "CycloneDX",
         "specVersion": CYCLONEDX_SPEC_VERSION,
         "serialNumber": f"urn:uuid:{uuid5(NAMESPACE_URL, f'secflow:{fingerprint}')}",
@@ -69,11 +89,7 @@ def build_cyclonedx_sbom(
                     }
                 ]
             },
-            "component": {
-                "type": "application",
-                "bom-ref": f"project:{fingerprint[:24]}",
-                "name": project,
-            },
+            "component": project_component,
             "properties": [
                 {"name": "secflow:workspaceName", "value": Path(workspace_path).name if workspace_path else project},
                 {"name": "secflow:sourceFileCount", "value": str(len(dependency_scan.get("files") or []))},
@@ -92,6 +108,20 @@ def build_cyclonedx_sbom(
             {"name": "secflow:rejectedFileCount", "value": str(len(dependency_scan.get("rejected_files") or []))},
         ],
     }
+    if license_scan:
+        registry = license_scan.get("registry") if isinstance(license_scan.get("registry"), dict) else {}
+        license_sha256 = hashlib.sha256(
+            json.dumps(license_scan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        result["metadata"]["properties"].extend(
+            [
+                {"name": "secflow:licenseCount", "value": str(int(license_scan.get("license_count") or 0))},
+                {"name": "secflow:licenseCoverage", "value": str(license_scan.get("coverage_status") or "unknown")},
+                {"name": "secflow:licenseRegistryStatus", "value": str(registry.get("status") or "unknown")},
+                {"name": "secflow:licenseAnalysisSha256", "value": license_sha256},
+            ]
+        )
+    return result
 
 
 def match_sbom_vulnerabilities(
@@ -130,11 +160,15 @@ def match_sbom_vulnerabilities(
             outcomes = [ordered[index] for index in sorted(ordered)]
 
     records = _localize_vulnerability_records(
-        _merge_vulnerability_records(
-            record
-            for outcome in outcomes
-            for record in outcome.get("records") or []
-            if isinstance(record, dict)
+        sorted(
+            _merge_vulnerability_records(
+                record
+                for outcome in outcomes
+                for record in outcome.get("records") or []
+                if isinstance(record, dict)
+            ),
+            key=_vulnerability_match_priority,
+            reverse=True,
         )
     )
     source_status = _merge_source_status(
@@ -222,6 +256,40 @@ def _cyclonedx_component(dependency: dict[str, str]) -> dict[str, Any]:
         component["group"] = group
         component["name"] = name
     return component
+
+
+def _cyclonedx_project_licenses(license_scan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    choices: list[dict[str, Any]] = []
+    properties: list[dict[str, str]] = []
+    for item in license_scan.get("licenses") or []:
+        if not isinstance(item, dict):
+            continue
+        license_id = str(item.get("spdx_id") or "").strip()
+        name = str(item.get("name") or license_id).strip()
+        osi = item.get("osi") if isinstance(item.get("osi"), dict) else {}
+        license_value: dict[str, Any] = {}
+        if license_id:
+            license_value["id"] = license_id
+        if name:
+            license_value["name"] = name
+        if str(osi.get("official_url") or "").startswith("https://"):
+            license_value["url"] = str(osi["official_url"])
+        if license_value:
+            choices.append({"license": license_value})
+        evidence = {
+            "source_files": list(item.get("source_files") or []),
+            "detection_methods": list(item.get("detection_methods") or []),
+            "declarations": list(item.get("declarations") or []),
+            "confidence": float(item.get("confidence") or 0),
+            "osi": osi,
+        }
+        properties.append(
+            {
+                "name": f"secflow:license:{license_id or name}:evidence",
+                "value": json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            }
+        )
+    return choices, properties
 
 
 def _package_url(ecosystem: str, name: str, version: str) -> str:

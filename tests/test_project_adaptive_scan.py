@@ -148,6 +148,165 @@ class ProjectAdaptiveScanTests(unittest.TestCase):
         self.assertEqual(adapted["finding_count"], 1)
         self.assertEqual(adapted["project_overlay"]["fingerprint"], overlay["fingerprint"])
 
+    def test_semgrep_preflight_rejects_structurally_allowed_invalid_overlay_pattern(self) -> None:
+        tool = SemgrepTool()
+        if not tool.status().get("cliAvailable"):
+            self.skipTest("Semgrep CLI is unavailable")
+        request = {
+            "project_profile": {"languages": ["java"]},
+            "evidence": {
+                "evidence_ids": ["finding:java:primary-1"],
+                "findings": [{"finding_id": "primary-1"}],
+                "review_findings": [],
+            },
+        }
+        overlay = validate_project_overlay(
+            {
+                "decision": "apply_overlay",
+                "confidence": 0.99,
+                "taint_rules": [
+                    {
+                        "id": "invalid-java-pattern",
+                        "language": "java",
+                        "sources": ["foo("],
+                        "sinks": ["bar(...)"],
+                        "evidence_ids": ["finding:java:primary-1"],
+                    }
+                ],
+            },
+            request,
+        )
+
+        with project_overlay_rule_file(overlay, "java") as path:
+            validation = tool.validate_rule_paths([str(path)])
+
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["status"], "failed")
+        self.assertIn("Semgrep", validation["diagnostics"][0])
+
+    def test_invalid_overlay_keeps_verified_baseline_and_stops_rescan(self) -> None:
+        scanner_calls = 0
+        events: list[dict] = []
+
+        def scanner(_language, _attachments, _dependency_scan, _rules, _cancelled):
+            nonlocal scanner_calls
+            scanner_calls += 1
+            return scan_result()
+
+        def synthesizer(request):
+            candidate = {
+                "decision": "apply_overlay",
+                "confidence": 0.99,
+                "taint_rules": [
+                    {
+                        "id": "invalid-python-pattern",
+                        "language": "python",
+                        "sources": ["foo("],
+                        "sinks": ["bar(...)"],
+                        "evidence_ids": ["finding:python:primary-1"],
+                    }
+                ],
+            }
+            return {
+                "status": "ready",
+                "reason": "ready",
+                "overlay": validate_project_overlay(candidate, request),
+            }
+
+        def event_sink(_task_id, event_type, node, status, message, data):
+            events.append(
+                {"type": event_type, "node": node, "status": status, "message": message, "data": data or {}}
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "app.agent.task_agent.semgrep_tool.validate_rule_paths",
+            return_value={
+                "status": "failed",
+                "valid": False,
+                "diagnostics": ["Overlay 规则未通过 Semgrep 语法预检"],
+            },
+        ):
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = request.get('id')\ndb.execute(value)\n", encoding="utf-8")
+            state = TaskAgentGraph(
+                language_scanner=scanner,
+                overlay_synthesizer=synthesizer,
+                event_sink=event_sink,
+                adaptive_upload=True,
+            ).invoke(
+                task_id="upload-invalid-overlay",
+                objective="scan uploaded project",
+                workspace_path=str(root),
+                user_id="analyst",
+            )
+
+        self.assertEqual(scanner_calls, 1)
+        self.assertEqual(state["language_results"]["python"]["mode"], "test")
+        self.assertEqual(state["language_results"]["python"]["finding_count"], 1)
+        self.assertEqual(state["adaptation"]["status"], "overlay_rejected")
+        self.assertEqual(state["adaptation"]["termination_reason"], "overlay_rule_validation_failed")
+        self.assertTrue(any(event["type"] == "adaptation.rejected" for event in events))
+
+    def test_degraded_overlay_rescan_does_not_replace_verified_baseline(self) -> None:
+        scanner_calls = 0
+
+        def scanner(_language, _attachments, _dependency_scan, _rules, _cancelled):
+            nonlocal scanner_calls
+            scanner_calls += 1
+            if scanner_calls == 1:
+                return scan_result()
+            return {
+                **scan_result(),
+                "status": "completed",
+                "mode": "internal-fallback",
+                "cli_status": "failed",
+                "finding_count": 88,
+                "diagnostics": ["静态分析 CLI 未返回 JSON"],
+            }
+
+        def synthesizer(request):
+            candidate = {
+                "decision": "apply_overlay",
+                "confidence": 0.99,
+                "taint_rules": [
+                    {
+                        "id": "custom-wrapper-flow",
+                        "language": "python",
+                        "sources": ["$REQ.get(...)"],
+                        "sinks": ["$DB.execute(...)"],
+                        "evidence_ids": ["finding:python:primary-1"],
+                    }
+                ],
+            }
+            return {
+                "status": "ready",
+                "reason": "ready",
+                "overlay": validate_project_overlay(candidate, request),
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "app.agent.task_agent.semgrep_tool.validate_rule_paths",
+            return_value={"status": "completed", "valid": True, "diagnostics": []},
+        ):
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = request.get('id')\ndb.execute(value)\n", encoding="utf-8")
+            state = TaskAgentGraph(
+                language_scanner=scanner,
+                overlay_synthesizer=synthesizer,
+                adaptive_upload=True,
+            ).invoke(
+                task_id="upload-degraded-overlay",
+                objective="scan uploaded project",
+                workspace_path=str(root),
+                user_id="analyst",
+            )
+
+        self.assertEqual(scanner_calls, 2)
+        self.assertEqual(state["language_results"]["python"]["mode"], "test")
+        self.assertEqual(state["language_results"]["python"]["finding_count"], 1)
+        self.assertEqual(state["adaptation"]["status"], "overlay_rejected")
+        self.assertEqual(state["adaptation"]["termination_reason"], "overlay_rescan_degraded")
+
     def test_adaptive_upload_rescans_once_and_stops_on_no_change(self) -> None:
         scanner_calls: list[list[str]] = []
         synthesis_calls: list[dict] = []

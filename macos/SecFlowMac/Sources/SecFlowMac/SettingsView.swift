@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 private let customModelSelection = "__secflow_custom_model__"
 private let maxProfileAvatarBytes = 2 * 1024 * 1024
 private let supportedProfileAvatarExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
+private let defaultSettingsModelProvider = SettingsModelProvider.providers.first { $0.id == "openai" }
+    ?? SettingsModelProvider.providers[0]
 enum SettingsWindowMetrics {
     static let defaultSize = CGSize(width: 980, height: 760)
     static let minSize = CGSize(width: 940, height: 740)
@@ -40,11 +42,11 @@ struct SettingsView: View {
     @State private var profileNotice: SettingsNotice?
     @State private var didHydrateProfile = false
 
-    @State private var selectedProviderID = SettingsModelProvider.providers[0].id
+    @State private var selectedProviderID = defaultSettingsModelProvider.id
     @State private var providerSearchText = ""
-    @State private var selectedModel = SettingsModelProvider.providers[0].defaultModel
+    @State private var selectedModel = defaultSettingsModelProvider.defaultModel
     @State private var customModel = ""
-    @State private var endpoint = SettingsModelProvider.providers[0].defaultEndpoint
+    @State private var endpoint = defaultSettingsModelProvider.defaultEndpoint
     @State private var apiKey = ""
     @State private var isApiKeyVisible = false
     @State private var testResult: LLMTestResult?
@@ -82,7 +84,7 @@ struct SettingsView: View {
     private var isCancelingSubscription: Bool { model.busyActions.contains("subscription-cancel") }
 
     private var selectedProvider: SettingsModelProvider {
-        SettingsModelProvider.providers.first { $0.id == selectedProviderID } ?? SettingsModelProvider.providers[0]
+        SettingsModelProvider.providers.first { $0.id == selectedProviderID } ?? defaultSettingsModelProvider
     }
 
     init(initialSection: SettingsSection = .profile, loadsData: Bool = true) {

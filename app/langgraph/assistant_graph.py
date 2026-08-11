@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypedDict
+from zoneinfo import ZoneInfo
 
 try:
     from langgraph.graph import END, StateGraph
@@ -15,6 +16,8 @@ except Exception:  # noqa: BLE001
 
 from app.dependencies import scan_dependency_attachments
 from app.agent.assistant_intent import plan_assistant_intent
+from app.agent.translation_agent import translation_agent
+from app.catalog_translation import record_summary_for_language
 from app.langgraph.component_catalog_graph import (
     component_catalog_outcome_answer,
     component_vulnerability_catalog_subgraph,
@@ -34,11 +37,17 @@ from app.trace_ui import prompt_diff_presentation, tool_call_presentation
 
 
 ASSISTANT_IDENTITY = "我是小安，您的信息安全专家助手。"
+ASSISTANT_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def _is_information_session(session_id: Any) -> bool:
+    return str(session_id or "").startswith("information:")
 
 
 SYSTEM_PROMPT_TEMPLATE = """你是小安，定位是用户的信息安全专家助手。
 当用户询问你是谁、你的名字或身份时，必须回答“我是小安，您的信息安全专家助手。”，不要使用模型名称、平台名称或其他身份。
 请使用{language_name}回答，语气专业、简洁、可落地。
+系统当前日期为 {current_date}，当前时间为 {current_time}，时区为 Asia/Shanghai（中国标准时间）。用户询问“今天”“当前日期”或相对日期时，必须严格以这里提供的日期时间为准，不得使用模型自身日期或其他时区猜测。
 先根据用户措辞、会话上下文、附件和可用能力理解实际目标，再规划是否检索、扫描、分析、制图或生成报告；不要仅凭关键词把意图固定到某个节点。
 如果问题包含 CVE 或 GHSA 编号，优先结合实时漏洞接口查询结果回答，并说明影响、利用条件、组件版本范围、涉及版本、修复版本、修复建议和缓释措施。
 如果问题包含年份并询问漏洞、CVE、高危漏洞或最新漏洞，必须先结合实时漏洞接口查询结果完成事实核验再回答。
@@ -116,8 +125,11 @@ class AssistantState(TypedDict, total=False):
     catalog_operation: dict[str, Any]
     sbom_operation: dict[str, Any]
     answer: dict[str, Any]
+    translation: dict[str, Any]
+    catalog_translation_ready: bool
     trace: list[dict[str, Any]]
     event_sink: Callable[[dict[str, Any]], None]
+    content_sink: Callable[[str], None]
 
 
 class KnowledgeSecurityGraph:
@@ -139,6 +151,7 @@ class KnowledgeSecurityGraph:
         task_context: dict[str, Any] | None = None,
         intent_plan: dict[str, Any] | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        content_sink: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         language = normalize_response_language(response_language)
         state: AssistantState = {
@@ -176,28 +189,38 @@ class KnowledgeSecurityGraph:
             "report_operation": {},
             "catalog_operation": {},
             "sbom_operation": {},
+            "translation": {},
+            "catalog_translation_ready": False,
             "trace": [],
         }
         if event_sink is not None:
             state["event_sink"] = event_sink
+        if content_sink is not None:
+            state["content_sink"] = content_sink
         if self._graph is None:
             state = self._classify_query(state)
             state = self._load_memory_context(state)
             if state.get("intent") == "component_vulnerability_query":
                 state = self._component_subgraph.invoke(state)
                 state = self._compose_answer(state)
+                if not self._can_use_catalog_translation(state):
+                    state = self._translate_answer(state)
                 state = self._persist_memory(state)
                 return self._final_answer(state)
             if state.get("intent") == "component_vulnerability_catalog":
                 state = self._run_component_catalog_subgraph(state)
+                if not self._can_use_catalog_translation(state):
+                    state = self._translate_answer(state)
                 state = self._persist_memory(state)
                 return self._final_answer(state)
             if state.get("intent") == "project_sbom_export":
                 state = self._run_sbom_subgraph(state)
+                state = self._translate_answer(state)
                 state = self._persist_memory(state)
                 return self._final_answer(state)
             if state.get("intent") == "report_operation":
                 state = self._run_report_subgraph(state)
+                state = self._translate_answer(state)
                 state = self._persist_memory(state)
                 return self._final_answer(state)
             if self._should_retrieve(state):
@@ -208,8 +231,11 @@ class KnowledgeSecurityGraph:
             state = self._call_llm(state)
             state = self._translate_vulnerability_card(state)
             state = self._compose_answer(state)
-            if self._should_generate_report(state):
+            report_requested = self._should_generate_report(state)
+            if report_requested:
                 state = self._run_report_subgraph(state)
+            if report_requested or not self._can_use_catalog_translation(state):
+                state = self._translate_answer(state)
             state = self._persist_memory(state)
             return self._final_answer(state)
         final = self._graph.invoke(state)
@@ -238,6 +264,7 @@ class KnowledgeSecurityGraph:
                 {"id": "call_llm", "label": "调用安全专家模型"},
                 {"id": "translate_vulnerability_card", "label": "中文整理漏洞卡片"},
                 {"id": "compose_answer", "label": "生成回答"},
+                {"id": "translation_agent", "label": "Translation Agent 调用翻译 MCP"},
                 {"id": "persist_memory", "label": "保存长期记忆"},
             ],
             "edges": [
@@ -249,8 +276,9 @@ class KnowledgeSecurityGraph:
                 {"source": "load_memory_context", "target": "query_intelligence", "label": "CVE/GHSA/年份/依赖漏洞"},
                 {"source": "load_memory_context", "target": "call_llm", "label": "通用安全问题"},
                 {"source": "component_query_subgraph", "target": "compose_answer", "label": "组件事实、Excel 与桑基图"},
-                {"source": "component_catalog_subgraph", "target": "persist_memory", "label": "清单预览、Interrupt 或 Excel 制品"},
-                {"source": "project_sbom_subgraph", "target": "persist_memory", "label": "SBOM JSON、Interrupt 或 Excel 制品"},
+                {"source": "component_catalog_subgraph", "target": "translation_agent", "label": "清单预览、Interrupt 或 Excel 制品"},
+                {"source": "component_catalog_subgraph", "target": "persist_memory", "label": "复用情报库入库译文"},
+                {"source": "project_sbom_subgraph", "target": "translation_agent", "label": "SBOM JSON、Interrupt 或 Excel 制品"},
                 {"source": "query_intelligence", "target": "run_static_path_analysis", "label": "存在代码附件"},
                 {"source": "query_intelligence", "target": "enrich_knowledge_graph", "label": "无代码附件或普通漏洞查询"},
                 {"source": "run_static_path_analysis", "target": "enrich_knowledge_graph", "label": "Source/Sink 路径返回"},
@@ -258,8 +286,10 @@ class KnowledgeSecurityGraph:
                 {"source": "call_llm", "target": "translate_vulnerability_card", "label": "整理客户可见字段"},
                 {"source": "translate_vulnerability_card", "target": "compose_answer", "label": "中文结构化卡片"},
                 {"source": "compose_answer", "target": "report_capability_subgraph", "label": "扫描完成后确认生成"},
-                {"source": "compose_answer", "target": "persist_memory", "label": "普通回答"},
-                {"source": "report_capability_subgraph", "target": "persist_memory", "label": "Interrupt 或报告制品"},
+                {"source": "compose_answer", "target": "translation_agent", "label": "结构化回答 JSON"},
+                {"source": "compose_answer", "target": "persist_memory", "label": "复用入库译文"},
+                {"source": "report_capability_subgraph", "target": "translation_agent", "label": "Interrupt 或报告制品"},
+                {"source": "translation_agent", "target": "persist_memory", "label": "目标语言回复"},
             ],
             "subgraphs": [
                 component_query_subgraph.graph_spec(),
@@ -288,6 +318,7 @@ class KnowledgeSecurityGraph:
         graph.add_node("call_llm", self._call_llm)
         graph.add_node("translate_vulnerability_card", self._translate_vulnerability_card)
         graph.add_node("compose_answer", self._compose_answer)
+        graph.add_node("translation_agent", self._translate_answer)
         graph.add_node("persist_memory", self._persist_memory)
         graph.set_entry_point("classify_query")
         graph.add_edge("classify_query", "load_memory_context")
@@ -304,9 +335,13 @@ class KnowledgeSecurityGraph:
             },
         )
         graph.add_edge("component_query_subgraph", "compose_answer")
-        graph.add_edge("component_catalog_subgraph", "persist_memory")
-        graph.add_edge("project_sbom_subgraph", "persist_memory")
-        graph.add_edge("report_capability_subgraph", "persist_memory")
+        graph.add_conditional_edges(
+            "component_catalog_subgraph",
+            lambda state: "persist_memory" if self._can_use_catalog_translation(state) else "translation_agent",
+            {"persist_memory": "persist_memory", "translation_agent": "translation_agent"},
+        )
+        graph.add_edge("project_sbom_subgraph", "translation_agent")
+        graph.add_edge("report_capability_subgraph", "translation_agent")
         graph.add_conditional_edges(
             "query_intelligence",
             lambda state: "run_static_analysis" if self._should_run_static_analysis(state) else "enrich_knowledge_graph",
@@ -321,12 +356,14 @@ class KnowledgeSecurityGraph:
         graph.add_edge("translate_vulnerability_card", "compose_answer")
         graph.add_conditional_edges(
             "compose_answer",
-            lambda state: "report_capability_subgraph" if self._should_generate_report(state) else "persist_memory",
+            self._route_after_compose,
             {
                 "report_capability_subgraph": "report_capability_subgraph",
+                "translation_agent": "translation_agent",
                 "persist_memory": "persist_memory",
             },
         )
+        graph.add_edge("translation_agent", "persist_memory")
         graph.add_edge("persist_memory", END)
         return graph.compile()
 
@@ -339,7 +376,12 @@ class KnowledgeSecurityGraph:
             state["intent"] = str(intent_plan.get("intent") or "llm_direct")
             state["destination_hint"] = str(intent_plan.get("destination_hint") or "unspecified")
         elif state.get("workspace_path"):
-            intent_plan = plan_assistant_intent(question, workspace_available=True)
+            intent_plan = plan_assistant_intent(
+                question,
+                workspace_available=True,
+                user_id=state.get("user_id", "default"),
+                session_id=state.get("session_id", "default"),
+            )
             state["intent_plan"] = intent_plan
             state["intent"] = str(intent_plan.get("intent") or "llm_direct")
             state["destination_hint"] = str(intent_plan.get("destination_hint") or "unspecified")
@@ -358,7 +400,11 @@ class KnowledgeSecurityGraph:
             state["intent"] = "component_vulnerability_query"
             state["component_query"] = component_query
         else:
-            intent_plan = plan_assistant_intent(question)
+            intent_plan = plan_assistant_intent(
+                question,
+                user_id=state.get("user_id", "default"),
+                session_id=state.get("session_id", "default"),
+            )
             state["intent_plan"] = intent_plan
             state["intent"] = str(intent_plan.get("intent") or "llm_direct")
             if state["intent"] == "component_vulnerability_catalog":
@@ -403,9 +449,22 @@ class KnowledgeSecurityGraph:
 
     def _load_memory_context(self, state: AssistantState) -> AssistantState:
         try:
-            context = memory_service.build_context(state.get("user_id", "default"), state["question"])
+            if _is_information_session(state.get("session_id")):
+                context = memory_service.build_short_term_context(
+                    state.get("user_id", "default"),
+                    state.get("session_id", "default"),
+                    state["question"],
+                )
+            else:
+                context = memory_service.build_context(state.get("user_id", "default"), state["question"])
             state["memory_context"] = context
             stats = context.get("stats", {})
+            if context.get("scope") == "short-term":
+                return add_trace(
+                    state,
+                    "load_memory_context",
+                    f"已加载当前咨询的短期记忆：最近 {stats.get('recentCount', 0)} 条。",
+                )
             return add_trace(
                 state,
                 "load_memory_context",
@@ -434,10 +493,14 @@ class KnowledgeSecurityGraph:
                     dependencies,
                     limit_per_dependency=max(1, min(state.get("top_k", 5), 10)),
                     response_language=state.get("response_language", "zh-Hans"),
+                    user_id=state.get("user_id", "default"),
                 )
                 state["records"] = result.get("records", [])
                 state["knowledge_graph"] = result.get("graph", {})
                 state["evidence_sources"] = public_evidence_sources(result.get("source_status"))
+                state["catalog_translation_ready"] = (
+                    str((result.get("catalog_translation") or {}).get("status") or "") == "completed"
+                )
                 status = "completed" if state["records"] else "warning"
                 return add_trace(
                     state,
@@ -460,10 +523,14 @@ class KnowledgeSecurityGraph:
                 state["question"],
                 limit=state.get("top_k", 5),
                 response_language=state.get("response_language", "zh-Hans"),
+                user_id=state.get("user_id", "default"),
             )
             state["records"] = result.get("records", [])
             state["knowledge_graph"] = result.get("graph", {})
             state["evidence_sources"] = public_evidence_sources(result.get("source_status"))
+            state["catalog_translation_ready"] = (
+                str((result.get("catalog_translation") or {}).get("status") or "") == "completed"
+            )
             status = "completed" if result.get("records") else "warning"
             return add_trace(
                 state,
@@ -482,6 +549,7 @@ class KnowledgeSecurityGraph:
             state["records"] = []
             state["knowledge_graph"] = empty_knowledge_graph()
             state["evidence_sources"] = []
+            state["catalog_translation_ready"] = False
             return add_trace(
                 state,
                 "query_intelligence",
@@ -589,13 +657,19 @@ class KnowledgeSecurityGraph:
                 "附件依赖报告优先使用后端事实模板生成，跳过模型等待。",
             )
 
-        model = active_model_from_env()
+        model = active_model_from_env(state.get("user_id", "default"))
         messages = self._build_messages(state)
         result = (
             diagnose_chat_completion(
                 model,
                 messages,
                 json_mode=state.get("intent") == "vulnerability_lookup" and bool(state.get("records")),
+                # Customer-visible content is streamed only after the structured
+                # response has passed through Translation Agent + Translation MCP.
+                on_delta=None,
+                user_id=state.get("user_id", "default"),
+                session_id=state.get("session_id", "default"),
+                source="assistant_answer",
             )
             if model
             else {"status": "failed", "message": "未配置可用模型。"}
@@ -637,7 +711,11 @@ class KnowledgeSecurityGraph:
             return add_trace(state, "translate_vulnerability_card", "未找到可整理的漏洞事实。", status="warning")
 
         record = records[0]
-        fallback = build_vulnerability_card(record, language)
+        fallback = build_vulnerability_card(
+            record,
+            language,
+            user_id=state.get("user_id", "default"),
+        )
         llm_result = state.get("llm_result") or {}
         if state.get("intent") == "vulnerability_lookup" and llm_result.get("status") == "success":
             parsed = parse_json_object(str(llm_result.get("answer") or ""))
@@ -655,7 +733,7 @@ class KnowledgeSecurityGraph:
                 "模型结果不是有效的中文结构化卡片，已使用后端事实模板生成漏洞卡片。",
                 status="warning",
             )
-        model = active_model_from_env()
+        model = active_model_from_env(state.get("user_id", "default"))
         if not model:
             state["vulnerability_card"] = fallback
             return add_trace(state, "translate_vulnerability_card", "已按本地规则生成中文结构化漏洞卡片。")
@@ -667,7 +745,11 @@ class KnowledgeSecurityGraph:
                 "已使用后端事实模板生成结构化漏洞卡片，跳过二次模型整理以提升响应速度。",
             )
 
-        facts = record_for_card_prompt(record, language)
+        facts = record_for_card_prompt(
+            record,
+            language,
+            user_id=state.get("user_id", "default"),
+        )
         analysis = str((state.get("llm_result") or {}).get("answer") or "")
         messages = [
             {"role": "system", "content": vulnerability_card_prompt(state.get("response_language", "zh-Hans"))},
@@ -679,7 +761,13 @@ class KnowledgeSecurityGraph:
                 + analysis,
             },
         ]
-        result = diagnose_chat_completion(model, messages)
+        result = diagnose_chat_completion(
+            model,
+            messages,
+            user_id=state.get("user_id", "default"),
+            session_id=state.get("session_id", "default"),
+            source="vulnerability_card_translation",
+        )
         if result.get("status") != "success":
             state["vulnerability_card"] = fallback
             return add_trace(state, "translate_vulnerability_card", "中文整理未返回有效内容，已使用事实模板。", status="warning")
@@ -692,9 +780,11 @@ class KnowledgeSecurityGraph:
         language = state.get("response_language", "zh-Hans")
         records = state.get("records", [])
         llm_result = state.get("llm_result", {})
+        memory_context = state.get("memory_context", {})
+        memory_field = "短期记忆" if memory_context.get("scope") == "short-term" else "长期记忆"
         fields = {
             "意图": state.get("intent", "security_knowledge"),
-            "长期记忆": self._memory_label(state.get("memory_context", {})),
+            memory_field: self._memory_label(memory_context),
             "模型调用状态": "成功" if llm_result.get("status") == "success" else state.get("llm_error", "未调用"),
         }
         if state.get("task_context"):
@@ -779,11 +869,85 @@ class KnowledgeSecurityGraph:
             "trace": state.get("trace", []),
             "generated_at": now_iso(),
         }
+        if self._can_use_catalog_translation(state):
+            audit = self._stored_catalog_translation_audit(len(records))
+            answer["translation"] = audit
+            state["translation"] = dict(audit)
         component_detail = dict(state.get("component_detail") or {})
         if component_detail:
             answer["component_detail"] = component_detail
         state["answer"] = public_answer_payload(answer)
         return add_trace(state, "compose_answer", "已生成最终回答。")
+
+    def _translate_answer(self, state: AssistantState) -> AssistantState:
+        answer = dict(state.get("answer") or {})
+        if not answer:
+            return add_trace(
+                state,
+                "translation_agent",
+                "当前节点没有可翻译的结构化回复。",
+                status="warning",
+            )
+        try:
+            result = translation_agent.translate_json(
+                answer,
+                target_language=str(state.get("response_language") or "zh-Hans"),
+                user_id=str(state.get("user_id") or "default"),
+                session_id=str(state.get("session_id") or "default"),
+                content_scope="assistant_response",
+            )
+            audit = dict(result.audit)
+            translated = public_answer_payload(result.payload)
+            translated["translation"] = audit
+            state["answer"] = translated
+            state["translation"] = audit
+            return add_trace(
+                state,
+                "translation_agent",
+                (
+                    "Translation Agent 已调用翻译 MCP 处理回复 JSON："
+                    f"目标语言 {audit['target_language']}，翻译 {audit['translated_fields']} 个字段。"
+                ),
+                presentation=tool_call_presentation(
+                    "translate_json_payload",
+                    state="completed",
+                    title="Translation MCP",
+                    input_summary={
+                        "content_scope": "assistant_response",
+                        "target_language": audit["target_language"],
+                        "candidate_fields": audit["candidate_fields"],
+                    },
+                    output={
+                        "translated_fields": audit["translated_fields"],
+                        "translation_status": audit["translation_status"],
+                        "output_sha256": audit["output_sha256"],
+                    },
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve the verified response on translation outages.
+            message = sanitize_public_text(str(exc)).strip() or "翻译 MCP 未返回可用结果"
+            state["translation"] = {
+                "server": "SecFlow Translation MCP",
+                "tool": "translate_json_payload",
+                "status": "failed",
+                "target_language": str(state.get("response_language") or "zh-Hans"),
+                "error": message,
+            }
+            answer["translation"] = dict(state["translation"])
+            state["answer"] = public_answer_payload(answer)
+            return add_trace(
+                state,
+                "translation_agent",
+                f"Translation Agent 调用失败，已保留原始结构化回复：{message}",
+                status="warning",
+                presentation=tool_call_presentation(
+                    "translate_json_payload",
+                    state="error",
+                    title="Translation MCP",
+                    input_summary={"content_scope": "assistant_response"},
+                    error=message,
+                ),
+            )
 
     def _run_report_subgraph(self, state: AssistantState) -> AssistantState:
         language = state.get("response_language", "zh-Hans")
@@ -795,11 +959,38 @@ class KnowledgeSecurityGraph:
             "source_kind": "report_center",
             "report_store_root": str(report_store.root),
         }
+        task_context = state.get("task_context") or {}
+        if task_context.get("report_store_root"):
+            payload["report_store_root"] = str(task_context["report_store_root"])
+        report_task = task_context.get("report_task")
+        if (
+            state.get("intent") == "report_operation"
+            and isinstance(report_task, dict)
+            and isinstance(report_task.get("result"), dict)
+        ):
+            report_metrics = task_context.get("report_metrics")
+            if not isinstance(report_metrics, dict) or not report_metrics:
+                from app.agent.task_agent import agent_task_report_metrics
+
+                report_metrics = agent_task_report_metrics(report_task)
+            payload.update(
+                {
+                    "source_kind": "agent_task",
+                    "scan_data": {
+                        "task": report_task,
+                        "report_metrics": report_metrics,
+                    },
+                }
+            )
         if self._should_generate_report(state):
             report_records: list[dict[str, Any]] = []
             for record in state.get("records", []):
                 report_record = dict(record)
-                report_record["summary_zh"] = localized_vulnerability_description(record, language)
+                report_record["summary_zh"] = localized_vulnerability_description(
+                    record,
+                    language,
+                    user_id=state.get("user_id", "default"),
+                )
                 report_records.append(report_record)
             report_metrics = build_report_metrics(
                 dependency_scan=state.get("dependency_scan", {}),
@@ -878,7 +1069,20 @@ class KnowledgeSecurityGraph:
         state["chart_data"] = dict(outcome.get("chart_data") or {})
         state["artifacts"] = list(outcome.get("artifacts") or [])
         state["trace"] = list(outcome.get("trace") or state.get("trace") or [])
-        state["answer"] = public_answer_payload(component_catalog_outcome_answer(outcome))
+        catalog_translation = (
+            outcome.get("catalog_translation") if isinstance(outcome.get("catalog_translation"), dict) else {}
+        )
+        state["catalog_translation_ready"] = (
+            str(catalog_translation.get("status") or "") == "completed"
+        )
+        answer = public_answer_payload(component_catalog_outcome_answer(outcome))
+        if self._can_use_catalog_translation(state) and not isinstance(answer.get("translation"), dict):
+            audit = self._stored_catalog_translation_audit(int(catalog_translation.get("record_count") or 0))
+            answer["translation"] = audit
+            state["translation"] = dict(audit)
+        elif isinstance(answer.get("translation"), dict):
+            state["translation"] = dict(answer["translation"])
+        state["answer"] = answer
         return add_trace(
             state,
             "component_catalog_subgraph",
@@ -899,6 +1103,16 @@ class KnowledgeSecurityGraph:
                 "event_sink": state.get("event_sink"),
             }
         )
+        operation_context = dict(outcome.pop("_operation_context", {}) or {})
+        if operation_context:
+            try:
+                memory_service.remember_sbom_operation(
+                    state.get("user_id", "default"),
+                    state.get("session_id", "default"),
+                    operation_context,
+                )
+            except Exception:  # noqa: BLE001 - the current SBOM response remains usable.
+                pass
         state["sbom_operation"] = outcome
         state["artifacts"] = list(outcome.get("artifacts") or [])
         state["trace"] = list(outcome.get("trace") or state.get("trace") or [])
@@ -918,7 +1132,11 @@ class KnowledgeSecurityGraph:
             report_records = []
             for record in state.get("records", []):
                 report_record = dict(record)
-                report_record["summary_zh"] = localized_vulnerability_description(record, language)
+                report_record["summary_zh"] = localized_vulnerability_description(
+                    record,
+                    language,
+                    user_id=state.get("user_id", "default"),
+                )
                 report_records.append(report_record)
             report_metrics = build_report_metrics(
                 dependency_scan=state.get("dependency_scan", {}),
@@ -986,6 +1204,33 @@ class KnowledgeSecurityGraph:
             return add_trace(state, "persist_memory", "无有效语义的问题未写入长期记忆。")
         public_answer = public_answer_payload(answer)
         try:
+            workspace_path = str(state.get("workspace_path") or "").strip()
+            if workspace_path:
+                memory_service.remember_project_link(
+                    state.get("user_id", "default"),
+                    state.get("session_id", "default"),
+                    project_name=Path(workspace_path).name,
+                    workspace_path=workspace_path,
+                    artifact_ids=[
+                        str(item.get("id") or "")
+                        for item in state.get("artifacts") or []
+                        if isinstance(item, dict)
+                    ],
+                    artifact_names=[
+                        str(item.get("file_name") or "")
+                        for item in state.get("artifacts") or []
+                        if isinstance(item, dict)
+                    ],
+                )
+            if _is_information_session(state.get("session_id")):
+                memory_service.add_short_term_exchange(
+                    state.get("user_id", "default"),
+                    state.get("session_id", "default"),
+                    state["question"],
+                    public_answer,
+                )
+                state["answer"] = public_answer
+                return add_trace(state, "persist_memory", "已写入当前咨询的短期记忆，不进入历史归档。")
             memory_service.add_exchange(
                 state.get("user_id", "default"),
                 state["question"],
@@ -1027,11 +1272,50 @@ class KnowledgeSecurityGraph:
     def _should_generate_report(state: AssistantState) -> bool:
         return state.get("intent") == "dependency_vulnerability_report" and bool(state.get("attachments"))
 
+    @staticmethod
+    def _can_use_catalog_translation(state: AssistantState) -> bool:
+        if normalize_response_language(state.get("response_language", "zh-Hans")) != "zh-Hans":
+            return False
+        if state.get("intent") == "component_vulnerability_catalog":
+            # This answer is composed locally from Chinese product strings and
+            # machine identifiers. Missing description translations are marked
+            # explicitly and must not trigger a 100+ KB whole-payload model pass.
+            return bool(state.get("catalog_operation"))
+        if not state.get("catalog_translation_ready"):
+            return False
+        return state.get("intent") in {
+            "vulnerability_lookup",
+            "vulnerability_year_lookup",
+            "dependency_vulnerability_report",
+            "component_vulnerability_query",
+        } and bool(state.get("records"))
+
+    @staticmethod
+    def _stored_catalog_translation_audit(record_count: int) -> dict[str, Any]:
+        return {
+            "server": "SecFlow Vulnerability Catalog",
+            "tool": "translate_before_persist",
+            "transport": "local-catalog",
+            "status": "completed",
+            "translation_status": "stored",
+            "target_language": "zh-Hans",
+            "storage_stage": "before-persist",
+            "record_count": int(record_count),
+        }
+
+    @classmethod
+    def _route_after_compose(cls, state: AssistantState) -> str:
+        if cls._should_generate_report(state):
+            return "report_capability_subgraph"
+        return "persist_memory" if cls._can_use_catalog_translation(state) else "translation_agent"
+
     def _build_messages(self, state: AssistantState) -> list[dict[str, str]]:
         records = state.get("records", [])
         if state.get("intent") == "vulnerability_lookup" and records:
             facts = record_for_card_prompt(records[0], state.get("response_language", "zh-Hans"))
-            facts["description"] = str(records[0].get("summary") or records[0].get("title") or "").strip()
+            facts["description"] = record_summary_for_language(
+                records[0], state.get("response_language", "zh-Hans")
+            ).strip()
             return [
                 {"role": "system", "content": vulnerability_card_prompt(state.get("response_language", "zh-Hans"))},
                 {
@@ -1312,8 +1596,17 @@ def language_name(language: str) -> str:
     return LANGUAGE_NAMES.get(normalize_response_language(language), LANGUAGE_NAMES["zh-Hans"])
 
 
-def system_prompt(language: str) -> str:
-    return SYSTEM_PROMPT_TEMPLATE.format(language_name=language_name(language))
+def system_prompt(language: str, *, now: datetime | None = None) -> str:
+    local_now = now or datetime.now(ASSISTANT_TIMEZONE)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=ASSISTANT_TIMEZONE)
+    else:
+        local_now = local_now.astimezone(ASSISTANT_TIMEZONE)
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        language_name=language_name(language),
+        current_date=local_now.strftime("%Y年%m月%d日"),
+        current_time=local_now.strftime("%H:%M:%S"),
+    )
 
 
 def public_evidence_sources(values: Any) -> list[dict[str, Any]]:
@@ -2245,11 +2538,16 @@ def list_values(value: Any) -> list[Any]:
     return value if isinstance(value, list) else [value]
 
 
-def record_for_card_prompt(record: dict[str, Any], language: str = "zh-Hans") -> dict[str, Any]:
+def record_for_card_prompt(
+    record: dict[str, Any],
+    language: str = "zh-Hans",
+    *,
+    user_id: str = "default",
+) -> dict[str, Any]:
     return {
         "id": record.get("id") or "",
         "title": record.get("title") or "",
-        "description": localized_vulnerability_description(record, language),
+        "description": localized_vulnerability_description(record, language, user_id=user_id),
         "cvss_score": record.get("cvss_score"),
         "severity": severity_label_for_language(record.get("severity"), language),
         "affected_versions": record.get("affected_versions") or [],
@@ -2265,8 +2563,13 @@ def record_for_card_prompt(record: dict[str, Any], language: str = "zh-Hans") ->
     }
 
 
-def build_vulnerability_card(record: dict[str, Any], language: str = "zh-Hans") -> dict[str, Any]:
-    facts = record_for_card_prompt(record, language)
+def build_vulnerability_card(
+    record: dict[str, Any],
+    language: str = "zh-Hans",
+    *,
+    user_id: str = "default",
+) -> dict[str, Any]:
+    facts = record_for_card_prompt(record, language, user_id=user_id)
     missing = tr(language, "not_specified") if normalize_response_language(language) != "zh-Hans" else "未明确"
     separator = "；" if normalize_response_language(language) == "zh-Hans" else "; "
     affected = separator.join(str(value) for value in facts["affected_versions"] if value) or missing
@@ -2295,23 +2598,33 @@ def build_vulnerability_card(record: dict[str, Any], language: str = "zh-Hans") 
     }
 
 
-def localized_vulnerability_description(record: dict[str, Any], language: str = "zh-Hans") -> str:
+def localized_vulnerability_description(
+    record: dict[str, Any],
+    language: str = "zh-Hans",
+    *,
+    user_id: str = "default",
+) -> str:
     language = normalize_response_language(language)
-    summary = str(record.get("summary") or "").strip()
+    summary = record_summary_for_language(record, language).strip()
     if language == "en" and summary and not _contains_cjk(summary):
         return sanitize_public_text(summary)
     if language == "zh-Hans" and summary and _contains_cjk(summary):
         return sanitize_public_text(summary)
-    translated = _translate_card_description(summary, language) if summary else ""
+    translated = _translate_card_description(summary, language, user_id=user_id) if summary else ""
     if translated:
         return translated
     return _fallback_card_description(record, language)
 
 
-def _translate_card_description(summary: str, language: str = "zh-Hans") -> str:
+def _translate_card_description(
+    summary: str,
+    language: str = "zh-Hans",
+    *,
+    user_id: str = "default",
+) -> str:
     if not _llm_description_translation_enabled():
         return ""
-    model = active_model_from_env()
+    model = active_model_from_env(user_id)
     if not model:
         return ""
     result = diagnose_chat_completion(
@@ -2327,6 +2640,8 @@ def _translate_card_description(summary: str, language: str = "zh-Hans") -> str:
             },
             {"role": "user", "content": summary[:1800]},
         ],
+        user_id=user_id,
+        source="vulnerability_description_translation",
     )
     if result.get("status") != "success":
         return ""
@@ -2816,6 +3131,8 @@ def fallback_answer(state: AssistantState, language: str = "zh-Hans") -> str:
     question = state.get("question", "")
     lowered = question.lower()
     normalized_language = normalize_response_language(language)
+    model_error = sanitize_public_text(str(state.get("llm_error") or "")).strip()
+    model_notice = f"\n\n> 模型服务暂不可用：{model_error}" if model_error else ""
     if state.get("intent") == "clarification":
         return tr(language, "clarification") if normalized_language != "zh-Hans" else "请输入需要分析的具体安全问题，例如漏洞编号、组件名称、代码风险或修复建议。"
     if state.get("intent") == "dependency_vulnerability_report":
@@ -2849,16 +3166,35 @@ def fallback_answer(state: AssistantState, language: str = "zh-Hans") -> str:
             "当前模型不可用，先给出本地安全专家建议：威胁建模建议先画清资产、数据流、信任边界和外部入口，"
             "再按 STRIDE 检查身份伪造、篡改、抵赖、信息泄露、拒绝服务和权限提升风险。"
         )
+    if any(token in lowered for token in ["合规", "标准", "等保", "金融", "数据安全", "privacy", "compliance"]):
+        if normalized_language != "zh-Hans":
+            return tr(language, "default_fallback")
+        return (
+            "金融业数据安全通常需要按四层框架核对：\n\n"
+            "1. **法律法规**：网络安全、数据安全、个人信息保护以及关键信息基础设施保护要求。\n"
+            "2. **等级保护与数据治理**：落实系统定级、备案、测评，并建立数据分类分级、最小权限、加密脱敏和审计留痕。\n"
+            "3. **金融监管要求**：结合所属机构类型，核对人民银行、金融监管机构及证券监管机构发布的行业数据安全、科技风险和业务连续性要求。\n"
+            "4. **国际及支付场景**：跨境或银行卡业务还需评估 ISO/IEC 27001、PCI DSS 等适用要求。\n\n"
+            "落地时建议先形成“数据目录—分类分级—控制措施—责任人—检查证据”的合规矩阵，再以监管机构最新正式文本确认具体版本和适用范围。"
+            + model_notice
+        )
     if normalized_language != "zh-Hans":
         return tr(language, "default_fallback")
+    memory_name = "当前会话短期记忆" if _is_information_session(state.get("session_id")) else "长期记忆"
     return (
         "当前模型未返回可用结果，先给出本地安全专家降级建议。请检查 LLM API Key、Endpoint、模型名称和网络连通性；"
-        "对于非 CVE 问题，系统会优先把长期记忆与上下文注入模型后回答。"
+        f"对于非 CVE 问题，系统会优先把{memory_name}与上下文注入模型后回答。"
+        + model_notice
     )
 
 
-def runtime_status() -> dict[str, Any]:
-    return {"llm": llm_status(), "memory": memory_service.status(), "storageCrypto": storage_crypto_status()}
+def runtime_status(user_id: str = "default") -> dict[str, Any]:
+    resolved_user_id = str(user_id or "default").strip() or "default"
+    return {
+        "llm": llm_status(resolved_user_id),
+        "memory": memory_service.status(resolved_user_id),
+        "storageCrypto": storage_crypto_status(),
+    }
 
 
 knowledge_graph = KnowledgeSecurityGraph()

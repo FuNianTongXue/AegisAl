@@ -12,11 +12,11 @@ export SECFLOW_LLM_API_KEY=""
 export DEEPSEEK_API_KEY=""
 export OPENAI_API_KEY=""
 
-"$PYTHON_BIN" -m py_compile app/*.py
+"$PYTHON_BIN" -m compileall -q app
 "$PYTHON_BIN" - <<'PY'
 from app.collectors import _nvd_datetime, _nvd_references, _nvd_severity, collector_graph, collector_service
-from app.main import app
-from app.graph import knowledge_graph
+from app.api.routes.application import app
+from app.langgraph.assistant_graph import knowledge_graph
 from app.intelligence import build_knowledge_graph, intelligence_service
 from datetime import datetime, timezone
 

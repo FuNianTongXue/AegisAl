@@ -1,0 +1,5082 @@
+{
+  "generated_at": "2026-07-23T04:31:08.819912+00:00",
+  "methodology": {
+    "sample_size": 500,
+    "seed": 20260723,
+    "selection": "language-stratified uniform random sample without replacement from GitHub star-sorted pools",
+    "commit_policy": "HEAD resolved and pinned at selection time",
+    "archived": false,
+    "forks": false,
+    "max_size_kb": 500000,
+    "ground_truth": "not available for ordinary high-star repositories",
+    "metric_policy": "This corpus measures scan completion, parser stability, finding density, and review yield. It must not be used to claim precision, recall, FPR, or FNR.",
+    "strata": [
+      {
+        "language": "Java",
+        "query": "language:Java stars:>=1000 archived:false fork:false size:<500000",
+        "candidate_pool_size": 190,
+        "sample_size": 65,
+        "min_stars": 1000,
+        "seed": 20260723
+      },
+      {
+        "language": "Python",
+        "query": "language:Python stars:>=1000 archived:false fork:false size:<500000",
+        "candidate_pool_size": 190,
+        "sample_size": 65,
+        "min_stars": 1000,
+        "seed": 20260724
+      },
+      {
+        "language": "Go",
+        "query": "language:Go stars:>=1000 archived:false fork:false size:<500000",
+        "candidate_pool_size": 190,
+        "sample_size": 65,
+        "min_stars": 1000,
+        "seed": 20260725
+      },
+      {
+        "language": "C",
+        "query": "language:C stars:>=1000 archived:false fork:false size:<500000",
+        "candidate_pool_size": 160,
+        "sample_size": 60,
+        "min_stars": 1000,
+        "seed": 20260726
+      },
+      {
+        "language": "C++",
+        "query": "language:C++ stars:>=1000 archived:false fork:false size:<500000",
+        "candidate_pool_size": 190,
+        "sample_size": 65,
+        "min_stars": 1000,
+        "seed": 20260727
+      },
+      {
+        "language": "C#",
+        "query": "language:C# stars:>=500 archived:false fork:false size:<500000",
+        "candidate_pool_size": 160,
+        "sample_size": 60,
+        "min_stars": 500,
+        "seed": 20260728
+      },
+      {
+        "language": "Rust",
+        "query": "language:Rust stars:>=1000 archived:false fork:false size:<500000",
+        "candidate_pool_size": 160,
+        "sample_size": 60,
+        "min_stars": 1000,
+        "seed": 20260729
+      },
+      {
+        "language": "Solidity",
+        "query": "language:Solidity stars:>=100 archived:false fork:false size:<500000",
+        "candidate_pool_size": 160,
+        "sample_size": 60,
+        "min_stars": 100,
+        "seed": 20260730
+      }
+    ]
+  },
+  "projects": [
+    {
+      "slug": "acidanthera/OpenCorePkg",
+      "url": "https://github.com/acidanthera/OpenCorePkg.git",
+      "ref": "3eb5eea3729bb953517d2dc6501e8ac2cabfc3d4",
+      "language": "C",
+      "stars": 15284,
+      "size_kb": 245507,
+      "default_branch": "master",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "AdAway/AdAway",
+      "url": "https://github.com/AdAway/AdAway.git",
+      "ref": "fa16432c3b8f3fa7fa42d76d094b2f285879726f",
+      "language": "C",
+      "stars": 9294,
+      "size_kb": 41309,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "allinurl/goaccess",
+      "url": "https://github.com/allinurl/goaccess.git",
+      "ref": "615490d44e43544ec778e0841047772d313f14b3",
+      "language": "C",
+      "stars": 20724,
+      "size_kb": 9188,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "andlabs/libui",
+      "url": "https://github.com/andlabs/libui.git",
+      "ref": "fea45b2d5b75839be0af9acc842a147c5cba9295",
+      "language": "C",
+      "stars": 10894,
+      "size_kb": 6375,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "antirez/kilo",
+      "url": "https://github.com/antirez/kilo.git",
+      "ref": "323d93b29bd89a2cb446de90c4ed4fea1764176e",
+      "language": "C",
+      "stars": 9045,
+      "size_kb": 24,
+      "default_branch": "master",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "slug": "arendst/Tasmota",
+      "url": "https://github.com/arendst/Tasmota.git",
+      "ref": "70fa0c5ad5d642d3fe0e63b63c9159eaa587e8fc",
+      "language": "C",
+      "stars": 24585,
+      "size_kb": 281752,
+      "default_branch": "development",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "bellard/quickjs",
+      "url": "https://github.com/bellard/quickjs.git",
+      "ref": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+      "language": "C",
+      "stars": 10846,
+      "size_kb": 12760,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "cfenollosa/os-tutorial",
+      "url": "https://github.com/cfenollosa/os-tutorial.git",
+      "ref": "8002382ee56f876119f77217220b8a5034e9bac1",
+      "language": "C",
+      "stars": 30612,
+      "size_kb": 107,
+      "default_branch": "master",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "colbymchenry/codegraph",
+      "url": "https://github.com/colbymchenry/codegraph.git",
+      "ref": "572d22bfbe82602080e457bec655f72e3314f9ef",
+      "language": "C",
+      "stars": 61772,
+      "size_kb": 16249,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "Cyan4973/xxHash",
+      "url": "https://github.com/Cyan4973/xxHash.git",
+      "ref": "16512d84ae6fc0836dbbe9f5732d3f661175ebab",
+      "language": "C",
+      "stars": 11161,
+      "size_kb": 5066,
+      "default_branch": "dev",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "DaveGamble/cJSON",
+      "url": "https://github.com/DaveGamble/cJSON.git",
+      "ref": "fb16e5cf358798aabb049655975cde8427101056",
+      "language": "C",
+      "stars": 12874,
+      "size_kb": 2583,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "DeusData/codebase-memory-mcp",
+      "url": "https://github.com/DeusData/codebase-memory-mcp.git",
+      "ref": "dc7178c8dc91bd14098add339c5d37087d88c9bf",
+      "language": "C",
+      "stars": 34265,
+      "size_kb": 183970,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "DoctorWkt/acwj",
+      "url": "https://github.com/DoctorWkt/acwj.git",
+      "ref": "84855ea20dcd2f300ba8e91951cf6aa1e7810225",
+      "language": "C",
+      "stars": 13286,
+      "size_kb": 4062,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "duixcom/Duix-Avatar",
+      "url": "https://github.com/duixcom/Duix-Avatar.git",
+      "ref": "1328feb5871448c8fa3d0e45b3bbc87e7c1d458a",
+      "language": "C",
+      "stars": 14128,
+      "size_kb": 98909,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "erincatto/box2d",
+      "url": "https://github.com/erincatto/box2d.git",
+      "ref": "56edae79f2949d86142b03450d5d60f63bcf5a6f",
+      "language": "C",
+      "stars": 10163,
+      "size_kb": 17401,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "ExistentialAudio/BlackHole",
+      "url": "https://github.com/ExistentialAudio/BlackHole.git",
+      "ref": "e2b22aaaba4e507a097131704bf96dabc004d9cf",
+      "language": "C",
+      "stars": 19429,
+      "size_kb": 5559,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "fastfetch-cli/fastfetch",
+      "url": "https://github.com/fastfetch-cli/fastfetch.git",
+      "ref": "111c1bab755f27050aeb75aba17d077f4dffe215",
+      "language": "C",
+      "stars": 23840,
+      "size_kb": 17163,
+      "default_branch": "dev",
+      "license": "MIT"
+    },
+    {
+      "slug": "FFmpeg/FFmpeg",
+      "url": "https://github.com/FFmpeg/FFmpeg.git",
+      "ref": "afb74faff6fb20cca0c15477872583a7c3d54977",
+      "language": "C",
+      "stars": 62304,
+      "size_kb": 489483,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "FreeRDP/FreeRDP",
+      "url": "https://github.com/FreeRDP/FreeRDP.git",
+      "ref": "e649ac41916f954ada67b849c77e679603e5002a",
+      "language": "C",
+      "stars": 13469,
+      "size_kb": 80610,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "gentilkiwi/mimikatz",
+      "url": "https://github.com/gentilkiwi/mimikatz.git",
+      "ref": "306bc6b43099c7b698f2898401fddbded6a630c8",
+      "language": "C",
+      "stars": 21723,
+      "size_kb": 5326,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Genymobile/scrcpy",
+      "url": "https://github.com/Genymobile/scrcpy.git",
+      "ref": "2926c06c5dc3064ae6d8db706f1a98a37cfcf3f0",
+      "language": "C",
+      "stars": 146200,
+      "size_kb": 8717,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "ggreer/the_silver_searcher",
+      "url": "https://github.com/ggreer/the_silver_searcher.git",
+      "ref": "a61f1780b64266587e7bc30f0f5f71c6cca97c0f",
+      "language": "C",
+      "stars": 27095,
+      "size_kb": 2426,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "git/git",
+      "url": "https://github.com/git/git.git",
+      "ref": "9a0c4701dcd5725c4184599322b52933ff5005ca",
+      "language": "C",
+      "stars": 62153,
+      "size_kb": 314318,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "gojue/ecapture",
+      "url": "https://github.com/gojue/ecapture.git",
+      "ref": "e08badabb5d0a05e8b02dc71ae00306ecda51a3e",
+      "language": "C",
+      "stars": 15386,
+      "size_kb": 16581,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "HandBrake/HandBrake",
+      "url": "https://github.com/HandBrake/HandBrake.git",
+      "ref": "3859d1fa7547f154a402a09fc8647113aa4455e7",
+      "language": "C",
+      "stars": 23828,
+      "size_kb": 123620,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "henrypp/memreduct",
+      "url": "https://github.com/henrypp/memreduct.git",
+      "ref": "0c6902189ef2939bdf95b42604e591189779b2e4",
+      "language": "C",
+      "stars": 9936,
+      "size_kb": 1852,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "iovisor/bcc",
+      "url": "https://github.com/iovisor/bcc.git",
+      "ref": "6485e12983cfae6a54be8e3191db236b417a0acb",
+      "language": "C",
+      "stars": 22569,
+      "size_kb": 23964,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "jgamblin/Mirai-Source-Code",
+      "url": "https://github.com/jgamblin/Mirai-Source-Code.git",
+      "ref": "4889a6f797237f1d4210839bcefd9f89c57c0770",
+      "language": "C",
+      "stars": 9396,
+      "size_kb": 189,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "JustVugg/colibri",
+      "url": "https://github.com/JustVugg/colibri.git",
+      "ref": "81f08a09e5651ce52616dc720f68810f9021c0be",
+      "language": "C",
+      "stars": 18018,
+      "size_kb": 6692,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "kingToolbox/WindTerm",
+      "url": "https://github.com/kingToolbox/WindTerm.git",
+      "ref": "a8336c1d1e3dd1a981500dae8ef9eb42066de95f",
+      "language": "C",
+      "stars": 31710,
+      "size_kb": 18742,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Klipper3d/klipper",
+      "url": "https://github.com/Klipper3d/klipper.git",
+      "ref": "7046bd00ef5c30dec6febc724f8d22967433c45c",
+      "language": "C",
+      "stars": 11756,
+      "size_kb": 243802,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "libevent/libevent",
+      "url": "https://github.com/libevent/libevent.git",
+      "ref": "e1f0335d2f3af1235421c939c62943bb99b3d652",
+      "language": "C",
+      "stars": 11935,
+      "size_kb": 13489,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "libgit2/libgit2",
+      "url": "https://github.com/libgit2/libgit2.git",
+      "ref": "36b8879154a1b9d22d2c0fde88053299d01517c7",
+      "language": "C",
+      "stars": 10528,
+      "size_kb": 74911,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "lz4/lz4",
+      "url": "https://github.com/lz4/lz4.git",
+      "ref": "0774d05537f9762f838f7ab541b7765f1a729cb5",
+      "language": "C",
+      "stars": 11958,
+      "size_kb": 7189,
+      "default_branch": "dev",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "micropython/micropython",
+      "url": "https://github.com/micropython/micropython.git",
+      "ref": "b9cceaa6fd61d9620e96296730156c8a82c6802f",
+      "language": "C",
+      "stars": 21922,
+      "size_kb": 76392,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "microsoft/mimalloc",
+      "url": "https://github.com/microsoft/mimalloc.git",
+      "ref": "a3ca0e5e2eb283c2c9275f30872e30252a91b66c",
+      "language": "C",
+      "stars": 13214,
+      "size_kb": 9693,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "nothings/stb",
+      "url": "https://github.com/nothings/stb.git",
+      "ref": "31c1ad37456438565541f4919958214b6e762fb4",
+      "language": "C",
+      "stars": 34258,
+      "size_kb": 5854,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "openresty/lua-nginx-module",
+      "url": "https://github.com/openresty/lua-nginx-module.git",
+      "ref": "1731f3509917984c89acf4dc65704e9925e21004",
+      "language": "C",
+      "stars": 11782,
+      "size_kb": 16095,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "openwall/john",
+      "url": "https://github.com/openwall/john.git",
+      "ref": "94caf43756b1f13c7e3829ff848df344ea755cac",
+      "language": "C",
+      "stars": 13412,
+      "size_kb": 133539,
+      "default_branch": "bleeding-jumbo",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "openzfs/zfs",
+      "url": "https://github.com/openzfs/zfs.git",
+      "ref": "1ac3f2786be29fe0fd0c65894b87162e1688fbca",
+      "language": "C",
+      "stars": 12347,
+      "size_kb": 153952,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "pgvector/pgvector",
+      "url": "https://github.com/pgvector/pgvector.git",
+      "ref": "a6420355c5d1c08f4c5fbd5112fc17e4cf3b5eb5",
+      "language": "C",
+      "stars": 22311,
+      "size_kb": 1998,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "phpredis/phpredis",
+      "url": "https://github.com/phpredis/phpredis.git",
+      "ref": "b37b23169cf4790442b9f007d3c88a893af2df5f",
+      "language": "C",
+      "stars": 10227,
+      "size_kb": 11679,
+      "default_branch": "develop",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "raysan5/raylib",
+      "url": "https://github.com/raysan5/raylib.git",
+      "ref": "aa4cf20eaeeda0165e890c9a10c3fd772a75380f",
+      "language": "C",
+      "stars": 34003,
+      "size_kb": 419734,
+      "default_branch": "master",
+      "license": "Zlib"
+    },
+    {
+      "slug": "robertdavidgraham/masscan",
+      "url": "https://github.com/robertdavidgraham/masscan.git",
+      "ref": "94e118ccd26c2fb263fb2fe731043f7b3240723c",
+      "language": "C",
+      "stars": 25877,
+      "size_kb": 3696,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "SamyPesse/How-to-Make-a-Computer-Operating-System",
+      "url": "https://github.com/SamyPesse/How-to-Make-a-Computer-Operating-System.git",
+      "ref": "eb30f8802fac9f0f1c28d3a96bb3d402bdfc4687",
+      "language": "C",
+      "stars": 22429,
+      "size_kb": 5986,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "sandboxie-plus/Sandboxie",
+      "url": "https://github.com/sandboxie-plus/Sandboxie.git",
+      "ref": "030d2b6dccfa2b47af15e7a3e45c90934b2316b1",
+      "language": "C",
+      "stars": 18978,
+      "size_kb": 214319,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "shadowsocks/shadowsocks-libev",
+      "url": "https://github.com/shadowsocks/shadowsocks-libev.git",
+      "ref": "dd2704c85729a0630acb0609344bf40cd3437777",
+      "language": "C",
+      "stars": 16185,
+      "size_kb": 10894,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "skywind3000/kcp",
+      "url": "https://github.com/skywind3000/kcp.git",
+      "ref": "b1a7a2101dcbb96017681a500d6b82bbe5a88766",
+      "language": "C",
+      "stars": 16833,
+      "size_kb": 625,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "sumatrapdfreader/sumatrapdf",
+      "url": "https://github.com/sumatrapdfreader/sumatrapdf.git",
+      "ref": "1d6244a27af1f2769927ceae701957f9d96cf948",
+      "language": "C",
+      "stars": 17159,
+      "size_kb": 355288,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Syllo/nvtop",
+      "url": "https://github.com/Syllo/nvtop.git",
+      "ref": "3d4a953da02bc18886734613bb9f60ff80669de7",
+      "language": "C",
+      "stars": 10853,
+      "size_kb": 1237,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "tmux/tmux",
+      "url": "https://github.com/tmux/tmux.git",
+      "ref": "7428b0431ad85b874e7b89e85377185a22a37648",
+      "language": "C",
+      "stars": 47979,
+      "size_kb": 21670,
+      "default_branch": "master",
+      "license": "ISC"
+    },
+    {
+      "slug": "torch/torch7",
+      "url": "https://github.com/torch/torch7.git",
+      "ref": "814ea4afd6beb110705d2456de03876841fcf1fd",
+      "language": "C",
+      "stars": 9139,
+      "size_kb": 2634,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "tporadowski/redis",
+      "url": "https://github.com/tporadowski/redis.git",
+      "ref": "c59c9365be41e8936fef00af5b1b149ab91b70ba",
+      "language": "C",
+      "stars": 10217,
+      "size_kb": 194276,
+      "default_branch": "develop",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "tursodatabase/libsql",
+      "url": "https://github.com/tursodatabase/libsql.git",
+      "ref": "6f451a1fabacbcbc9960b232b4c1605a5021979b",
+      "language": "C",
+      "stars": 16982,
+      "size_kb": 206592,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "unicorn-engine/unicorn",
+      "url": "https://github.com/unicorn-engine/unicorn.git",
+      "ref": "7c5db94191defc1e04a4f66f4eb1220903cba837",
+      "language": "C",
+      "stars": 9185,
+      "size_kb": 18610,
+      "default_branch": "master",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "ValdikSS/GoodbyeDPI",
+      "url": "https://github.com/ValdikSS/GoodbyeDPI.git",
+      "ref": "f593a276f9ec753889f80208c6a7c5cf455df94a",
+      "language": "C",
+      "stars": 28508,
+      "size_kb": 222,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "valinet/ExplorerPatcher",
+      "url": "https://github.com/valinet/ExplorerPatcher.git",
+      "ref": "0a88a6e0ef6b1752fea36e581cffff1097e862b0",
+      "language": "C",
+      "stars": 33375,
+      "size_kb": 9196,
+      "default_branch": "master",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "winsiderss/systeminformer",
+      "url": "https://github.com/winsiderss/systeminformer.git",
+      "ref": "b4f90bb331c4f88308b461874d1a533e2d4212d4",
+      "language": "C",
+      "stars": 15448,
+      "size_kb": 95911,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "xiaojieonly/Ehviewer_CN_SXJ",
+      "url": "https://github.com/xiaojieonly/Ehviewer_CN_SXJ.git",
+      "ref": "69eb6ff3d181cdc80cf6100ff7c9bfa97c903a27",
+      "language": "C",
+      "stars": 25511,
+      "size_kb": 14888,
+      "default_branch": "BiLi_PC_Gamer",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "xmrig/xmrig",
+      "url": "https://github.com/xmrig/xmrig.git",
+      "ref": "b2ca72480c58d197e18c885d9fc1a0c8d517e60a",
+      "language": "C",
+      "stars": 10050,
+      "size_kb": 12607,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "0x7c13/Notepads",
+      "url": "https://github.com/0x7c13/Notepads.git",
+      "ref": "6ec270c134b115d6bff38bc3966784e8893a419c",
+      "language": "C#",
+      "stars": 10185,
+      "size_kb": 40396,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "ardalis/CleanArchitecture",
+      "url": "https://github.com/ardalis/CleanArchitecture.git",
+      "ref": "a064d0b369b719ba03da71da1560d208d7e02e03",
+      "language": "C#",
+      "stars": 18343,
+      "size_kb": 3729,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "AssetRipper/AssetRipper",
+      "url": "https://github.com/AssetRipper/AssetRipper.git",
+      "ref": "0730de9853007bf255363cb68eadb05e11cf10a3",
+      "language": "C#",
+      "stars": 7979,
+      "size_kb": 450568,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "builtbybel/FlyOOBE",
+      "url": "https://github.com/builtbybel/FlyOOBE.git",
+      "ref": "ed093a784df51b19e989395f2ed6443ca1f335dd",
+      "language": "C#",
+      "stars": 7087,
+      "size_kb": 2545,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "cefsharp/CefSharp",
+      "url": "https://github.com/cefsharp/CefSharp.git",
+      "ref": "6331b891202c9aa9d602a77defd471491e787af0",
+      "language": "C#",
+      "stars": 10237,
+      "size_kb": 292742,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "DapperLib/Dapper",
+      "url": "https://github.com/DapperLib/Dapper.git",
+      "ref": "72a54c475f75e18cb93cba0809d00a5e6e49efd9",
+      "language": "C#",
+      "stars": 18357,
+      "size_kb": 50065,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "dotnet/BenchmarkDotNet",
+      "url": "https://github.com/dotnet/BenchmarkDotNet.git",
+      "ref": "2365829b82d95843e561f9ef666f4e9e86761d38",
+      "language": "C#",
+      "stars": 11457,
+      "size_kb": 70909,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "dotnet/efcore",
+      "url": "https://github.com/dotnet/efcore.git",
+      "ref": "37d63ac01d6d524364a6b2918eae9afc83c49d01",
+      "language": "C#",
+      "stars": 14751,
+      "size_kb": 233101,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "dotnet/eShop",
+      "url": "https://github.com/dotnet/eShop.git",
+      "ref": "9b4f9434f46fdc5c1a6e9e936af2868340cdbc48",
+      "language": "C#",
+      "stars": 10696,
+      "size_kb": 25397,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "dotnet/machinelearning",
+      "url": "https://github.com/dotnet/machinelearning.git",
+      "ref": "7bf1b4d28f49b04fd0b511298f41202ed0b454d7",
+      "language": "C#",
+      "stars": 9343,
+      "size_kb": 102292,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "dotnet/orleans",
+      "url": "https://github.com/dotnet/orleans.git",
+      "ref": "35e53810f1e8cc70c6996d5933504acc052544c3",
+      "language": "C#",
+      "stars": 10814,
+      "size_kb": 74426,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "dotnetcore/CAP",
+      "url": "https://github.com/dotnetcore/CAP.git",
+      "ref": "e52b8508e54cdb7a9ce7f9fec03d9ea8ad2710fb",
+      "language": "C#",
+      "stars": 7100,
+      "size_kb": 15699,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "duplicati/duplicati",
+      "url": "https://github.com/duplicati/duplicati.git",
+      "ref": "c7de01b444b9e3e412e88d2174c4a70a650ae687",
+      "language": "C#",
+      "stars": 14780,
+      "size_kb": 206921,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "dvf/blockchain",
+      "url": "https://github.com/dvf/blockchain.git",
+      "ref": "68066d648244ce2b7e2d1cbd16f9255363f94712",
+      "language": "C#",
+      "stars": 8049,
+      "size_kb": 127,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "EduardoPires/EquinoxProject",
+      "url": "https://github.com/EduardoPires/EquinoxProject.git",
+      "ref": "fde9a953eb31a31217e1c9d35b385b73adb5e1d3",
+      "language": "C#",
+      "stars": 6782,
+      "size_kb": 1759,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "EllanJiang/GameFramework",
+      "url": "https://github.com/EllanJiang/GameFramework.git",
+      "ref": "d0c010b05167c58e92350449d04864a91ca13fd2",
+      "language": "C#",
+      "stars": 6821,
+      "size_kb": 6767,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "files-community/Files",
+      "url": "https://github.com/files-community/Files.git",
+      "ref": "c4a4ff95b413b8ea3d0f04fc13ef99512bf135cc",
+      "language": "C#",
+      "stars": 44399,
+      "size_kb": 280521,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "git-ecosystem/git-credential-manager",
+      "url": "https://github.com/git-ecosystem/git-credential-manager.git",
+      "ref": "2fe99b867b710265e3273b48da7513d91e6ef8eb",
+      "language": "C#",
+      "stars": 9116,
+      "size_kb": 7558,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "icsharpcode/ILSpy",
+      "url": "https://github.com/icsharpcode/ILSpy.git",
+      "ref": "cac1209014a93e922ba557952f9577e4a4e7110a",
+      "language": "C#",
+      "stars": 25705,
+      "size_kb": 51851,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "iOfficeAI/OfficeCLI",
+      "url": "https://github.com/iOfficeAI/OfficeCLI.git",
+      "ref": "9c78827d25d33f53664e68e7ec841d577c763632",
+      "language": "C#",
+      "stars": 21183,
+      "size_kb": 316132,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "Jackett/Jackett",
+      "url": "https://github.com/Jackett/Jackett.git",
+      "ref": "8f2fcabb1befbe71bc401e3b99d22a0cccee0c91",
+      "language": "C#",
+      "stars": 15780,
+      "size_kb": 44800,
+      "default_branch": "master",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "JosefNemec/Playnite",
+      "url": "https://github.com/JosefNemec/Playnite.git",
+      "ref": "02fc1972a1f0c4b7e5f2bc2b91d8dfe643141965",
+      "language": "C#",
+      "stars": 13580,
+      "size_kb": 75210,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "JustArchiNET/ArchiSteamFarm",
+      "url": "https://github.com/JustArchiNET/ArchiSteamFarm.git",
+      "ref": "480af80b808c84fd08ba60f254340b4e48376de2",
+      "language": "C#",
+      "stars": 13561,
+      "size_kb": 243592,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "Kareadita/Kavita",
+      "url": "https://github.com/Kareadita/Kavita.git",
+      "ref": "fbf9c5e841bd11c3a25d4c96923600a939fe194e",
+      "language": "C#",
+      "stars": 11305,
+      "size_kb": 341840,
+      "default_branch": "develop",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "LibreHardwareMonitor/LibreHardwareMonitor",
+      "url": "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor.git",
+      "ref": "0ee5fec89915454c8cc68c571f2c54cdced08ad9",
+      "language": "C#",
+      "stars": 8731,
+      "size_kb": 13545,
+      "default_branch": "master",
+      "license": "MPL-2.0"
+    },
+    {
+      "slug": "louthy/language-ext",
+      "url": "https://github.com/louthy/language-ext.git",
+      "ref": "041f74a00f667aba34b927f396dba39774645670",
+      "language": "C#",
+      "stars": 7069,
+      "size_kb": 25601,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "lucasg/Dependencies",
+      "url": "https://github.com/lucasg/Dependencies.git",
+      "ref": "1997a40000b77bd3326cbc33672a7b9f78bb23f3",
+      "language": "C#",
+      "stars": 11704,
+      "size_kb": 15341,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "MathewSachin/Captura",
+      "url": "https://github.com/MathewSachin/Captura.git",
+      "ref": "3fdf41529bf4d50cd7a85aedd856f30e34279a47",
+      "language": "C#",
+      "stars": 10757,
+      "size_kb": 5723,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "memstechtips/Winhance",
+      "url": "https://github.com/memstechtips/Winhance.git",
+      "ref": "f23d554eb2d6400b1827bcc46b91294ffa53fbc9",
+      "language": "C#",
+      "stars": 12009,
+      "size_kb": 50797,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "MessagePack-CSharp/MessagePack-CSharp",
+      "url": "https://github.com/MessagePack-CSharp/MessagePack-CSharp.git",
+      "ref": "135abbc98a69be3eed04d646e06655ecf9a52f1f",
+      "language": "C#",
+      "stars": 6750,
+      "size_kb": 13187,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "microsoft/semantic-kernel",
+      "url": "https://github.com/microsoft/semantic-kernel.git",
+      "ref": "acb3e35c540dd2135896b93d9e0eb5f47c0b14a0",
+      "language": "C#",
+      "stars": 28349,
+      "size_kb": 106922,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "mob-sakai/UIEffect",
+      "url": "https://github.com/mob-sakai/UIEffect.git",
+      "ref": "0a4229907d723c61591d6b95f41f546e06e2b876",
+      "language": "C#",
+      "stars": 7476,
+      "size_kb": 41190,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "mxgmn/WaveFunctionCollapse",
+      "url": "https://github.com/mxgmn/WaveFunctionCollapse.git",
+      "ref": "de7d22e705e816b62b4d613199d0463820fcaef3",
+      "language": "C#",
+      "stars": 25208,
+      "size_kb": 31117,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "netchx/netch",
+      "url": "https://github.com/netchx/netch.git",
+      "ref": "9d99eb1c5a2acbf2a34f2600f94242601019a300",
+      "language": "C#",
+      "stars": 17671,
+      "size_kb": 11820,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "NickeManarin/ScreenToGif",
+      "url": "https://github.com/NickeManarin/ScreenToGif.git",
+      "ref": "27a49c3be69486f2db964290f4f2274e790fb687",
+      "language": "C#",
+      "stars": 27330,
+      "size_kb": 26329,
+      "default_branch": "master",
+      "license": "MS-PL"
+    },
+    {
+      "slug": "NickvisionApps/Parabolic",
+      "url": "https://github.com/NickvisionApps/Parabolic.git",
+      "ref": "1118e6a3abbf5ffc1f764c4c9781f98d4c0482d4",
+      "language": "C#",
+      "stars": 6670,
+      "size_kb": 149963,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "nilaoda/N_m3u8DL-RE",
+      "url": "https://github.com/nilaoda/N_m3u8DL-RE.git",
+      "ref": "e113dee70c924ee08dae5460624909b04d84cb76",
+      "language": "C#",
+      "stars": 8427,
+      "size_kb": 3768,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "OdysseusYuan/LKY_OfficeTools",
+      "url": "https://github.com/OdysseusYuan/LKY_OfficeTools.git",
+      "ref": "6f9a1bd471918f3310e6be4a6d7f42d0d6e467cf",
+      "language": "C#",
+      "stars": 12340,
+      "size_kb": 49445,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Orbmu2k/nvidiaProfileInspector",
+      "url": "https://github.com/Orbmu2k/nvidiaProfileInspector.git",
+      "ref": "592d962cca8827efe8859461a84267755595064a",
+      "language": "C#",
+      "stars": 6829,
+      "size_kb": 2204,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "peass-ng/PEASS-ng",
+      "url": "https://github.com/peass-ng/PEASS-ng.git",
+      "ref": "1cabd84639d48c21ba088e07e52661c30c906aef",
+      "language": "C#",
+      "stars": 20179,
+      "size_kb": 65464,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "quartznet/quartznet",
+      "url": "https://github.com/quartznet/quartznet.git",
+      "ref": "4f16cb43f7786eb168c1f11390326713f0b533a5",
+      "language": "C#",
+      "stars": 7059,
+      "size_kb": 35095,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "Radarr/Radarr",
+      "url": "https://github.com/Radarr/Radarr.git",
+      "ref": "69f8ceaeb59021be314d7790a5eb1f38b99f10da",
+      "language": "C#",
+      "stars": 14043,
+      "size_kb": 316141,
+      "default_branch": "develop",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "runcat-dev/RunCat365",
+      "url": "https://github.com/runcat-dev/RunCat365.git",
+      "ref": "03b6e2b288c2df5df2433398f5547857bb4d0e2f",
+      "language": "C#",
+      "stars": 10226,
+      "size_kb": 1624,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "serilog/serilog",
+      "url": "https://github.com/serilog/serilog.git",
+      "ref": "07d39cfb2928076ecd902a61d295f90d74fe1fa5",
+      "language": "C#",
+      "stars": 8015,
+      "size_kb": 76345,
+      "default_branch": "dev",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "shadowsocks/shadowsocks-windows",
+      "url": "https://github.com/shadowsocks/shadowsocks-windows.git",
+      "ref": "891d971682eefcaa2e640258d3b352a3ad3b2233",
+      "language": "C#",
+      "stars": 59581,
+      "size_kb": 13489,
+      "default_branch": "v4",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "ShareX/ShareX",
+      "url": "https://github.com/ShareX/ShareX.git",
+      "ref": "e6c458794974bedc864d6ccfd8c364bba142bd43",
+      "language": "C#",
+      "stars": 38767,
+      "size_kb": 75316,
+      "default_branch": "develop",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "SixLabors/ImageSharp",
+      "url": "https://github.com/SixLabors/ImageSharp.git",
+      "ref": "2929bc73c0b5ac02823c7a2fbe707945a32a85b2",
+      "language": "C#",
+      "stars": 8017,
+      "size_kb": 135812,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Sonarr/Sonarr",
+      "url": "https://github.com/Sonarr/Sonarr.git",
+      "ref": "7e627f69470b1a1d20560e31968cf281e711cc2e",
+      "language": "C#",
+      "stars": 14413,
+      "size_kb": 304301,
+      "default_branch": "v5-develop",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "srwi/EverythingToolbar",
+      "url": "https://github.com/srwi/EverythingToolbar.git",
+      "ref": "e304befb57dbdf16d37f5fe153b539fdd5d37fe5",
+      "language": "C#",
+      "stars": 14412,
+      "size_kb": 27878,
+      "default_branch": "develop",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "studyzy/imewlconverter",
+      "url": "https://github.com/studyzy/imewlconverter.git",
+      "ref": "d7f3799e4095277ef198debab94af3fec7d2e996",
+      "language": "C#",
+      "stars": 10195,
+      "size_kb": 65672,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "TGSAN/CMWTAT_Digital_Edition",
+      "url": "https://github.com/TGSAN/CMWTAT_Digital_Edition.git",
+      "ref": "2bab2dfd5734ea1d1719b9a24d5541e09d333354",
+      "language": "C#",
+      "stars": 19207,
+      "size_kb": 59447,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "thangchung/awesome-dotnet-core",
+      "url": "https://github.com/thangchung/awesome-dotnet-core.git",
+      "ref": "26204aa32be461a7a88c2c372050ffeaed6bcde9",
+      "language": "C#",
+      "stars": 21341,
+      "size_kb": 1369,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "TheAlgorithms/C-Sharp",
+      "url": "https://github.com/TheAlgorithms/C-Sharp.git",
+      "ref": "96e2905cab7bc6b33ac0a34ee5bb82ddccbcbb6c",
+      "language": "C#",
+      "stars": 8161,
+      "size_kb": 2060,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Tichau/FileConverter",
+      "url": "https://github.com/Tichau/FileConverter.git",
+      "ref": "6c157a411fb70fb7440d2e3b226042781fd55b15",
+      "language": "C#",
+      "stars": 14826,
+      "size_kb": 248219,
+      "default_branch": "integration",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "tui-cs/Terminal.Gui",
+      "url": "https://github.com/tui-cs/Terminal.Gui.git",
+      "ref": "516074203552017a7bc77a4e0ed643cd0b45b8f8",
+      "language": "C#",
+      "stars": 11124,
+      "size_kb": 199411,
+      "default_branch": "develop",
+      "license": "MIT"
+    },
+    {
+      "slug": "Unity-Technologies/UnityCsReference",
+      "url": "https://github.com/Unity-Technologies/UnityCsReference.git",
+      "ref": "979bc204a0c6506d87595a02fc89452687ed820d",
+      "language": "C#",
+      "stars": 12922,
+      "size_kb": 81650,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "unoplatform/uno",
+      "url": "https://github.com/unoplatform/uno.git",
+      "ref": "3a4f77a1a2ddc1f4afde5acd78ebc9e55e34cc69",
+      "language": "C#",
+      "stars": 9987,
+      "size_kb": 331097,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "winsw/winsw",
+      "url": "https://github.com/winsw/winsw.git",
+      "ref": "1d0ee4a91bad596d5e7e9c360f2b39ef54674674",
+      "language": "C#",
+      "stars": 14154,
+      "size_kb": 3566,
+      "default_branch": "v3",
+      "license": "MIT"
+    },
+    {
+      "slug": "wmjordan/PDFPatcher",
+      "url": "https://github.com/wmjordan/PDFPatcher.git",
+      "ref": "4782bbd9ada850b56258f29999b7a1c9076c9b1b",
+      "language": "C#",
+      "stars": 12572,
+      "size_kb": 73268,
+      "default_branch": "v1.2",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "ZyperWave/ZyperWinOptimize",
+      "url": "https://github.com/ZyperWave/ZyperWinOptimize.git",
+      "ref": "d20e78bbd906fa179e4cc9f5107b502da5967aa9",
+      "language": "C#",
+      "stars": 8119,
+      "size_kb": 27468,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "acaudwell/Gource",
+      "url": "https://github.com/acaudwell/Gource.git",
+      "ref": "70db547c6b8b40745fb41a8db7e8d28897be1a9e",
+      "language": "C++",
+      "stars": 13078,
+      "size_kb": 4070,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "alibaba/MNN",
+      "url": "https://github.com/alibaba/MNN.git",
+      "ref": "d407447ed56c4121a11ccbd266dc184ca1ead0c2",
+      "language": "C++",
+      "stars": 15704,
+      "size_kb": 330466,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "aristocratos/btop",
+      "url": "https://github.com/aristocratos/btop.git",
+      "ref": "cece4df4db2112f63d94347f6ee2f89ee7224c7b",
+      "language": "C++",
+      "stars": 33604,
+      "size_kb": 10019,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "AutoHotkey/AutoHotkey",
+      "url": "https://github.com/AutoHotkey/AutoHotkey.git",
+      "ref": "34b170115414dd69f1dfaf54893c150deade6bd2",
+      "language": "C++",
+      "stars": 12781,
+      "size_kb": 26360,
+      "default_branch": "alpha",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "bitcoin/bitcoin",
+      "url": "https://github.com/bitcoin/bitcoin.git",
+      "ref": "7b6f9ba7bad13b0c4169259000f7802854cdda0d",
+      "language": "C++",
+      "stars": 89656,
+      "size_kb": 320018,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "catchorg/Catch2",
+      "url": "https://github.com/catchorg/Catch2.git",
+      "ref": "0cc833ea95bb7136c99be1b5b105780cae5766ff",
+      "language": "C++",
+      "stars": 21284,
+      "size_kb": 33260,
+      "default_branch": "devel",
+      "license": "BSL-1.0"
+    },
+    {
+      "slug": "changkun/modern-cpp-tutorial",
+      "url": "https://github.com/changkun/modern-cpp-tutorial.git",
+      "ref": "24f9dd58c32334fa3b79091e3bbe084b2ee3e1f3",
+      "language": "C++",
+      "stars": 25678,
+      "size_kb": 39821,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "cp-algorithms/cp-algorithms",
+      "url": "https://github.com/cp-algorithms/cp-algorithms.git",
+      "ref": "861a9956d67cca912e02091f4cec4a6efe2022a0",
+      "language": "C++",
+      "stars": 10953,
+      "size_kb": 69907,
+      "default_branch": "main",
+      "license": "CC-BY-SA-4.0"
+    },
+    {
+      "slug": "dail8859/NotepadNext",
+      "url": "https://github.com/dail8859/NotepadNext.git",
+      "ref": "e8ea71adb8a77cd0513f243087f48fb0f1620b5f",
+      "language": "C++",
+      "stars": 14387,
+      "size_kb": 21612,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "davisking/dlib",
+      "url": "https://github.com/davisking/dlib.git",
+      "ref": "e8d99e55570386e8cc462f73dbe5d388c1d6a227",
+      "language": "C++",
+      "stars": 14428,
+      "size_kb": 50001,
+      "default_branch": "master",
+      "license": "BSL-1.0"
+    },
+    {
+      "slug": "DayBreak-u/chineseocr_lite",
+      "url": "https://github.com/DayBreak-u/chineseocr_lite.git",
+      "ref": "54a3df53af823f3bffdde9393d0c021b4f6d94cd",
+      "language": "C++",
+      "stars": 12328,
+      "size_kb": 247193,
+      "default_branch": "master",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "dogecoin/dogecoin",
+      "url": "https://github.com/dogecoin/dogecoin.git",
+      "ref": "62b6b64dec87c3dae3356c84db8a4f17bc294e49",
+      "language": "C++",
+      "stars": 15222,
+      "size_kb": 184006,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "dragonflydb/dragonfly",
+      "url": "https://github.com/dragonflydb/dragonfly.git",
+      "ref": "8912a9bf1bc17eea967f816b613ec5681fa31e33",
+      "language": "C++",
+      "stars": 30899,
+      "size_kb": 27732,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "duckdb/duckdb",
+      "url": "https://github.com/duckdb/duckdb.git",
+      "ref": "c97bd8b96e0481b9e58d491f4fcd8599fccd65fb",
+      "language": "C++",
+      "stars": 39632,
+      "size_kb": 470892,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "dyang886/Game-Cheats-Manager",
+      "url": "https://github.com/dyang886/Game-Cheats-Manager.git",
+      "ref": "cb44a4cc81a5413ae14954adfa5ac8820bfa4f27",
+      "language": "C++",
+      "stars": 13557,
+      "size_kb": 67212,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "emscripten-core/emscripten",
+      "url": "https://github.com/emscripten-core/emscripten.git",
+      "ref": "4e8579a7748fec9cea182828d7993bbc78afa4d9",
+      "language": "C++",
+      "stars": 27517,
+      "size_kb": 270522,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "esp8266/Arduino",
+      "url": "https://github.com/esp8266/Arduino.git",
+      "ref": "f946290ea993db029a90010927cdc1d645c91940",
+      "language": "C++",
+      "stars": 16653,
+      "size_kb": 224577,
+      "default_branch": "master",
+      "license": "LGPL-2.1"
+    },
+    {
+      "slug": "esphome/esphome",
+      "url": "https://github.com/esphome/esphome.git",
+      "ref": "dd2fbdd43ac758212d9e8e749b4ff4a04568f8af",
+      "language": "C++",
+      "stars": 11420,
+      "size_kb": 90131,
+      "default_branch": "dev",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "facebook/rocksdb",
+      "url": "https://github.com/facebook/rocksdb.git",
+      "ref": "2b628ccfe575abebf22afa42f4273608a26a9539",
+      "language": "C++",
+      "stars": 31898,
+      "size_kb": 245903,
+      "default_branch": "main",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "facebook/watchman",
+      "url": "https://github.com/facebook/watchman.git",
+      "ref": "806a1a42bb3579d83150a460903f52e54458b9d1",
+      "language": "C++",
+      "stars": 13651,
+      "size_kb": 34538,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "facebookresearch/faiss",
+      "url": "https://github.com/facebookresearch/faiss.git",
+      "ref": "3b52da37c40973d4816ff7d2a4e3fb9f74379988",
+      "language": "C++",
+      "stars": 40567,
+      "size_kb": 282821,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "fmtlib/fmt",
+      "url": "https://github.com/fmtlib/fmt.git",
+      "ref": "4e5ff510f8234a6e85b86a9e2c96f3a07d2af16b",
+      "language": "C++",
+      "stars": 23682,
+      "size_kb": 17112,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "gabime/spdlog",
+      "url": "https://github.com/gabime/spdlog.git",
+      "ref": "2ee3cf8204ed5048627644e00a51a7d93fbc4786",
+      "language": "C++",
+      "stars": 29241,
+      "size_kb": 42914,
+      "default_branch": "v1.x",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "google/googletest",
+      "url": "https://github.com/google/googletest.git",
+      "ref": "08da6214b81f3b08c48569f245cd7a2d0badb8b2",
+      "language": "C++",
+      "stars": 38847,
+      "size_kb": 14212,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "google/leveldb",
+      "url": "https://github.com/google/leveldb.git",
+      "ref": "7ee830d02b623e8ffe0b95d59a74db1e58da04c5",
+      "language": "C++",
+      "stars": 39251,
+      "size_kb": 1848,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "google/libphonenumber",
+      "url": "https://github.com/google/libphonenumber.git",
+      "ref": "f7e3e88c92b905c8d6edb81f336dbe25edc05b52",
+      "language": "C++",
+      "stars": 18149,
+      "size_kb": 320941,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "haoel/leetcode",
+      "url": "https://github.com/haoel/leetcode.git",
+      "ref": "125c4d8d7e3a4700d7b2dc5b6e7137f84da884e3",
+      "language": "C++",
+      "stars": 18056,
+      "size_kb": 3164,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "hoffstadt/DearPyGui",
+      "url": "https://github.com/hoffstadt/DearPyGui.git",
+      "ref": "df9dabfc74b13686000d0c95441d0fc862d6313d",
+      "language": "C++",
+      "stars": 15532,
+      "size_kb": 146677,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "huihut/interview",
+      "url": "https://github.com/huihut/interview.git",
+      "ref": "aba5cd97e8173dd6e1d1758b645e3a51534f872d",
+      "language": "C++",
+      "stars": 38060,
+      "size_kb": 5713,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "imputnet/helium",
+      "url": "https://github.com/imputnet/helium.git",
+      "ref": "2c97e8c5d180d5703ef0e54ed4f9768d60b952e3",
+      "language": "C++",
+      "stars": 18730,
+      "size_kb": 28082,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "jrouwe/JoltPhysics",
+      "url": "https://github.com/jrouwe/JoltPhysics.git",
+      "ref": "072675b1d56db248ee3f77713999de4b0ec744d2",
+      "language": "C++",
+      "stars": 11014,
+      "size_kb": 31021,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "k2-fsa/sherpa-onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx.git",
+      "ref": "2cbcb26887e65570dfc3c7adea4110bef90d759f",
+      "language": "C++",
+      "stars": 13719,
+      "size_kb": 15767,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "luanti-org/luanti",
+      "url": "https://github.com/luanti-org/luanti.git",
+      "ref": "c85db9339cc1532b997cf5f262b7c11df2ed27ca",
+      "language": "C++",
+      "stars": 13329,
+      "size_kb": 137082,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "microsoft/AirSim",
+      "url": "https://github.com/microsoft/AirSim.git",
+      "ref": "d109f0dc25d4ae425eca7b279da33df5f5fcb42e",
+      "language": "C++",
+      "stars": 18329,
+      "size_kb": 376798,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "microsoft/calculator",
+      "url": "https://github.com/microsoft/calculator.git",
+      "ref": "9f186049101f9a26e99a6e6cdff614d5558b5d27",
+      "language": "C++",
+      "stars": 30986,
+      "size_kb": 40068,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "microsoft/react-native-windows",
+      "url": "https://github.com/microsoft/react-native-windows.git",
+      "ref": "cda341bada4bd0214732014bc7868133767b48a6",
+      "language": "C++",
+      "stars": 17314,
+      "size_kb": 380271,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "ml-explore/mlx",
+      "url": "https://github.com/ml-explore/mlx.git",
+      "ref": "6c0ea7fb012be4ac55ea7c1c73334e3c9d247f56",
+      "language": "C++",
+      "stars": 27655,
+      "size_kb": 69574,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "mobile-shell/mosh",
+      "url": "https://github.com/mobile-shell/mosh.git",
+      "ref": "decd9b705eb81626f694335b8d5940538beb06da",
+      "language": "C++",
+      "stars": 14207,
+      "size_kb": 2756,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "ocornut/imgui",
+      "url": "https://github.com/ocornut/imgui.git",
+      "ref": "b335bf4328054498219afb4188ec39912f2a95b1",
+      "language": "C++",
+      "stars": 74949,
+      "size_kb": 129503,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "official-stockfish/Stockfish",
+      "url": "https://github.com/official-stockfish/Stockfish.git",
+      "ref": "f4bcd40409f94bd397a083c5d6243bac6dcc6d85",
+      "language": "C++",
+      "stars": 16114,
+      "size_kb": 20097,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "OpenRCT2/OpenRCT2",
+      "url": "https://github.com/OpenRCT2/OpenRCT2.git",
+      "ref": "8ed1ac4c57cd4ab4f5808010565337635c142c87",
+      "language": "C++",
+      "stars": 15978,
+      "size_kb": 277607,
+      "default_branch": "develop",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "polybar/polybar",
+      "url": "https://github.com/polybar/polybar.git",
+      "ref": "f99e0b1c7a5b094f5a04b14101899d0cb4ece69d",
+      "language": "C++",
+      "stars": 15315,
+      "size_kb": 8999,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "pqrs-org/Karabiner-Elements",
+      "url": "https://github.com/pqrs-org/Karabiner-Elements.git",
+      "ref": "f771c6fc98f8c8a0cf11ff92ed5e05b5e9e8b20a",
+      "language": "C++",
+      "stars": 22526,
+      "size_kb": 140293,
+      "default_branch": "main",
+      "license": "Unlicense"
+    },
+    {
+      "slug": "pybind/pybind11",
+      "url": "https://github.com/pybind/pybind11.git",
+      "ref": "34566e1d2ab190f38196d2c09ccd706fe4ccbeeb",
+      "language": "C++",
+      "stars": 17971,
+      "size_kb": 13388,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Qv2ray/Qv2ray",
+      "url": "https://github.com/Qv2ray/Qv2ray.git",
+      "ref": "d5c5aeb366e2fbe9c9243648af36b0d11da14920",
+      "language": "C++",
+      "stars": 16936,
+      "size_kb": 25596,
+      "default_branch": "dev",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "react/yoga",
+      "url": "https://github.com/react/yoga.git",
+      "ref": "1dc925c5f262597cadbe549d5e96a0cda77facc8",
+      "language": "C++",
+      "stars": 18836,
+      "size_kb": 27231,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "scottbez1/smartknob",
+      "url": "https://github.com/scottbez1/smartknob.git",
+      "ref": "4eb988399c3fda6ffd3006772856093dfe9adb86",
+      "language": "C++",
+      "stars": 21950,
+      "size_kb": 15114,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "scylladb/scylladb",
+      "url": "https://github.com/scylladb/scylladb.git",
+      "ref": "5c2828b3598247ec45b422ffc2b3bfb928536ceb",
+      "language": "C++",
+      "stars": 15671,
+      "size_kb": 271392,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "SerenityOS/serenity",
+      "url": "https://github.com/SerenityOS/serenity.git",
+      "ref": "624e055b26f2951957bc496d4e567a4858a3afdd",
+      "language": "C++",
+      "stars": 33648,
+      "size_kb": 241882,
+      "default_branch": "master",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "slug": "SFML/SFML",
+      "url": "https://github.com/SFML/SFML.git",
+      "ref": "a91a7f6a888a4636493107c33d4faec96bdc1509",
+      "language": "C++",
+      "stars": 11962,
+      "size_kb": 113514,
+      "default_branch": "master",
+      "license": "Zlib"
+    },
+    {
+      "slug": "skypjack/entt",
+      "url": "https://github.com/skypjack/entt.git",
+      "ref": "1333fa53129e7cfded5a9640c4336a254049917b",
+      "language": "C++",
+      "stars": 12933,
+      "size_kb": 40020,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "Snapchat/KeyDB",
+      "url": "https://github.com/Snapchat/KeyDB.git",
+      "ref": "603ebb27fb82a27fb98b0feb6749b0f7661a1c4b",
+      "language": "C++",
+      "stars": 12492,
+      "size_kb": 38115,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "sonic-pi-net/sonic-pi",
+      "url": "https://github.com/sonic-pi-net/sonic-pi.git",
+      "ref": "fae196580e9250b7729728329898917e5f0f31a9",
+      "language": "C++",
+      "stars": 11903,
+      "size_kb": 457849,
+      "default_branch": "dev",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "sqlitebrowser/sqlitebrowser",
+      "url": "https://github.com/sqlitebrowser/sqlitebrowser.git",
+      "ref": "582f086e4db8df599a7ef2838d921046600854ac",
+      "language": "C++",
+      "stars": 24357,
+      "size_kb": 35362,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "taskflow/taskflow",
+      "url": "https://github.com/taskflow/taskflow.git",
+      "ref": "ec97c0095bd10907584a3b408e181410796b48fe",
+      "language": "C++",
+      "stars": 12074,
+      "size_kb": 162657,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "telegramdesktop/tdesktop",
+      "url": "https://github.com/telegramdesktop/tdesktop.git",
+      "ref": "a77926bdca896ccd3e0bd32d51a6b1d9670b6203",
+      "language": "C++",
+      "stars": 32383,
+      "size_kb": 276648,
+      "default_branch": "dev",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Tencent/ncnn",
+      "url": "https://github.com/Tencent/ncnn.git",
+      "ref": "a4d2ea1d4422c9e849f166fd7a4aefb52f942f6a",
+      "language": "C++",
+      "stars": 23568,
+      "size_kb": 35856,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "TheAlgorithms/C-Plus-Plus",
+      "url": "https://github.com/TheAlgorithms/C-Plus-Plus.git",
+      "ref": "b9c118fb5dca86f6325e816481959e1e6c360373",
+      "language": "C++",
+      "stars": 34501,
+      "size_kb": 140614,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "TranslucentTB/TranslucentTB",
+      "url": "https://github.com/TranslucentTB/TranslucentTB.git",
+      "ref": "322e2b7395a51975150126276308b415970e080b",
+      "language": "C++",
+      "stars": 19921,
+      "size_kb": 13188,
+      "default_branch": "release",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "upx/upx",
+      "url": "https://github.com/upx/upx.git",
+      "ref": "3408ed7dc5d4d8cc9e4f78f520882769d4f83ae1",
+      "language": "C++",
+      "stars": 17710,
+      "size_kb": 78890,
+      "default_branch": "devel",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "webview/webview",
+      "url": "https://github.com/webview/webview.git",
+      "ref": "cbbdee44afff22867de9fd88a9fc8350d9bdd399",
+      "language": "C++",
+      "stars": 14165,
+      "size_kb": 5847,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "wled/WLED",
+      "url": "https://github.com/wled/WLED.git",
+      "ref": "a8ae8afa6be0a4ad9f5c460333b74d0998d4802b",
+      "language": "C++",
+      "stars": 18419,
+      "size_kb": 70703,
+      "default_branch": "main",
+      "license": "EUPL-1.2"
+    },
+    {
+      "slug": "Z3Prover/z3",
+      "url": "https://github.com/Z3Prover/z3.git",
+      "ref": "df8d23960eda51b796bc82cfcbc3319f135a1b34",
+      "language": "C++",
+      "stars": 12471,
+      "size_kb": 190093,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "zeromq/libzmq",
+      "url": "https://github.com/zeromq/libzmq.git",
+      "ref": "6b708e4a453a31e240211792f42e4f0c67b7fc03",
+      "language": "C++",
+      "stars": 10947,
+      "size_kb": 24154,
+      "default_branch": "master",
+      "license": "MPL-2.0"
+    },
+    {
+      "slug": "zhongyang219/TrafficMonitor",
+      "url": "https://github.com/zhongyang219/TrafficMonitor.git",
+      "ref": "430f14d49d46a796a41c8960b44ec56a461d4760",
+      "language": "C++",
+      "stars": 45327,
+      "size_kb": 16963,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "apache/casbin",
+      "url": "https://github.com/apache/casbin.git",
+      "ref": "6f56ed722bc0fab53cd78be36959133f5008c1b5",
+      "language": "Go",
+      "stars": 20277,
+      "size_kb": 6661,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "asdf-vm/asdf",
+      "url": "https://github.com/asdf-vm/asdf.git",
+      "ref": "25b3911c7239a0f7cb7ee86acb4d81aed4d7d930",
+      "language": "Go",
+      "stars": 25480,
+      "size_kb": 4454,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "avelino/awesome-go",
+      "url": "https://github.com/avelino/awesome-go.git",
+      "ref": "f424885673a3cc28605c05fcef3938d0159bc778",
+      "language": "Go",
+      "stars": 178906,
+      "size_kb": 11759,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "beego/beego",
+      "url": "https://github.com/beego/beego.git",
+      "ref": "939cfde380bb9f15844ad633b84f037f7da21584",
+      "language": "Go",
+      "stars": 32409,
+      "size_kb": 12033,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "bettercap/bettercap",
+      "url": "https://github.com/bettercap/bettercap.git",
+      "ref": "2359c0be7900c8bf16ed867b49f78d819f14aa62",
+      "language": "Go",
+      "stars": 19539,
+      "size_kb": 26544,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "chai2010/advanced-go-programming-book",
+      "url": "https://github.com/chai2010/advanced-go-programming-book.git",
+      "ref": "4447d098a22be363b6d3f1c202b6f887982962dd",
+      "language": "Go",
+      "stars": 20073,
+      "size_kb": 20591,
+      "default_branch": "master",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "slug": "charmbracelet/bubbletea",
+      "url": "https://github.com/charmbracelet/bubbletea.git",
+      "ref": "fc707bb7ea0161405bb6c653ec93f6a9c6a72fe1",
+      "language": "Go",
+      "stars": 43881,
+      "size_kb": 5878,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "charmbracelet/gum",
+      "url": "https://github.com/charmbracelet/gum.git",
+      "ref": "716d8b5d0221558f944b5a078dbbcca8572534fb",
+      "language": "Go",
+      "stars": 24078,
+      "size_kb": 987,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "danielmiessler/Fabric",
+      "url": "https://github.com/danielmiessler/Fabric.git",
+      "ref": "34e02fdca29b1e82afbd48219e1701b83532ca32",
+      "language": "Go",
+      "stars": 43172,
+      "size_kb": 153162,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "FiloSottile/age",
+      "url": "https://github.com/FiloSottile/age.git",
+      "ref": "706dfc1e799a03443ae46023502bd88d4e9e324f",
+      "language": "Go",
+      "stars": 22972,
+      "size_kb": 1623,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "gastownhall/beads",
+      "url": "https://github.com/gastownhall/beads.git",
+      "ref": "418c94b839cc9d3f6a4e4ecf3d9ca133bd613eac",
+      "language": "Go",
+      "stars": 25535,
+      "size_kb": 419507,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "go-playground/validator",
+      "url": "https://github.com/go-playground/validator.git",
+      "ref": "fd8bd3c9d513cd1d29e495974fa07dba7a2b5936",
+      "language": "Go",
+      "stars": 20088,
+      "size_kb": 2523,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "gocolly/colly",
+      "url": "https://github.com/gocolly/colly.git",
+      "ref": "20d31482af5f754832a753f88517f3dfa61d921f",
+      "language": "Go",
+      "stars": 25383,
+      "size_kb": 8903,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "gofiber/fiber",
+      "url": "https://github.com/gofiber/fiber.git",
+      "ref": "23c4f5957f31120b3afd82d223d773fe41957a06",
+      "language": "Go",
+      "stars": 40002,
+      "size_kb": 76725,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "gofr-dev/gofr",
+      "url": "https://github.com/gofr-dev/gofr.git",
+      "ref": "3e1265c3a4769975b85b7a90e0d8ca366d8031c0",
+      "language": "Go",
+      "stars": 21116,
+      "size_kb": 20626,
+      "default_branch": "development",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "golang/go",
+      "url": "https://github.com/golang/go.git",
+      "ref": "bef396c3396fa7a31460cc4b892b90c5621e830f",
+      "language": "Go",
+      "stars": 135320,
+      "size_kb": 446191,
+      "default_branch": "master",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "gorilla/mux",
+      "url": "https://github.com/gorilla/mux.git",
+      "ref": "db9d1d0073d27a0a2d9a8c1bc52aa0af4374d265",
+      "language": "Go",
+      "stars": 21832,
+      "size_kb": 543,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "grafana/k6",
+      "url": "https://github.com/grafana/k6.git",
+      "ref": "c993cc76524d265c86a0b7c33f92d2c5dd220d03",
+      "language": "Go",
+      "stars": 31094,
+      "size_kb": 81248,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "halfrost/LeetCode-Go",
+      "url": "https://github.com/halfrost/LeetCode-Go.git",
+      "ref": "1dde49c8ab37a08f21a4fb249d7bd90af4a9c58e",
+      "language": "Go",
+      "stars": 33777,
+      "size_kb": 42746,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "harness/harness",
+      "url": "https://github.com/harness/harness.git",
+      "ref": "6ed59137b996f9e2fa8f58f2ec0fe0c2f56817d1",
+      "language": "Go",
+      "stars": 37452,
+      "size_kb": 59822,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "hashicorp/consul",
+      "url": "https://github.com/hashicorp/consul.git",
+      "ref": "afbfd4afadcbdb9973025bce0101bbc5c42ac4dd",
+      "language": "Go",
+      "stars": 30006,
+      "size_kb": 493557,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "inancgumus/learngo",
+      "url": "https://github.com/inancgumus/learngo.git",
+      "ref": "3c475a78e54336c6255e925ff66b8ef4da6a2ae7",
+      "language": "Go",
+      "stars": 20079,
+      "size_kb": 3295,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "infiniflow/ragflow",
+      "url": "https://github.com/infiniflow/ragflow.git",
+      "ref": "5478f955ab987f56003d5ecd9523efb80af620cc",
+      "language": "Go",
+      "stars": 85717,
+      "size_kb": 142498,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "JanDeDobbeleer/oh-my-posh",
+      "url": "https://github.com/JanDeDobbeleer/oh-my-posh.git",
+      "ref": "ea02ce9878a6b4bbb8cc40f58e37d838bbcefd7c",
+      "language": "Go",
+      "stars": 23129,
+      "size_kb": 46739,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "jmoiron/sqlx",
+      "url": "https://github.com/jmoiron/sqlx.git",
+      "ref": "41dac167fdad5e3fd81d66cafba0951dc6823a30",
+      "language": "Go",
+      "stars": 17702,
+      "size_kb": 877,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "keploy/keploy",
+      "url": "https://github.com/keploy/keploy.git",
+      "ref": "6d51e9765a84b2f7f1c75b637d6ec6b865460d0d",
+      "language": "Go",
+      "stars": 18338,
+      "size_kb": 234820,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "kubernetes/minikube",
+      "url": "https://github.com/kubernetes/minikube.git",
+      "ref": "09462d622e4b3c34153499fbdf0b0ec5f86ce8b6",
+      "language": "Go",
+      "stars": 31979,
+      "size_kb": 302766,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "MHSanaei/3x-ui",
+      "url": "https://github.com/MHSanaei/3x-ui.git",
+      "ref": "16b9b3ce1cab97bbe6d0c6e4d85172c34ae4070e",
+      "language": "Go",
+      "stars": 43498,
+      "size_kb": 55404,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "micro/go-micro",
+      "url": "https://github.com/micro/go-micro.git",
+      "ref": "9d306dcfc1a912a8a9493f31fee0bb983475258d",
+      "language": "Go",
+      "stars": 22965,
+      "size_kb": 36654,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "milvus-io/milvus",
+      "url": "https://github.com/milvus-io/milvus.git",
+      "ref": "b7cbb91a161c1830bd0a54e024c48cb8dc8f468d",
+      "language": "Go",
+      "stars": 45335,
+      "size_kb": 309843,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "navidrome/navidrome",
+      "url": "https://github.com/navidrome/navidrome.git",
+      "ref": "93f6afb684b44b29ebdbd35eb18d3f063d14caa6",
+      "language": "Go",
+      "stars": 22452,
+      "size_kb": 56470,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "netdata/netdata",
+      "url": "https://github.com/netdata/netdata.git",
+      "ref": "7205ce81ae575dda352f9305a696fe74a5303dc6",
+      "language": "Go",
+      "stars": 79800,
+      "size_kb": 293386,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "nsqio/nsq",
+      "url": "https://github.com/nsqio/nsq.git",
+      "ref": "72ad9b2793578ee909ee8d57fc6fcbf7ec2e7144",
+      "language": "Go",
+      "stars": 25755,
+      "size_kb": 14105,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "ollama/ollama",
+      "url": "https://github.com/ollama/ollama.git",
+      "ref": "1fd1ccf7ad3bef3e7e3b49d151f7bee8570c42ab",
+      "language": "Go",
+      "stars": 176674,
+      "size_kb": 89988,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "openfaas/faas",
+      "url": "https://github.com/openfaas/faas.git",
+      "ref": "8d803bf9e2655aec6a60fd0e25b392839f96af95",
+      "language": "Go",
+      "stars": 26212,
+      "size_kb": 33523,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "opentofu/opentofu",
+      "url": "https://github.com/opentofu/opentofu.git",
+      "ref": "09969ccbdd9af5b62a26d18b19ce0333a1753dbb",
+      "language": "Go",
+      "stars": 29530,
+      "size_kb": 288496,
+      "default_branch": "main",
+      "license": "MPL-2.0"
+    },
+    {
+      "slug": "photoprism/photoprism",
+      "url": "https://github.com/photoprism/photoprism.git",
+      "ref": "f4f44b853924a595807acb0842571cdc8c2a40ac",
+      "language": "Go",
+      "stars": 39992,
+      "size_kb": 368851,
+      "default_branch": "develop",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "pocketbase/pocketbase",
+      "url": "https://github.com/pocketbase/pocketbase.git",
+      "ref": "0cbfc046c7548421268582db4bfb9a03a158361a",
+      "language": "Go",
+      "stars": 60151,
+      "size_kb": 142843,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "pranshuparmar/witr",
+      "url": "https://github.com/pranshuparmar/witr.git",
+      "ref": "0567f55d030eb3d17062e842b033a57d69d00fdb",
+      "language": "Go",
+      "stars": 18291,
+      "size_kb": 7698,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "probelabs/goreplay",
+      "url": "https://github.com/probelabs/goreplay.git",
+      "ref": "251e45abd242886bb64ff2b2dc98789556b56330",
+      "language": "Go",
+      "stars": 19298,
+      "size_kb": 18139,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "pulumi/pulumi",
+      "url": "https://github.com/pulumi/pulumi.git",
+      "ref": "b6e866bb5762476320c9d5465abfc49e21248c87",
+      "language": "Go",
+      "stars": 25466,
+      "size_kb": 293071,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "qax-os/excelize",
+      "url": "https://github.com/qax-os/excelize.git",
+      "ref": "32931c30d9195445c1f5bdca00eaf29176cd2c54",
+      "language": "Go",
+      "stars": 20795,
+      "size_kb": 7221,
+      "default_branch": "master",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "rakyll/hey",
+      "url": "https://github.com/rakyll/hey.git",
+      "ref": "5626f79b8698df6daf9b25799c9805c6acc96740",
+      "language": "Go",
+      "stars": 20197,
+      "size_kb": 1086,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "redis/go-redis",
+      "url": "https://github.com/redis/go-redis.git",
+      "ref": "73773dd98b0d00ac43b0334ccbd38c0fe7b63041",
+      "language": "Go",
+      "stars": 22197,
+      "size_kb": 24325,
+      "default_branch": "master",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "slug": "router-for-me/CLIProxyAPI",
+      "url": "https://github.com/router-for-me/CLIProxyAPI.git",
+      "ref": "f71ec0eb6776854457892452cf28c47f0d658251",
+      "language": "Go",
+      "stars": 44362,
+      "size_kb": 20819,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "seaweedfs/seaweedfs",
+      "url": "https://github.com/seaweedfs/seaweedfs.git",
+      "ref": "5731f37a2fe495e8cb7918ff50c555d4d9a294c9",
+      "language": "Go",
+      "stars": 33654,
+      "size_kb": 209581,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "sipeed/picoclaw",
+      "url": "https://github.com/sipeed/picoclaw.git",
+      "ref": "49183d7e8daed0dba89ddbb6fcb60089401d9680",
+      "language": "Go",
+      "stars": 29697,
+      "size_kb": 41479,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "spf13/cobra",
+      "url": "https://github.com/spf13/cobra.git",
+      "ref": "adbc8813901bba65827259daa8e22ff94ec1f30e",
+      "language": "Go",
+      "stars": 44305,
+      "size_kb": 2107,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "spf13/viper",
+      "url": "https://github.com/spf13/viper.git",
+      "ref": "528f7416c4b56a4948673984b190bf8713f0c3c4",
+      "language": "Go",
+      "stars": 30374,
+      "size_kb": 1625,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "sqlc-dev/sqlc",
+      "url": "https://github.com/sqlc-dev/sqlc.git",
+      "ref": "e209d865845b3be71da65583bdc1c063c4ae5873",
+      "language": "Go",
+      "stars": 18055,
+      "size_kb": 23411,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "TecharoHQ/anubis",
+      "url": "https://github.com/TecharoHQ/anubis.git",
+      "ref": "59bd4f6eea08919494ec567bccc7d1a8f51e8de4",
+      "language": "Go",
+      "stars": 20857,
+      "size_kb": 28087,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "TheAlgorithms/Go",
+      "url": "https://github.com/TheAlgorithms/Go.git",
+      "ref": "5ba447ec5ff3d1213de65b92e726ee74c5d5cc19",
+      "language": "Go",
+      "stars": 18137,
+      "size_kb": 2619,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "tinygo-org/tinygo",
+      "url": "https://github.com/tinygo-org/tinygo.git",
+      "ref": "888d0c0f978dd5b4bd457644baa597501154fdff",
+      "language": "Go",
+      "stars": 17591,
+      "size_kb": 13490,
+      "default_branch": "dev",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "traefik/traefik",
+      "url": "https://github.com/traefik/traefik.git",
+      "ref": "14bc52dd1f1d1c08cedd1da531a527fc04d79c19",
+      "language": "Go",
+      "stars": 64078,
+      "size_kb": 159016,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "tsenart/vegeta",
+      "url": "https://github.com/tsenart/vegeta.git",
+      "ref": "cf5811269046c672a604b1eb352204d30f16ae4a",
+      "language": "Go",
+      "stars": 25124,
+      "size_kb": 3957,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "uber-go/zap",
+      "url": "https://github.com/uber-go/zap.git",
+      "ref": "5b81b37b81b8e2ed447a6f57991e372ee4fa5c8f",
+      "language": "Go",
+      "stars": 24580,
+      "size_kb": 1993,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "unknwon/the-way-to-go_ZH_CN",
+      "url": "https://github.com/unknwon/the-way-to-go_ZH_CN.git",
+      "ref": "7a54d34d3657084b6a59e5618bd069b912d571aa",
+      "language": "Go",
+      "stars": 35059,
+      "size_kb": 12602,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "vxcontrol/pentagi",
+      "url": "https://github.com/vxcontrol/pentagi.git",
+      "ref": "879e87c2c2688c4a95eac9c1aaf3cd6f6123ebe3",
+      "language": "Go",
+      "stars": 21116,
+      "size_kb": 54442,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "wagoodman/dive",
+      "url": "https://github.com/wagoodman/dive.git",
+      "ref": "d6c691947f8fda635c952a17ee3b7555379d58f0",
+      "language": "Go",
+      "stars": 54349,
+      "size_kb": 6927,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "wailsapp/wails",
+      "url": "https://github.com/wailsapp/wails.git",
+      "ref": "e63d2bd3e88aa2adfb0a2077e8a52e3710a4da2f",
+      "language": "Go",
+      "stars": 35303,
+      "size_kb": 433739,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "wavetermdev/waveterm",
+      "url": "https://github.com/wavetermdev/waveterm.git",
+      "ref": "c99022c15bd1f17273728e728a61743e690d6423",
+      "language": "Go",
+      "stars": 21759,
+      "size_kb": 57865,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "Wei-Shaw/sub2api",
+      "url": "https://github.com/Wei-Shaw/sub2api.git",
+      "ref": "6aeea70ee008825604ac3293ca0f216e951795d1",
+      "language": "Go",
+      "stars": 33696,
+      "size_kb": 86007,
+      "default_branch": "main",
+      "license": "LGPL-3.0"
+    },
+    {
+      "slug": "Wox-launcher/Wox",
+      "url": "https://github.com/Wox-launcher/Wox.git",
+      "ref": "359539924a7674c17e7673039afa434069848d62",
+      "language": "Go",
+      "stars": 27162,
+      "size_kb": 390163,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "yorukot/superfile",
+      "url": "https://github.com/yorukot/superfile.git",
+      "ref": "df46a7cf93e9678cad243125f27ac454a64de076",
+      "language": "Go",
+      "stars": 18761,
+      "size_kb": 93014,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "zeromicro/go-zero",
+      "url": "https://github.com/zeromicro/go-zero.git",
+      "ref": "84313f2e922f6e0105c66cc0c117249fa5a7b7fa",
+      "language": "Go",
+      "stars": 33211,
+      "size_kb": 33015,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "alibaba/canal",
+      "url": "https://github.com/alibaba/canal.git",
+      "ref": "e20e4424468ef0ed60a97d921763b348eca27163",
+      "language": "Java",
+      "stars": 29702,
+      "size_kb": 24251,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "alibaba/COLA",
+      "url": "https://github.com/alibaba/COLA.git",
+      "ref": "d948f204d58fe7bd30a3ac919308a1311b76fec5",
+      "language": "Java",
+      "stars": 12988,
+      "size_kb": 3828,
+      "default_branch": "master",
+      "license": "LGPL-2.1"
+    },
+    {
+      "slug": "alibaba/DataX",
+      "url": "https://github.com/alibaba/DataX.git",
+      "ref": "80ec23d5c5328eb90ca364d2749e92dfaf44541e",
+      "language": "Java",
+      "stars": 17279,
+      "size_kb": 22931,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "alibaba/spring-cloud-alibaba",
+      "url": "https://github.com/alibaba/spring-cloud-alibaba.git",
+      "ref": "171ea765c8179ca871903baad701245a7330a3ab",
+      "language": "Java",
+      "stars": 29135,
+      "size_kb": 56357,
+      "default_branch": "2025.1.x",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "amitshekhariitbhu/android-interview-questions",
+      "url": "https://github.com/amitshekhariitbhu/android-interview-questions.git",
+      "ref": "a8f95e444cd9a52a244929c55dd9fdc9ffe336d0",
+      "language": "Java",
+      "stars": 12348,
+      "size_kb": 1484,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "android10/Android-CleanArchitecture",
+      "url": "https://github.com/android10/Android-CleanArchitecture.git",
+      "ref": "8ed4222c537e40db05e9e685bbc253fafb6b8e1f",
+      "language": "Java",
+      "stars": 15536,
+      "size_kb": 5191,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "apache/dolphinscheduler",
+      "url": "https://github.com/apache/dolphinscheduler.git",
+      "ref": "c1cad902a986872fd022da6ba3c4628626241cd0",
+      "language": "Java",
+      "stars": 14390,
+      "size_kb": 224629,
+      "default_branch": "dev",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "apache/dubbo",
+      "url": "https://github.com/apache/dubbo.git",
+      "ref": "eb1d8abaebdc2ce1e15d6236cf9f9179d34e9082",
+      "language": "Java",
+      "stars": 41541,
+      "size_kb": 61740,
+      "default_branch": "3.3",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "apache/kafka",
+      "url": "https://github.com/apache/kafka.git",
+      "ref": "c300006a7705c240642db6950b5a95fec982bfc5",
+      "language": "Java",
+      "stars": 33303,
+      "size_kb": 301395,
+      "default_branch": "trunk",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "apereo/cas",
+      "url": "https://github.com/apereo/cas.git",
+      "ref": "a706d6e56547e151c4220aa970efd07cb8c3d1d9",
+      "language": "Java",
+      "stars": 11355,
+      "size_kb": 344456,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "ashishps1/awesome-system-design-resources",
+      "url": "https://github.com/ashishps1/awesome-system-design-resources.git",
+      "ref": "25724090f7dd7746129b7194b55504f9d06f86ed",
+      "language": "Java",
+      "stars": 39820,
+      "size_kb": 2340,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Bigkoo/Android-PickerView",
+      "url": "https://github.com/Bigkoo/Android-PickerView.git",
+      "ref": "e200d8c063aa2568d728854c048340ad2e4e0c0b",
+      "language": "Java",
+      "stars": 13440,
+      "size_kb": 6389,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "brettwooldridge/HikariCP",
+      "url": "https://github.com/brettwooldridge/HikariCP.git",
+      "ref": "a4d93f4f85517f90e632b795486d7102e933d7ff",
+      "language": "Java",
+      "stars": 21160,
+      "size_kb": 5061,
+      "default_branch": "dev",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "CarGuo/GSYVideoPlayer",
+      "url": "https://github.com/CarGuo/GSYVideoPlayer.git",
+      "ref": "e5d74d3aa9d7fb1393a879e33ee380f8f41354f1",
+      "language": "Java",
+      "stars": 21457,
+      "size_kb": 362391,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "clojure/clojure",
+      "url": "https://github.com/clojure/clojure.git",
+      "ref": "a760b04681b87f3347d9090737bd930a1fe5e096",
+      "language": "Java",
+      "stars": 10934,
+      "size_kb": 19282,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "codecentric/spring-boot-admin",
+      "url": "https://github.com/codecentric/spring-boot-admin.git",
+      "ref": "bf60a7ba1e181c2d2f2a0bcceefb1d5251102e0a",
+      "language": "Java",
+      "stars": 12847,
+      "size_kb": 103411,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "conductor-oss/conductor",
+      "url": "https://github.com/conductor-oss/conductor.git",
+      "ref": "54f8369fa8875a2bad4ed5baa8a66f89720b1594",
+      "language": "Java",
+      "stars": 32032,
+      "size_kb": 50156,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "debezium/debezium",
+      "url": "https://github.com/debezium/debezium.git",
+      "ref": "14a025fe9d5a260ea29854ed0dc9ded0e448b30f",
+      "language": "Java",
+      "stars": 12940,
+      "size_kb": 85461,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "dianping/cat",
+      "url": "https://github.com/dianping/cat.git",
+      "ref": "e815e74d4c2dd74edac831241f1253fcc7d25381",
+      "language": "Java",
+      "stars": 18938,
+      "size_kb": 114117,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "didi/DoKit",
+      "url": "https://github.com/didi/DoKit.git",
+      "ref": "626827cddb2feb2f3aee87a52a064b4e5ca2bed4",
+      "language": "Java",
+      "stars": 20412,
+      "size_kb": 58616,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "DuGuQiuBai/Java",
+      "url": "https://github.com/DuGuQiuBai/Java.git",
+      "ref": "f7aa7398c6e0e856125d4c7f3446a9406198ca3d",
+      "language": "Java",
+      "stars": 14441,
+      "size_kb": 24346,
+      "default_branch": "master",
+      "license": "Artistic-2.0"
+    },
+    {
+      "slug": "elunez/eladmin",
+      "url": "https://github.com/elunez/eladmin.git",
+      "ref": "55fbf705956949697dbd68bf9003776609d3d029",
+      "language": "Java",
+      "stars": 21928,
+      "size_kb": 7523,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "EnterpriseQualityCoding/FizzBuzzEnterpriseEdition",
+      "url": "https://github.com/EnterpriseQualityCoding/FizzBuzzEnterpriseEdition.git",
+      "ref": "4922c077c07a3744ae67ee8a932786f15bf57411",
+      "language": "Java",
+      "stars": 23758,
+      "size_kb": 340,
+      "default_branch": "uinverse",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "frank-lam/fullstack-tutorial",
+      "url": "https://github.com/frank-lam/fullstack-tutorial.git",
+      "ref": "566d7368741e805bc7e5f4f4e3abfb5f9eecc598",
+      "language": "Java",
+      "stars": 11686,
+      "size_kb": 65725,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "google/gson",
+      "url": "https://github.com/google/gson.git",
+      "ref": "57e95370d89a29be98331350beb68c7d7fa3dffe",
+      "language": "Java",
+      "stars": 24224,
+      "size_kb": 14197,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "gyoogle/tech-interview-for-developer",
+      "url": "https://github.com/gyoogle/tech-interview-for-developer.git",
+      "ref": "41a7e91356adae7ee598d5ee3c27438449ce55d8",
+      "language": "Java",
+      "stars": 17469,
+      "size_kb": 6616,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "H07000223/FlycoTabLayout",
+      "url": "https://github.com/H07000223/FlycoTabLayout.git",
+      "ref": "528fcffe88d54eeafbc85ffd1ce375df043b3a28",
+      "language": "Java",
+      "stars": 11098,
+      "size_kb": 2620,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "halo-dev/halo",
+      "url": "https://github.com/halo-dev/halo.git",
+      "ref": "36ddf09bdec78f447263c0250511ffbb91c52331",
+      "language": "Java",
+      "stars": 39294,
+      "size_kb": 87548,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "jeecgboot/JeecgBoot",
+      "url": "https://github.com/jeecgboot/JeecgBoot.git",
+      "ref": "df83f4de76811ea73bf5b37a8fe00cbb59988a1b",
+      "language": "Java",
+      "stars": 47155,
+      "size_kb": 97057,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "jenkinsci/jenkins",
+      "url": "https://github.com/jenkinsci/jenkins.git",
+      "ref": "c353dbcc6ae322e045661bb512adf6b8ec825ff6",
+      "language": "Java",
+      "stars": 25608,
+      "size_kb": 172479,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "JessYanCoding/AndroidAutoSize",
+      "url": "https://github.com/JessYanCoding/AndroidAutoSize.git",
+      "ref": "e402ecdd998ea07549513ac08c12e9f097f3b48c",
+      "language": "Java",
+      "stars": 13728,
+      "size_kb": 3131,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "JingMatrix/Vector",
+      "url": "https://github.com/JingMatrix/Vector.git",
+      "ref": "9350c7ceaf523489f5dd5c63371c3fd52bd7cb2c",
+      "language": "Java",
+      "stars": 11852,
+      "size_kb": 22860,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "justauth/JustAuth",
+      "url": "https://github.com/justauth/JustAuth.git",
+      "ref": "694bbf1b010d93404e3bfb4824d90e9ddfaebebb",
+      "language": "Java",
+      "stars": 17472,
+      "size_kb": 9629,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "kestra-io/kestra",
+      "url": "https://github.com/kestra-io/kestra.git",
+      "ref": "9063ec83d777cde4c33602ecc0a623d4e72d79ac",
+      "language": "Java",
+      "stars": 27441,
+      "size_kb": 124023,
+      "default_branch": "develop",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "kunal-kushwaha/DSA-Bootcamp-Java",
+      "url": "https://github.com/kunal-kushwaha/DSA-Bootcamp-Java.git",
+      "ref": "6bc4d8bf8ac5e434ac9083e1c01210e42f2a762c",
+      "language": "Java",
+      "stars": 23227,
+      "size_kb": 101640,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "lenve/vhr",
+      "url": "https://github.com/lenve/vhr.git",
+      "ref": "03abbd35af24e55368ce4e09f4038dc2aba3ff5f",
+      "language": "Java",
+      "stars": 28080,
+      "size_kb": 8480,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "linlinjava/litemall",
+      "url": "https://github.com/linlinjava/litemall.git",
+      "ref": "a1ef964a718b7277925b19ea26afe78ea3a1d325",
+      "language": "Java",
+      "stars": 20317,
+      "size_kb": 24619,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "LMAX-Exchange/disruptor",
+      "url": "https://github.com/LMAX-Exchange/disruptor.git",
+      "ref": "c871ca49826a6be7ada6957f6fbafcfecf7b1f87",
+      "language": "Java",
+      "stars": 18405,
+      "size_kb": 10129,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "macrozheng/mall",
+      "url": "https://github.com/macrozheng/mall.git",
+      "ref": "0504e86b1f1b6f1b8aa6a734d37a90fb67346be7",
+      "language": "Java",
+      "stars": 84332,
+      "size_kb": 58736,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "material-components/material-components-android",
+      "url": "https://github.com/material-components/material-components-android.git",
+      "ref": "ac7e18efeefb331850c561faf9ab8bf81d27ba68",
+      "language": "Java",
+      "stars": 17345,
+      "size_kb": 183268,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "metersphere/metersphere",
+      "url": "https://github.com/metersphere/metersphere.git",
+      "ref": "5dc6df59af2be11be683f1a7f2e05089e21a043a",
+      "language": "Java",
+      "stars": 13385,
+      "size_kb": 427303,
+      "default_branch": "v3.x",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Netflix/eureka",
+      "url": "https://github.com/Netflix/eureka.git",
+      "ref": "8227a727534338909ef8c3b5ee3dca7641921f62",
+      "language": "Java",
+      "stars": 12723,
+      "size_kb": 12661,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "newbee-ltd/newbee-mall",
+      "url": "https://github.com/newbee-ltd/newbee-mall.git",
+      "ref": "a069069b07027613bf0e7f571736be86f431faee",
+      "language": "Java",
+      "stars": 11605,
+      "size_kb": 36245,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "OpenRefine/OpenRefine",
+      "url": "https://github.com/OpenRefine/OpenRefine.git",
+      "ref": "68176bf1d942b558baf79225f40e3cbe97a454a2",
+      "language": "Java",
+      "stars": 11918,
+      "size_kb": 407449,
+      "default_branch": "master",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "orhanobut/logger",
+      "url": "https://github.com/orhanobut/logger.git",
+      "ref": "c64a72c2ce3d0fcdebe829b091e3a530c94ca6bd",
+      "language": "Java",
+      "stars": 13846,
+      "size_kb": 1873,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "pagehelper-org/Mybatis-PageHelper",
+      "url": "https://github.com/pagehelper-org/Mybatis-PageHelper.git",
+      "ref": "1399246da98c7b6d027c4f25e8ebdd8e503cf609",
+      "language": "Java",
+      "stars": 12358,
+      "size_kb": 5357,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "prestodb/presto",
+      "url": "https://github.com/prestodb/presto.git",
+      "ref": "2885678b3ccb79a71f95d73a2569b6fdf07ab945",
+      "language": "Java",
+      "stars": 16719,
+      "size_kb": 282275,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "provectus/kafka-ui",
+      "url": "https://github.com/provectus/kafka-ui.git",
+      "ref": "83b5a60cc08501b570a0c4d0b4cdfceb1b88d6b7",
+      "language": "Java",
+      "stars": 12237,
+      "size_kb": 30382,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "ReactiveX/RxAndroid",
+      "url": "https://github.com/ReactiveX/RxAndroid.git",
+      "ref": "1c4a9eaf8ebf272fdbe4181d5ae16cdb2138d6e5",
+      "language": "Java",
+      "stars": 19962,
+      "size_kb": 1055,
+      "default_branch": "3.x",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "ReactiveX/RxJava",
+      "url": "https://github.com/ReactiveX/RxJava.git",
+      "ref": "454b69f8bc5d45176435f726a6d8aaf6858b2345",
+      "language": "Java",
+      "stars": 48227,
+      "size_kb": 178311,
+      "default_branch": "4.x",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "redisson/redisson",
+      "url": "https://github.com/redisson/redisson.git",
+      "ref": "e6dfabfbd5a212b3b6bf5e3f69c6e1ac71604d6d",
+      "language": "Java",
+      "stars": 24376,
+      "size_kb": 36098,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "resilience4j/resilience4j",
+      "url": "https://github.com/resilience4j/resilience4j.git",
+      "ref": "2f3d998c85f10b8ff88a3dca9f24bacf11c3a250",
+      "language": "Java",
+      "stars": 10722,
+      "size_kb": 9405,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "seaswalker/spring-analysis",
+      "url": "https://github.com/seaswalker/spring-analysis.git",
+      "ref": "4379cce848af96997a9d7ef91d594aa129be8d71",
+      "language": "Java",
+      "stars": 13742,
+      "size_kb": 4951,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "spring-projects/spring-framework",
+      "url": "https://github.com/spring-projects/spring-framework.git",
+      "ref": "224522244f7698673584910ee805415673227a7e",
+      "language": "Java",
+      "stars": 60134,
+      "size_kb": 243350,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "sqshq/piggymetrics",
+      "url": "https://github.com/sqshq/piggymetrics.git",
+      "ref": "6bb2cf9ddbca980b664d3edbb6ff775d75369278",
+      "language": "Java",
+      "stars": 13944,
+      "size_kb": 1512,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "TeamNewPipe/NewPipe",
+      "url": "https://github.com/TeamNewPipe/NewPipe.git",
+      "ref": "881a130ab10c28e19624602abb9fab82bba1b237",
+      "language": "Java",
+      "stars": 39094,
+      "size_kb": 89355,
+      "default_branch": "dev",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Tencent/APIJSON",
+      "url": "https://github.com/Tencent/APIJSON.git",
+      "ref": "d86a6405b526cfb5de392fce127132fcc89ba308",
+      "language": "Java",
+      "stars": 18393,
+      "size_kb": 73449,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Tencent/QMUI_Android",
+      "url": "https://github.com/Tencent/QMUI_Android.git",
+      "ref": "026e7d486677d6593a96689cd590ec3561176717",
+      "language": "Java",
+      "stars": 14484,
+      "size_kb": 21963,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Tencent/VasSonic",
+      "url": "https://github.com/Tencent/VasSonic.git",
+      "ref": "59936beff656d4b5718ff6444d6c5e001a2c5231",
+      "language": "Java",
+      "stars": 11856,
+      "size_kb": 16215,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "termux/termux-app",
+      "url": "https://github.com/termux/termux-app.git",
+      "ref": "3df69d1da197dd9bd71a3bafd902dffd720576b4",
+      "language": "Java",
+      "stars": 57999,
+      "size_kb": 5170,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "theonedev/onedev",
+      "url": "https://github.com/theonedev/onedev.git",
+      "ref": "47ffa648637d9784f85a5946d7750188fa39067c",
+      "language": "Java",
+      "stars": 15109,
+      "size_kb": 242998,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "xuxueli/xxl-job",
+      "url": "https://github.com/xuxueli/xxl-job.git",
+      "ref": "e74c784f68f81fa89cb350913ef15794865d7b12",
+      "language": "Java",
+      "stars": 30389,
+      "size_kb": 39073,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "YunaiV/ruoyi-vue-pro",
+      "url": "https://github.com/YunaiV/ruoyi-vue-pro.git",
+      "ref": "e4e460d563a3b6f0b5255f9b061b258128ffd822",
+      "language": "Java",
+      "stars": 38331,
+      "size_kb": 195927,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "zfile-dev/zfile",
+      "url": "https://github.com/zfile-dev/zfile.git",
+      "ref": "469b9d45555a93a99057bf622d729e475cb09182",
+      "language": "Java",
+      "stars": 10796,
+      "size_kb": 40800,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "zhihu/Matisse",
+      "url": "https://github.com/zhihu/Matisse.git",
+      "ref": "21591aebe73a56435d84afc7b5cd50ea7ae2a6b8",
+      "language": "Java",
+      "stars": 12521,
+      "size_kb": 1991,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "3b1b/manim",
+      "url": "https://github.com/3b1b/manim.git",
+      "ref": "6199a00d4c1b1127ebe45cb629c3f22538b10e13",
+      "language": "Python",
+      "stars": 88790,
+      "size_kb": 76639,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "666ghj/BettaFish",
+      "url": "https://github.com/666ghj/BettaFish.git",
+      "ref": "6ec70a8eafc78206692e65f5d5e62b907495ab06",
+      "language": "Python",
+      "stars": 41822,
+      "size_kb": 192447,
+      "default_branch": "main",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "abi/screenshot-to-code",
+      "url": "https://github.com/abi/screenshot-to-code.git",
+      "ref": "0dbb768833bb226a812093915f69e29e4c4ce98d",
+      "language": "Python",
+      "stars": 73424,
+      "size_kb": 11069,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "anthropics/claude-code",
+      "url": "https://github.com/anthropics/claude-code.git",
+      "ref": "2982f951552e94f38cd972764ae94c1d90c41da3",
+      "language": "Python",
+      "stars": 138754,
+      "size_kb": 29119,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "AstrBotDevs/AstrBot",
+      "url": "https://github.com/AstrBotDevs/AstrBot.git",
+      "ref": "2035dbd079375046ce7b82171a04b1f9a63d781a",
+      "language": "Python",
+      "stars": 37820,
+      "size_kb": 68980,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "bregman-arie/devops-exercises",
+      "url": "https://github.com/bregman-arie/devops-exercises.git",
+      "ref": "9e49ef97f16377d901db01f3562187394828ca6a",
+      "language": "Python",
+      "stars": 83327,
+      "size_kb": 8007,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "CorentinJ/Real-Time-Voice-Cloning",
+      "url": "https://github.com/CorentinJ/Real-Time-Voice-Cloning.git",
+      "ref": "890f3a03187195b9829db2079b75c2ba2ab0405c",
+      "language": "Python",
+      "stars": 60049,
+      "size_kb": 369730,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "crewAIInc/crewAI",
+      "url": "https://github.com/crewAIInc/crewAI.git",
+      "ref": "b14d36bfe447c6458df8b08e5184f17d1ec58ed6",
+      "language": "Python",
+      "stars": 55988,
+      "size_kb": 284422,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "D4Vinci/Scrapling",
+      "url": "https://github.com/D4Vinci/Scrapling.git",
+      "ref": "07a548362ff904a2837f503ed9d9f6b9dcef0195",
+      "language": "Python",
+      "stars": 70799,
+      "size_kb": 9075,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "datawhalechina/hello-agents",
+      "url": "https://github.com/datawhalechina/hello-agents.git",
+      "ref": "6c616938c521c89bc4b2bf001bf237d259f1726b",
+      "language": "Python",
+      "stars": 68022,
+      "size_kb": 231003,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "donnemartin/system-design-primer",
+      "url": "https://github.com/donnemartin/system-design-primer.git",
+      "ref": "ae9bbd7b02d90b9866215de185217d33f39ab733",
+      "language": "Python",
+      "stars": 358796,
+      "size_kb": 11277,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "exo-explore/exo",
+      "url": "https://github.com/exo-explore/exo.git",
+      "ref": "b5375f8cee4368d09e1ce96a56b9f81fb0bc81aa",
+      "language": "Python",
+      "stars": 46422,
+      "size_kb": 40784,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "explosion/spaCy",
+      "url": "https://github.com/explosion/spaCy.git",
+      "ref": "e67199550e365dacee28b109210c3a43e1477638",
+      "language": "Python",
+      "stars": 33766,
+      "size_kb": 203709,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "floodsung/Deep-Learning-Papers-Reading-Roadmap",
+      "url": "https://github.com/floodsung/Deep-Learning-Papers-Reading-Roadmap.git",
+      "ref": "a994642f82f071926fcb472bcf6cd63e4abba7ab",
+      "language": "Python",
+      "stars": 39548,
+      "size_kb": 3638,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "FoundationAgents/MetaGPT",
+      "url": "https://github.com/FoundationAgents/MetaGPT.git",
+      "ref": "11cdf466d042aece04fc6cfd13b28e1a70341b1f",
+      "language": "Python",
+      "stars": 69479,
+      "size_kb": 184037,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "fxsjy/jieba",
+      "url": "https://github.com/fxsjy/jieba.git",
+      "ref": "67fa2e36e72f69d9134b8a1037b83fbb070b9775",
+      "language": "Python",
+      "stars": 35078,
+      "size_kb": 56033,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "geekcomputers/Python",
+      "url": "https://github.com/geekcomputers/Python.git",
+      "ref": "11edb066d005252cbc128cce918c24025a2d2c63",
+      "language": "Python",
+      "stars": 35181,
+      "size_kb": 50088,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "google/langextract",
+      "url": "https://github.com/google/langextract.git",
+      "ref": "0dff5479aa51934c7d5833a7c38e2a5abba4e0c2",
+      "language": "Python",
+      "stars": 37745,
+      "size_kb": 10818,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "gto76/python-cheatsheet",
+      "url": "https://github.com/gto76/python-cheatsheet.git",
+      "ref": "65418d7ed2a6087abbbc585046f68d6d559e2676",
+      "language": "Python",
+      "stars": 38585,
+      "size_kb": 13704,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "hesreallyhim/awesome-claude-code",
+      "url": "https://github.com/hesreallyhim/awesome-claude-code.git",
+      "ref": "0b659522b680c557febfd98152b0d1b4a376f517",
+      "language": "Python",
+      "stars": 50684,
+      "size_kb": 34468,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "hiroi-sora/Umi-OCR",
+      "url": "https://github.com/hiroi-sora/Umi-OCR.git",
+      "ref": "83173efc4f4453b41223ea96d63d44534bf0505c",
+      "language": "Python",
+      "stars": 46201,
+      "size_kb": 281373,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "huggingface/diffusers",
+      "url": "https://github.com/huggingface/diffusers.git",
+      "ref": "4d89a88748e851bac1c30f32b7d8af7707bbf0a4",
+      "language": "Python",
+      "stars": 34134,
+      "size_kb": 107283,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "jax-ml/jax",
+      "url": "https://github.com/jax-ml/jax.git",
+      "ref": "143634d44ff9141621ae5e1db6c9e2822c0f6998",
+      "language": "Python",
+      "stars": 36030,
+      "size_kb": 181305,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "karpathy/autoresearch",
+      "url": "https://github.com/karpathy/autoresearch.git",
+      "ref": "228791fb499afffb54b46200aca536f79142f117",
+      "language": "Python",
+      "stars": 91834,
+      "size_kb": 530,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "keras-team/keras",
+      "url": "https://github.com/keras-team/keras.git",
+      "ref": "c1a707e2707e134bb0c8b0740929e5a2a8a0e458",
+      "language": "Python",
+      "stars": 64172,
+      "size_kb": 54564,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "lm-sys/FastChat",
+      "url": "https://github.com/lm-sys/FastChat.git",
+      "ref": "587d5cfa1609a43d192cedb8441cac3c17db105d",
+      "language": "Python",
+      "stars": 39499,
+      "size_kb": 35323,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "meta-llama/llama",
+      "url": "https://github.com/meta-llama/llama.git",
+      "ref": "689c7f261b9c5514636ecc3c5fefefcbb3e6eed7",
+      "language": "Python",
+      "stars": 59522,
+      "size_kb": 1150,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "microsoft/autogen",
+      "url": "https://github.com/microsoft/autogen.git",
+      "ref": "027ecf0a379bcc1d09956d46d12d44a3ad9cee14",
+      "language": "Python",
+      "stars": 59907,
+      "size_kb": 148692,
+      "default_branch": "main",
+      "license": "CC-BY-4.0"
+    },
+    {
+      "slug": "microsoft/VibeVoice",
+      "url": "https://github.com/microsoft/VibeVoice.git",
+      "ref": "303b2833e01cff4578ec278bbfe536da54bd19fe",
+      "language": "Python",
+      "stars": 50397,
+      "size_kb": 215917,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "mingrammer/diagrams",
+      "url": "https://github.com/mingrammer/diagrams.git",
+      "ref": "45f4e9167ad93c18a42adfe3c83c0b710409c433",
+      "language": "Python",
+      "stars": 42456,
+      "size_kb": 72673,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "minimaxir/big-list-of-naughty-strings",
+      "url": "https://github.com/minimaxir/big-list-of-naughty-strings.git",
+      "ref": "db33ec7b1d5d9616a88c76394b7d0897bd0b97eb",
+      "language": "Python",
+      "stars": 47700,
+      "size_kb": 330,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "mvanhorn/last30days-skill",
+      "url": "https://github.com/mvanhorn/last30days-skill.git",
+      "ref": "01aef34ca49db1ccc9caaee72913760f4468f6c1",
+      "language": "Python",
+      "stars": 53173,
+      "size_kb": 49623,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "myshell-ai/OpenVoice",
+      "url": "https://github.com/myshell-ai/OpenVoice.git",
+      "ref": "74a1d147b17a8c3092dd5430504bd83ef6c7eb23",
+      "language": "Python",
+      "stars": 37002,
+      "size_kb": 3944,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "NanmiCoder/MediaCrawler",
+      "url": "https://github.com/NanmiCoder/MediaCrawler.git",
+      "ref": "0625e01a6bc717a3fc9c96d3dac7fb8957043838",
+      "language": "Python",
+      "stars": 57140,
+      "size_kb": 29528,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "nvbn/thefuck",
+      "url": "https://github.com/nvbn/thefuck.git",
+      "ref": "c7e7e1d884d3bb241ea6448f72a989434c2a35ec",
+      "language": "Python",
+      "stars": 97550,
+      "size_kb": 4043,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "odysseus-dev/odysseus",
+      "url": "https://github.com/odysseus-dev/odysseus.git",
+      "ref": "791bed79665ac639f43bf9670cd73e6b19b2c350",
+      "language": "Python",
+      "stars": 83572,
+      "size_kb": 39956,
+      "default_branch": "dev",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "open-webui/open-webui",
+      "url": "https://github.com/open-webui/open-webui.git",
+      "ref": "ecd48e2f718220a6400ecf49eafd4867a38feb10",
+      "language": "Python",
+      "stars": 146391,
+      "size_kb": 394703,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "openai/whisper",
+      "url": "https://github.com/openai/whisper.git",
+      "ref": "04f449b8a437f1bbd3dba5c9f826aca972e7709a",
+      "language": "Python",
+      "stars": 105437,
+      "size_kb": 4132,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "OpenBMB/ChatDev",
+      "url": "https://github.com/OpenBMB/ChatDev.git",
+      "ref": "4fd4da603801766b14ad8788649cfc1ad21f99a6",
+      "language": "Python",
+      "stars": 33806,
+      "size_kb": 381813,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "opendatalab/MinerU",
+      "url": "https://github.com/opendatalab/MinerU.git",
+      "ref": "79d6d8d79fb8f3ddba5cc34c07a16f0ec36f56c7",
+      "language": "Python",
+      "stars": 75486,
+      "size_kb": 158253,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "pandas-dev/pandas",
+      "url": "https://github.com/pandas-dev/pandas.git",
+      "ref": "cb2086a1a4daef499d3d6974460db96e423b7199",
+      "language": "Python",
+      "stars": 49289,
+      "size_kb": 402471,
+      "default_branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "slug": "paperless-ngx/paperless-ngx",
+      "url": "https://github.com/paperless-ngx/paperless-ngx.git",
+      "ref": "5ea8cf23356f6a238874671931065681b0311c84",
+      "language": "Python",
+      "stars": 43343,
+      "size_kb": 192278,
+      "default_branch": "dev",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "practical-tutorials/project-based-learning",
+      "url": "https://github.com/practical-tutorials/project-based-learning.git",
+      "ref": "3645dbc88b99e8b6a8443a34612a3e74dc502b6d",
+      "language": "Python",
+      "stars": 274796,
+      "size_kb": 445,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "psf/requests",
+      "url": "https://github.com/psf/requests.git",
+      "ref": "69f84847045bef7a849cc994a26fe7ba8a169e95",
+      "language": "Python",
+      "stars": 54141,
+      "size_kb": 13567,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "python-poetry/poetry",
+      "url": "https://github.com/python-poetry/poetry.git",
+      "ref": "f46702336862f30050d5c641d5ed6f7568ded793",
+      "language": "Python",
+      "stars": 34290,
+      "size_kb": 24976,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "rohitg00/ai-engineering-from-scratch",
+      "url": "https://github.com/rohitg00/ai-engineering-from-scratch.git",
+      "ref": "c8b9b9244f3210b840776675175662dacf208264",
+      "language": "Python",
+      "stars": 42393,
+      "size_kb": 5222,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "satwikkansal/wtfpython",
+      "url": "https://github.com/satwikkansal/wtfpython.git",
+      "ref": "9323b863218670404405e0a0b9f54d2841a7452e",
+      "language": "Python",
+      "stars": 37031,
+      "size_kb": 1464,
+      "default_branch": "master",
+      "license": "WTFPL"
+    },
+    {
+      "slug": "sherlock-project/sherlock",
+      "url": "https://github.com/sherlock-project/sherlock.git",
+      "ref": "206068dc7842665130c87e16e1535572d3d1a907",
+      "language": "Python",
+      "stars": 86961,
+      "size_kb": 18619,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "shiyu-coder/Kronos",
+      "url": "https://github.com/shiyu-coder/Kronos.git",
+      "ref": "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
+      "language": "Python",
+      "stars": 32677,
+      "size_kb": 9539,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "sickn33/agentic-awesome-skills",
+      "url": "https://github.com/sickn33/agentic-awesome-skills.git",
+      "ref": "11c9e675ddfe2ed4b1db936eb66cf96697d689fb",
+      "language": "Python",
+      "stars": 43743,
+      "size_kb": 109581,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "soxoj/maigret",
+      "url": "https://github.com/soxoj/maigret.git",
+      "ref": "81f9ecdd0ea4e16b5ee56482e41c40d2eb8b2ae9",
+      "language": "Python",
+      "stars": 35686,
+      "size_kb": 21965,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "TauricResearch/TradingAgents",
+      "url": "https://github.com/TauricResearch/TradingAgents.git",
+      "ref": "a33fd4c0f134485a43553a2c23a63cb14adbd88f",
+      "language": "Python",
+      "stars": 94146,
+      "size_kb": 5233,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "TencentARC/GFPGAN",
+      "url": "https://github.com/TencentARC/GFPGAN.git",
+      "ref": "7552a7791caad982045a7bbe5634bbf1cd5c8679",
+      "language": "Python",
+      "stars": 37627,
+      "size_kb": 5467,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Textualize/rich",
+      "url": "https://github.com/Textualize/rich.git",
+      "ref": "9d8f9a372cc5916fd4781fec207ced7ddac2f08f",
+      "language": "Python",
+      "stars": 56917,
+      "size_kb": 50632,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "TheAlgorithms/Python",
+      "url": "https://github.com/TheAlgorithms/Python.git",
+      "ref": "25bcced0f37df781b0e5aaa575e2a4fad41a2816",
+      "language": "Python",
+      "stars": 223008,
+      "size_kb": 16574,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "tinygrad/tinygrad",
+      "url": "https://github.com/tinygrad/tinygrad.git",
+      "ref": "e9a86c99ede694100b8211e3802bdc5945b07dbf",
+      "language": "Python",
+      "stars": 33323,
+      "size_kb": 119016,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "ultralytics/ultralytics",
+      "url": "https://github.com/ultralytics/ultralytics.git",
+      "ref": "ef320517035d545bebca4e624e36ae8aa8cbefa2",
+      "language": "Python",
+      "stars": 59764,
+      "size_kb": 60131,
+      "default_branch": "main",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "unclecode/crawl4ai",
+      "url": "https://github.com/unclecode/crawl4ai.git",
+      "ref": "7e801521428ee12509994d39151006f64055ebe3",
+      "language": "Python",
+      "stars": 74245,
+      "size_kb": 150902,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "usestrix/strix",
+      "url": "https://github.com/usestrix/strix.git",
+      "ref": "7e02b8d8dad4c238c17a815b94c5f7ed1e630172",
+      "language": "Python",
+      "stars": 43478,
+      "size_kb": 9819,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "VectifyAI/PageIndex",
+      "url": "https://github.com/VectifyAI/PageIndex.git",
+      "ref": "190f8b378be58199ca993566a9214dba72089c54",
+      "language": "Python",
+      "stars": 34177,
+      "size_kb": 24588,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "XingangPan/DragGAN",
+      "url": "https://github.com/XingangPan/DragGAN.git",
+      "ref": "336f120ce126aca6f55dc58537e76c10d19eabd0",
+      "language": "Python",
+      "stars": 35806,
+      "size_kb": 34847,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "xtekky/gpt4free",
+      "url": "https://github.com/xtekky/gpt4free.git",
+      "ref": "48d845749f5b4c0148a9188f33ae498f1f41c21d",
+      "language": "Python",
+      "stars": 66479,
+      "size_kb": 172214,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "yt-dlp/yt-dlp",
+      "url": "https://github.com/yt-dlp/yt-dlp.git",
+      "ref": "aaf7405ba3a45b32c59f160426efc9b561af035a",
+      "language": "Python",
+      "stars": 179581,
+      "size_kb": 61516,
+      "default_branch": "master",
+      "license": "Unlicense"
+    },
+    {
+      "slug": "zhayujie/CowAgent",
+      "url": "https://github.com/zhayujie/CowAgent.git",
+      "ref": "bc256253cdd4fba852a96f5977bd2e6fa338b20f",
+      "language": "Python",
+      "stars": 46090,
+      "size_kb": 11869,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "zylon-ai/private-gpt",
+      "url": "https://github.com/zylon-ai/private-gpt.git",
+      "ref": "b925ab48ba53342b6fbbc20775fd4126c80b48b0",
+      "language": "Python",
+      "stars": 57355,
+      "size_kb": 225906,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "actix/actix-web",
+      "url": "https://github.com/actix/actix-web.git",
+      "ref": "eee23e2326d1f063c2959a71fa642e1b7c3b1dc9",
+      "language": "Rust",
+      "stars": 24741,
+      "size_kb": 18088,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "ajeetdsouza/zoxide",
+      "url": "https://github.com/ajeetdsouza/zoxide.git",
+      "ref": "cf086b057dfcc7c306450c70829b2788a3e64219",
+      "language": "Rust",
+      "stars": 38181,
+      "size_kb": 4422,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "asciinema/asciinema",
+      "url": "https://github.com/asciinema/asciinema.git",
+      "ref": "3c610957c7dbbdfcb362a1cdfc39df4eb21f48ad",
+      "language": "Rust",
+      "stars": 17595,
+      "size_kb": 4979,
+      "default_branch": "develop",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "astral-sh/ruff",
+      "url": "https://github.com/astral-sh/ruff.git",
+      "ref": "47d7184a6187d07422ef9f6b3b19b5ea47555ae2",
+      "language": "Rust",
+      "stars": 48796,
+      "size_kb": 177413,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "atuinsh/atuin",
+      "url": "https://github.com/atuinsh/atuin.git",
+      "ref": "9d39b113a5b5b98690e1bd6901b464b52f0609e0",
+      "language": "Rust",
+      "stars": 30713,
+      "size_kb": 59461,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "bee-san/RustScan",
+      "url": "https://github.com/bee-san/RustScan.git",
+      "ref": "e9dadb4a30dd0f3cc8b9b1c630a28ad351f8dbc3",
+      "language": "Rust",
+      "stars": 20156,
+      "size_kb": 14866,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "BloopAI/vibe-kanban",
+      "url": "https://github.com/BloopAI/vibe-kanban.git",
+      "ref": "4deb7eca8f381f7cbc1f9d15515a9ab8f8009053",
+      "language": "Rust",
+      "stars": 27492,
+      "size_kb": 103762,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "cjpais/Handy",
+      "url": "https://github.com/cjpais/Handy.git",
+      "ref": "8a362e9eba59d4057fda79b7f38f5b0d5cbabf65",
+      "language": "Rust",
+      "stars": 27219,
+      "size_kb": 11527,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "clap-rs/clap",
+      "url": "https://github.com/clap-rs/clap.git",
+      "ref": "466b2be56c5811d1af62c407f5a00456350ece62",
+      "language": "Rust",
+      "stars": 16578,
+      "size_kb": 21090,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "cube-js/cube",
+      "url": "https://github.com/cube-js/cube.git",
+      "ref": "46aedb9a749e849b4d6ca3c1112ee65e3c143a5d",
+      "language": "Rust",
+      "stars": 20476,
+      "size_kb": 469837,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "dandavison/delta",
+      "url": "https://github.com/dandavison/delta.git",
+      "ref": "b8cbc62631f8c80c0487b58ae9429d5e87be2892",
+      "language": "Rust",
+      "stars": 31525,
+      "size_kb": 11191,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "denisidoro/navi",
+      "url": "https://github.com/denisidoro/navi.git",
+      "ref": "1ac218cb1e0e80649ef23c8a916e67efc3086833",
+      "language": "Rust",
+      "stars": 17347,
+      "size_kb": 1575,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "denoland/deno",
+      "url": "https://github.com/denoland/deno.git",
+      "ref": "b23cb76e6dae7b739818323956740a3e2de1f64a",
+      "language": "Rust",
+      "stars": 107767,
+      "size_kb": 244287,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "farion1231/cc-switch",
+      "url": "https://github.com/farion1231/cc-switch.git",
+      "ref": "a377d79303bc1e592d2783d559ca5bd6b8ba1417",
+      "language": "Rust",
+      "stars": 120253,
+      "size_kb": 65950,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "fish-shell/fish-shell",
+      "url": "https://github.com/fish-shell/fish-shell.git",
+      "ref": "20569c43d851ad65c77798434ccccb5610dbe3a1",
+      "language": "Rust",
+      "stars": 33896,
+      "size_kb": 183208,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "gitbutlerapp/gitbutler",
+      "url": "https://github.com/gitbutlerapp/gitbutler.git",
+      "ref": "bdf6b6e3d4a10c7c4a986e3bb8ddec3b4553bf2d",
+      "language": "Rust",
+      "stars": 21335,
+      "size_kb": 268739,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "gleam-lang/gleam",
+      "url": "https://github.com/gleam-lang/gleam.git",
+      "ref": "5fded75e3b40c2f8e392b9a41df89e9b5362de11",
+      "language": "Rust",
+      "stars": 21676,
+      "size_kb": 28865,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "h4ckf0r0day/obscura",
+      "url": "https://github.com/h4ckf0r0day/obscura.git",
+      "ref": "36d8e431400269b6c3d59726c6a4514b83f78639",
+      "language": "Rust",
+      "stars": 19599,
+      "size_kb": 4567,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "Hmbown/CodeWhale",
+      "url": "https://github.com/Hmbown/CodeWhale.git",
+      "ref": "88a158eaa2d6f1fa879bba1f1848a315b4dc6925",
+      "language": "Rust",
+      "stars": 40023,
+      "size_kb": 74938,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "jdx/mise",
+      "url": "https://github.com/jdx/mise.git",
+      "ref": "7a6b70e02d74e2459cacd1283530006d087e6f36",
+      "language": "Rust",
+      "stars": 31016,
+      "size_kb": 82776,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "jj-vcs/jj",
+      "url": "https://github.com/jj-vcs/jj.git",
+      "ref": "f296bc36b18d59daf13ca2c1e302a09b508ccd91",
+      "language": "Rust",
+      "stars": 30541,
+      "size_kb": 165028,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "lapce/lapce",
+      "url": "https://github.com/lapce/lapce.git",
+      "ref": "c9e4c33948033f10f003991a037d949a708eedf8",
+      "language": "Rust",
+      "stars": 38679,
+      "size_kb": 28651,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "lbjlaq/Antigravity-Manager",
+      "url": "https://github.com/lbjlaq/Antigravity-Manager.git",
+      "ref": "80db5f2651a4bb7226a565a1637f110508b2ec2a",
+      "language": "Rust",
+      "stars": 30199,
+      "size_kb": 83722,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "leptos-rs/leptos",
+      "url": "https://github.com/leptos-rs/leptos.git",
+      "ref": "c94f4aefdd16b5e5af8a2803b3f5c726759690dd",
+      "language": "Rust",
+      "stars": 21104,
+      "size_kb": 17990,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "louis-e/arnis",
+      "url": "https://github.com/louis-e/arnis.git",
+      "ref": "c0fad13d9f262d470e5e16d91c163ec039dbd857",
+      "language": "Rust",
+      "stars": 17078,
+      "size_kb": 101872,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "microsoft/RustTraining",
+      "url": "https://github.com/microsoft/RustTraining.git",
+      "ref": "6bbe5330c4d5480b12cd10739572b03f3f73160c",
+      "language": "Rust",
+      "stars": 14738,
+      "size_kb": 1745,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "niri-wm/niri",
+      "url": "https://github.com/niri-wm/niri.git",
+      "ref": "7f26c3ee804fb6ed458ef7fb0e3c794f14e0b3bc",
+      "language": "Rust",
+      "stars": 26303,
+      "size_kb": 12358,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "ogulcancelik/herdr",
+      "url": "https://github.com/ogulcancelik/herdr.git",
+      "ref": "2a20e90a026936d0d5b96823d74e2e4fe13a166f",
+      "language": "Rust",
+      "stars": 19622,
+      "size_kb": 32779,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "oldj/SwitchHosts",
+      "url": "https://github.com/oldj/SwitchHosts.git",
+      "ref": "c921df49cb1597a4443ec1a7c46de8b2f6575c27",
+      "language": "Rust",
+      "stars": 26974,
+      "size_kb": 36885,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "pola-rs/polars",
+      "url": "https://github.com/pola-rs/polars.git",
+      "ref": "b72bea9d001aa02a02df193efa7c93cf2318c016",
+      "language": "Rust",
+      "stars": 39072,
+      "size_kb": 214116,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "ratatui/ratatui",
+      "url": "https://github.com/ratatui/ratatui.git",
+      "ref": "7986192595d29331df72145483ef78b3698522d1",
+      "language": "Rust",
+      "stars": 21843,
+      "size_kb": 138746,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "Rigellute/spotify-tui",
+      "url": "https://github.com/Rigellute/spotify-tui.git",
+      "ref": "c4dcf6b9fd8318017acbdd7ec005955e26cf2794",
+      "language": "Rust",
+      "stars": 19266,
+      "size_kb": 2403,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "ruffle-rs/ruffle",
+      "url": "https://github.com/ruffle-rs/ruffle.git",
+      "ref": "be11d7e89198ef173715764a0758dfb235af935c",
+      "language": "Rust",
+      "stars": 18335,
+      "size_kb": 178194,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "rust-lang/book",
+      "url": "https://github.com/rust-lang/book.git",
+      "ref": "917544888a55e4da7109bdba8c88c893c0da70f4",
+      "language": "Rust",
+      "stars": 18076,
+      "size_kb": 72093,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "rust-lang/mdBook",
+      "url": "https://github.com/rust-lang/mdBook.git",
+      "ref": "4f8c9460977e18974b37bb9a2292219bfa317632",
+      "language": "Rust",
+      "stars": 21997,
+      "size_kb": 7435,
+      "default_branch": "master",
+      "license": "MPL-2.0"
+    },
+    {
+      "slug": "rust-lang/rust-analyzer",
+      "url": "https://github.com/rust-lang/rust-analyzer.git",
+      "ref": "1174734d9c6453d13d2b5e3d578512c579ca37f1",
+      "language": "Rust",
+      "stars": 16683,
+      "size_kb": 121945,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "rust-lang/rustlings",
+      "url": "https://github.com/rust-lang/rustlings.git",
+      "ref": "734461f2fb8c7bb8403f4a9bd1fc7f983d32860b",
+      "language": "Rust",
+      "stars": 63594,
+      "size_kb": 4373,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "rust-unofficial/awesome-rust",
+      "url": "https://github.com/rust-unofficial/awesome-rust.git",
+      "ref": "10d546ccd511606b9dee370152e26acfb00edb8c",
+      "language": "Rust",
+      "stars": 58474,
+      "size_kb": 8664,
+      "default_branch": "main",
+      "license": "CC0-1.0"
+    },
+    {
+      "slug": "rustdesk/rustdesk",
+      "url": "https://github.com/rustdesk/rustdesk.git",
+      "ref": "929e989f17ba92e1a8291c0616f705208b67e3ea",
+      "language": "Rust",
+      "stars": 118695,
+      "size_kb": 75755,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "rustfs/rustfs",
+      "url": "https://github.com/rustfs/rustfs.git",
+      "ref": "d9e0a25174e7ed7e76548908bd01e2a1db000998",
+      "language": "Rust",
+      "stars": 30114,
+      "size_kb": 43476,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "rwf2/Rocket",
+      "url": "https://github.com/rwf2/Rocket.git",
+      "ref": "3a54d079aef060a8f732bd04ea54b0581a604087",
+      "language": "Rust",
+      "stars": 25763,
+      "size_kb": 8454,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "screenpipe/screenpipe",
+      "url": "https://github.com/screenpipe/screenpipe.git",
+      "ref": "42854ea8cb43a7cd3b528d37e94c7846ba82c639",
+      "language": "Rust",
+      "stars": 20394,
+      "size_kb": 490252,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "slint-ui/slint",
+      "url": "https://github.com/slint-ui/slint.git",
+      "ref": "10fe9bcb464d86e79c57de8dc09dcd0c70ed5a3e",
+      "language": "Rust",
+      "stars": 23286,
+      "size_kb": 81054,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "sunface/rust-course",
+      "url": "https://github.com/sunface/rust-course.git",
+      "ref": "386a11f17a7118eaea4fd68671520d757877ebfb",
+      "language": "Rust",
+      "stars": 30668,
+      "size_kb": 43836,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "surrealdb/surrealdb",
+      "url": "https://github.com/surrealdb/surrealdb.git",
+      "ref": "9d9a5b0693e499e0d030cac6b618062ec02cd2bc",
+      "language": "Rust",
+      "stars": 32745,
+      "size_kb": 59027,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "TabbyML/tabby",
+      "url": "https://github.com/TabbyML/tabby.git",
+      "ref": "21b29048d7bcf6b94f9f482f2d0fd05efadfd19f",
+      "language": "Rust",
+      "stars": 33785,
+      "size_kb": 109305,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "TheAlgorithms/Rust",
+      "url": "https://github.com/TheAlgorithms/Rust.git",
+      "ref": "9b296e9eb6eaa6d48152cdb8135ffe500916d123",
+      "language": "Rust",
+      "stars": 25938,
+      "size_kb": 1622,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "tokio-rs/axum",
+      "url": "https://github.com/tokio-rs/axum.git",
+      "ref": "0704574455272caa79ff3ae8207adf8f620516c9",
+      "language": "Rust",
+      "stars": 26596,
+      "size_kb": 5992,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "transact-rs/sqlx",
+      "url": "https://github.com/transact-rs/sqlx.git",
+      "ref": "1d674f51581598f55436451d5b4b73100cae0b56",
+      "language": "Rust",
+      "stars": 17333,
+      "size_kb": 9802,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "tree-sitter/tree-sitter",
+      "url": "https://github.com/tree-sitter/tree-sitter.git",
+      "ref": "0a0e77c375ba24ab8f4a49a389f51850a30a14a1",
+      "language": "Rust",
+      "stars": 26377,
+      "size_kb": 22552,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "tursodatabase/turso",
+      "url": "https://github.com/tursodatabase/turso.git",
+      "ref": "fae58dc3ee11aaad12dff21bbb27089083231319",
+      "language": "Rust",
+      "stars": 23357,
+      "size_kb": 85312,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "unionlabs/union",
+      "url": "https://github.com/unionlabs/union.git",
+      "ref": "773eb5d3e7682680539a49986a8e63ffb00898eb",
+      "language": "Rust",
+      "stars": 73883,
+      "size_kb": 484855,
+      "default_branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "vectordotdev/vector",
+      "url": "https://github.com/vectordotdev/vector.git",
+      "ref": "b4da9118a92ffce720d496a1bb2ebb543c208e3a",
+      "language": "Rust",
+      "stars": 22215,
+      "size_kb": 140137,
+      "default_branch": "master",
+      "license": "MPL-2.0"
+    },
+    {
+      "slug": "wezterm/wezterm",
+      "url": "https://github.com/wezterm/wezterm.git",
+      "ref": "76b606ec597a3c0263fa60321548637451c0a547",
+      "language": "Rust",
+      "stars": 27859,
+      "size_kb": 316353,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Y2Z/monolith",
+      "url": "https://github.com/Y2Z/monolith.git",
+      "ref": "a6fc8d009514b2ea271dda2539f19a1f479ebfab",
+      "language": "Rust",
+      "stars": 15357,
+      "size_kb": 4347,
+      "default_branch": "master",
+      "license": "CC0-1.0"
+    },
+    {
+      "slug": "yewstack/yew",
+      "url": "https://github.com/yewstack/yew.git",
+      "ref": "0539d37ba48bd1a39fd792b5bf10366ea8288413",
+      "language": "Rust",
+      "stars": 32746,
+      "size_kb": 22155,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "Zackriya-Solutions/meetily",
+      "url": "https://github.com/Zackriya-Solutions/meetily.git",
+      "ref": "0281737d87d26352fb0adc78c8c0975f691b23d1",
+      "language": "Rust",
+      "stars": 26132,
+      "size_kb": 48206,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "zed-industries/zed",
+      "url": "https://github.com/zed-industries/zed.git",
+      "ref": "6297c88f428a99741a7bfb33f31dfe98123bb8e4",
+      "language": "Rust",
+      "stars": 87394,
+      "size_kb": 487370,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "zellij-org/zellij",
+      "url": "https://github.com/zellij-org/zellij.git",
+      "ref": "812ad861bc3f4a8ba6f411c1a3b1163bfef43766",
+      "language": "Rust",
+      "stars": 34443,
+      "size_kb": 166820,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "zeroclaw-labs/zeroclaw",
+      "url": "https://github.com/zeroclaw-labs/zeroclaw.git",
+      "ref": "f75b36a27857dc8bd81dc09ccadd66e9f8e42853",
+      "language": "Rust",
+      "stars": 32360,
+      "size_kb": 150536,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "abdk-consulting/abdk-libraries-solidity",
+      "url": "https://github.com/abdk-consulting/abdk-libraries-solidity.git",
+      "ref": "5e1e7c11b35f8313d3f7ce11c1b86320d7c0b554",
+      "language": "Solidity",
+      "stars": 433,
+      "size_kb": 22,
+      "default_branch": "master",
+      "license": "BSD-4-Clause"
+    },
+    {
+      "slug": "AFKDAO/wrapper",
+      "url": "https://github.com/AFKDAO/wrapper.git",
+      "ref": "f4f11b8ceae91c3a1ce21b4fd3485064749a0f44",
+      "language": "Solidity",
+      "stars": 375,
+      "size_kb": 101,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "andrecronje/rarity",
+      "url": "https://github.com/andrecronje/rarity.git",
+      "ref": "a8a1f46780b36b16e457b96edbb4cbd154e37912",
+      "language": "Solidity",
+      "stars": 600,
+      "size_kb": 1302,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Anish-Agnihotri/flashside",
+      "url": "https://github.com/Anish-Agnihotri/flashside.git",
+      "ref": "61490e0e70cd4b0c76235c189cc942be48926e8a",
+      "language": "Solidity",
+      "stars": 578,
+      "size_kb": 16,
+      "default_branch": "master",
+      "license": "Unlicense"
+    },
+    {
+      "slug": "Arachnid/solidity-stringutils",
+      "url": "https://github.com/Arachnid/solidity-stringutils.git",
+      "ref": "4b2fcc43fa0426e19ce88b1f1ec16f5903a2e461",
+      "language": "Solidity",
+      "stars": 1154,
+      "size_kb": 58,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "balancer/balancer-core",
+      "url": "https://github.com/balancer/balancer-core.git",
+      "ref": "f4ed5d65362a8d6cec21662fb6eae233b0babc1f",
+      "language": "Solidity",
+      "stars": 339,
+      "size_kb": 7168,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "base/contract-deployments",
+      "url": "https://github.com/base/contract-deployments.git",
+      "ref": "b19b7c464b846401f3e6659b568294efff8a59f7",
+      "language": "Solidity",
+      "stars": 532,
+      "size_kb": 5137,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "base/contracts",
+      "url": "https://github.com/base/contracts.git",
+      "ref": "6c530ef901d333f8af96a05a3f4e43525287eb93",
+      "language": "Solidity",
+      "stars": 315,
+      "size_kb": 24743,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "bertmiller/sMEV",
+      "url": "https://github.com/bertmiller/sMEV.git",
+      "ref": "6e7622d4c3fc279de0a86e42bf4643fcb4fce8a8",
+      "language": "Solidity",
+      "stars": 495,
+      "size_kb": 200,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "brownie-mix/aave-flashloan-mix",
+      "url": "https://github.com/brownie-mix/aave-flashloan-mix.git",
+      "ref": "601a64dfd9b1cf0ffa80c910f62e8a854aff06dc",
+      "language": "Solidity",
+      "stars": 401,
+      "size_kb": 360,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "celo-org/celo-monorepo",
+      "url": "https://github.com/celo-org/celo-monorepo.git",
+      "ref": "045aa0061b7d0e9655ff3673cbd25a1bf2b4b74a",
+      "language": "Solidity",
+      "stars": 800,
+      "size_kb": 169638,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "CodeforDAO/contracts",
+      "url": "https://github.com/CodeforDAO/contracts.git",
+      "ref": "aba3cc247387831df79bec42273eda6d472b3c78",
+      "language": "Solidity",
+      "stars": 627,
+      "size_kb": 568,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "coinspect/learn-evm-attacks",
+      "url": "https://github.com/coinspect/learn-evm-attacks.git",
+      "ref": "77342c4e947218e93ba5d86972e3116f0d39bbfb",
+      "language": "Solidity",
+      "stars": 1809,
+      "size_kb": 12221,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "crytic/properties",
+      "url": "https://github.com/crytic/properties.git",
+      "ref": "5ea14b813ff296e24b4257ab52a0402360f916f6",
+      "language": "Solidity",
+      "stars": 368,
+      "size_kb": 779,
+      "default_branch": "main",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "Cyfrin/foundry-defi-stablecoin-cu",
+      "url": "https://github.com/Cyfrin/foundry-defi-stablecoin-cu.git",
+      "ref": "f04bb04a77e4aa4390e6df38b0dc0c214c5a7c6a",
+      "language": "Solidity",
+      "stars": 336,
+      "size_kb": 124,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Cyfrin/sc-exploits-minimized",
+      "url": "https://github.com/Cyfrin/sc-exploits-minimized.git",
+      "ref": "c034f5677e7778f4c7b347203a8a96c8d13492ca",
+      "language": "Solidity",
+      "stars": 642,
+      "size_kb": 10620,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Cyfrin/security-and-auditing-full-course-s23",
+      "url": "https://github.com/Cyfrin/security-and-auditing-full-course-s23.git",
+      "ref": "f356e2c88ae5cd6036daa5bcdd893bd32c7d25ab",
+      "language": "Solidity",
+      "stars": 1925,
+      "size_kb": 25678,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Decurity/semgrep-smart-contracts",
+      "url": "https://github.com/Decurity/semgrep-smart-contracts.git",
+      "ref": "2e878a89ac7bba1f8435e8a68e3ecb7700096cd5",
+      "language": "Solidity",
+      "stars": 714,
+      "size_kb": 439,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Devilla/eth-arbitrage",
+      "url": "https://github.com/Devilla/eth-arbitrage.git",
+      "ref": "cb9030336daecc704e315c81b9f2ce65479edee1",
+      "language": "Solidity",
+      "stars": 409,
+      "size_kb": 95,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Dexaran/ERC223-token-standard",
+      "url": "https://github.com/Dexaran/ERC223-token-standard.git",
+      "ref": "5277d293f842554f30782d5373db0615552f5818",
+      "language": "Solidity",
+      "stars": 521,
+      "size_kb": 204,
+      "default_branch": "development",
+      "license": "MIT"
+    },
+    {
+      "slug": "erasureprotocol/NMR",
+      "url": "https://github.com/erasureprotocol/NMR.git",
+      "ref": "8896e37fdcfb334116b91413ab150207273e5dc5",
+      "language": "Solidity",
+      "stars": 327,
+      "size_kb": 1879,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Fankouzu/smart-contract",
+      "url": "https://github.com/Fankouzu/smart-contract.git",
+      "ref": "4b7220a0c2a6be9b42aea9ad542eaac23abb7154",
+      "language": "Solidity",
+      "stars": 460,
+      "size_kb": 2392,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "flashbots/simple-blind-arbitrage",
+      "url": "https://github.com/flashbots/simple-blind-arbitrage.git",
+      "ref": "73c6c270b27059e6dc0469a6c08e0f7739e5d531",
+      "language": "Solidity",
+      "stars": 385,
+      "size_kb": 9494,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "foundry-rs/forge-std",
+      "url": "https://github.com/foundry-rs/forge-std.git",
+      "ref": "6e8c4a92c9a8b31c1b0f0c39296d1fa4695c7df8",
+      "language": "Solidity",
+      "stars": 1050,
+      "size_kb": 1136,
+      "default_branch": "master",
+      "license": "Apache-2.0"
+    },
+    {
+      "slug": "genyleap/geny-token",
+      "url": "https://github.com/genyleap/geny-token.git",
+      "ref": "1e6383e1c89800845da253e836f79902e80557bc",
+      "language": "Solidity",
+      "stars": 540,
+      "size_kb": 215,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "graphprotocol/contracts",
+      "url": "https://github.com/graphprotocol/contracts.git",
+      "ref": "feea7ce35559cf6d78fa5cb98e941947d782bbef",
+      "language": "Solidity",
+      "stars": 372,
+      "size_kb": 66814,
+      "default_branch": "main",
+      "license": "GPL-2.0"
+    },
+    {
+      "slug": "HashLips/solidity_smart_contracts",
+      "url": "https://github.com/HashLips/solidity_smart_contracts.git",
+      "ref": "9d8e85f11252b5b67cc2466ea82a7c9fa9c426db",
+      "language": "Solidity",
+      "stars": 584,
+      "size_kb": 94,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "huff-language/huffmate",
+      "url": "https://github.com/huff-language/huffmate.git",
+      "ref": "69856dcdd4351be1ff328b2a0d03cc5a886a614b",
+      "language": "Solidity",
+      "stars": 473,
+      "size_kb": 1076,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "ithacaxyz/account",
+      "url": "https://github.com/ithacaxyz/account.git",
+      "ref": "767e973ad2a083aa3231a88b2472055d6c556307",
+      "language": "Solidity",
+      "stars": 325,
+      "size_kb": 2112,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "keep3r-network/keep3r.network",
+      "url": "https://github.com/keep3r-network/keep3r.network.git",
+      "ref": "a6897007db6e656e0e310ed7ee4ad42904fe2794",
+      "language": "Solidity",
+      "stars": 369,
+      "size_kb": 718,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Layr-Labs/eigenlayer-contracts",
+      "url": "https://github.com/Layr-Labs/eigenlayer-contracts.git",
+      "ref": "ef8f97992241338cb88335b9d74295e33321b780",
+      "language": "Solidity",
+      "stars": 720,
+      "size_kb": 45807,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "lens-protocol/core",
+      "url": "https://github.com/lens-protocol/core.git",
+      "ref": "d4c662aac780e669cd23769730cdc4f0189ee5be",
+      "language": "Solidity",
+      "stars": 2841,
+      "size_kb": 4350,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "maticnetwork/pos-portal",
+      "url": "https://github.com/maticnetwork/pos-portal.git",
+      "ref": "3402faad523a30ed72c50a583aed5782a30c5f7d",
+      "language": "Solidity",
+      "stars": 427,
+      "size_kb": 72831,
+      "default_branch": "master",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "memester-xyz/surl",
+      "url": "https://github.com/memester-xyz/surl.git",
+      "ref": "5f92a5260c8e0198ca3ee6a16255d6cda4e0887a",
+      "language": "Solidity",
+      "stars": 327,
+      "size_kb": 34,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "MIgHTy-alIeN/MEV-Arbitrage-Bot",
+      "url": "https://github.com/MIgHTy-alIeN/MEV-Arbitrage-Bot.git",
+      "ref": "8457d1bc2413008f2b5f13912a77e882e4233b3d",
+      "language": "Solidity",
+      "stars": 920,
+      "size_kb": 3817,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "minaminao/ctf-blockchain",
+      "url": "https://github.com/minaminao/ctf-blockchain.git",
+      "ref": "35072ddcd429183d1d9500de7aeb200c231b75c3",
+      "language": "Solidity",
+      "stars": 1085,
+      "size_kb": 5659,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "mztacat/Base",
+      "url": "https://github.com/mztacat/Base.git",
+      "ref": "63c226016c99ec02c168ce8017ece3f5f5a32dd3",
+      "language": "Solidity",
+      "stars": 518,
+      "size_kb": 25,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "NazaWEb/ultimate-solidity-course-for-complete-beginners",
+      "url": "https://github.com/NazaWEb/ultimate-solidity-course-for-complete-beginners.git",
+      "ref": "d742df2587f70e02d247964cd8514f453d97c7f7",
+      "language": "Solidity",
+      "stars": 370,
+      "size_kb": 24,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "OlympusDAO/olympus-contracts",
+      "url": "https://github.com/OlympusDAO/olympus-contracts.git",
+      "ref": "156f7599a05dc56553860a9b23b38824ab29ec09",
+      "language": "Solidity",
+      "stars": 720,
+      "size_kb": 21825,
+      "default_branch": "main",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "OpenZeppelin/damn-vulnerable-defi",
+      "url": "https://github.com/OpenZeppelin/damn-vulnerable-defi.git",
+      "ref": "6797353c7cb5409e3d388e9e8f13954f9bb5f609",
+      "language": "Solidity",
+      "stars": 752,
+      "size_kb": 293,
+      "default_branch": "master",
+      "license": "MIT"
+    },
+    {
+      "slug": "OpenZeppelin/ethernaut",
+      "url": "https://github.com/OpenZeppelin/ethernaut.git",
+      "ref": "d05643a40aa98c45d66247c69ffceab8f44dd8cb",
+      "language": "Solidity",
+      "stars": 2321,
+      "size_kb": 28000,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "pancakeswap/pancake-smart-contracts",
+      "url": "https://github.com/pancakeswap/pancake-smart-contracts.git",
+      "ref": "cb079908a30328e46d42fe8cc77b9f7d38a15c2f",
+      "language": "Solidity",
+      "stars": 371,
+      "size_kb": 1042,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "pedrobergamini/flashloaner-contract",
+      "url": "https://github.com/pedrobergamini/flashloaner-contract.git",
+      "ref": "d873b120ff62e63afb010351d2608ed071be6229",
+      "language": "Solidity",
+      "stars": 546,
+      "size_kb": 5953,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "provable-things/ethereum-examples",
+      "url": "https://github.com/provable-things/ethereum-examples.git",
+      "ref": "f3f650836016c43be3b18ba2819a5609078b0447",
+      "language": "Solidity",
+      "stars": 445,
+      "size_kb": 2960,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "RareSkills/Solidity-Exercises",
+      "url": "https://github.com/RareSkills/Solidity-Exercises.git",
+      "ref": "1c26bb8c036dc2806385d4152b8a08ae7bc470f2",
+      "language": "Solidity",
+      "stars": 340,
+      "size_kb": 282,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Ridera-Rwa/Ridera-core",
+      "url": "https://github.com/Ridera-Rwa/Ridera-core.git",
+      "ref": "ce12c9a6d2edc78b9ec59810b5a721a322553131",
+      "language": "Solidity",
+      "stars": 1609,
+      "size_kb": 1057,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "safemoonprotocol/Safemoon.sol",
+      "url": "https://github.com/safemoonprotocol/Safemoon.sol.git",
+      "ref": "a2a1b922b1260b618427183ec8d4475d70cf4daf",
+      "language": "Solidity",
+      "stars": 657,
+      "size_kb": 12,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "sky-ecosystem/dss",
+      "url": "https://github.com/sky-ecosystem/dss.git",
+      "ref": "fa4f6630afb0624d04a003e920b0d71a00331d98",
+      "language": "Solidity",
+      "stars": 839,
+      "size_kb": 2266,
+      "default_branch": "master",
+      "license": "AGPL-3.0"
+    },
+    {
+      "slug": "smartcontractkit/foundry-starter-kit",
+      "url": "https://github.com/smartcontractkit/foundry-starter-kit.git",
+      "ref": "dab893b00296ad448718423fd291f287d8094d16",
+      "language": "Solidity",
+      "stars": 362,
+      "size_kb": 145,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "SunWeb3Sec/DeFiVulnLabs",
+      "url": "https://github.com/SunWeb3Sec/DeFiVulnLabs.git",
+      "ref": "f61f6ee5c3f89eb7685030647f8df19997596f8b",
+      "language": "Solidity",
+      "stars": 1957,
+      "size_kb": 415,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "TheAlgorithms/Solidity",
+      "url": "https://github.com/TheAlgorithms/Solidity.git",
+      "ref": "08cba51fb38e276062b0c9791d7e0ee494ffa903",
+      "language": "Solidity",
+      "stars": 361,
+      "size_kb": 6522,
+      "default_branch": "main",
+      "license": "LGPL-2.1"
+    },
+    {
+      "slug": "transmissions11/solmate",
+      "url": "https://github.com/transmissions11/solmate.git",
+      "ref": "89365b880c4f3c786bdd453d4b8e8fe410344a69",
+      "language": "Solidity",
+      "stars": 4285,
+      "size_kb": 825,
+      "default_branch": "main",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "Uniswap/UniswapX",
+      "url": "https://github.com/Uniswap/UniswapX.git",
+      "ref": "3f5019cf206bc2b37a47c7653f039914f93ad60d",
+      "language": "Solidity",
+      "stars": 459,
+      "size_kb": 10463,
+      "default_branch": "main",
+      "license": "GPL-3.0"
+    },
+    {
+      "slug": "Uniswap/v4-periphery",
+      "url": "https://github.com/Uniswap/v4-periphery.git",
+      "ref": "3245c3cb99c48fa1dc2459c3b60abc37d4294aba",
+      "language": "Solidity",
+      "stars": 898,
+      "size_kb": 9298,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "Uniswap/v4-template",
+      "url": "https://github.com/Uniswap/v4-template.git",
+      "ref": "1fbf95547791f0821a170b88c750cb2e04e6818b",
+      "language": "Solidity",
+      "stars": 336,
+      "size_kb": 214,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "Wadoozie/SmartContracts",
+      "url": "https://github.com/Wadoozie/SmartContracts.git",
+      "ref": "0147ca5a2aa26e643b404cbb186f539cbd631739",
+      "language": "Solidity",
+      "stars": 380,
+      "size_kb": 283,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "wighawag/template-ethereum-contracts",
+      "url": "https://github.com/wighawag/template-ethereum-contracts.git",
+      "ref": "d66ee0b23e1f1d8cd62427b980a8f48ed7e3fc1a",
+      "language": "Solidity",
+      "stars": 532,
+      "size_kb": 1663,
+      "default_branch": "main",
+      "license": "Unlicense"
+    },
+    {
+      "slug": "willitscale/learning-solidity",
+      "url": "https://github.com/willitscale/learning-solidity.git",
+      "ref": "b4a98986d58bc7eafb245271fdd5f5b80dae02f4",
+      "language": "Solidity",
+      "stars": 2069,
+      "size_kb": 548,
+      "default_branch": "master",
+      "license": "NOASSERTION"
+    },
+    {
+      "slug": "winsznx/bull-rush",
+      "url": "https://github.com/winsznx/bull-rush.git",
+      "ref": "3ade959f50798b5c5bd8c3f877df5af766865dec",
+      "language": "Solidity",
+      "stars": 388,
+      "size_kb": 6727,
+      "default_branch": "main",
+      "license": "MIT"
+    },
+    {
+      "slug": "WTFAcademy/WTF-Dapp",
+      "url": "https://github.com/WTFAcademy/WTF-Dapp.git",
+      "ref": "968d101262b5e09fd23da69f85297174c2fa72b0",
+      "language": "Solidity",
+      "stars": 669,
+      "size_kb": 36687,
+      "default_branch": "main",
+      "license": "MIT"
+    }
+  ]
+}

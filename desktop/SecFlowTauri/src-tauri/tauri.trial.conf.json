@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "安全智脑 7 天试用版",
+  "identifier": "ai.secflow.security-agent.trial7days",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "安全智脑 7 天试用版",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "decorations": true,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay"
+      }
+    ]
+  },
+  "bundle": {
+    "shortDescription": "安全智脑 7 天试用版",
+    "longDescription": "SecFlow 安全智脑七天限时试用客户端"
+  }
+}
