@@ -50,6 +50,7 @@ MODEL_PROVIDER_NAMES = {
     "zhipu": "智谱 AI",
     "spark": "讯飞星火",
     "moonshot": "Kimi",
+    "ollama": "Ollama",
     "stepfun": "阶跃星辰",
     "custom": "自定义模型",
 }
@@ -103,6 +104,11 @@ FALLBACK_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "kimi-k2.7-code-highspeed", "name": "Kimi K2.7 Code Highspeed", "description": "高速编程模型"},
         {"id": "kimi-k2.6", "name": "Kimi K2.6", "description": "通用对话、智能体与复杂推理"},
         {"id": "kimi-k2.5", "name": "Kimi K2.5", "description": "兼容既有 Kimi 工作流"},
+    ],
+    "ollama": [
+        {"id": "qwen3:8b", "name": "Qwen 3 8B", "description": "Ollama 本地通用模型"},
+        {"id": "llama3.1:8b", "name": "Llama 3.1 8B", "description": "Ollama 本地通用模型"},
+        {"id": "deepseek-r1:8b", "name": "DeepSeek R1 8B", "description": "Ollama 本地推理模型"},
     ],
     "meta": [
         {"id": "llama-3.1-405b-instruct", "name": "Llama 3.1 405B Instruct", "description": "兼容既有 Llama API 配置"},
@@ -234,7 +240,7 @@ def list_llm_models(update: dict[str, Any], user_id: str = "default") -> dict[st
     ):
         api_key = str(current.get("api_key") or "").strip()
 
-    if not api_key:
+    if not api_key and catalog_provider not in LOCAL_PROVIDERS:
         return _fallback_model_catalog(catalog_provider, "填入 API Key 后，可从厂商模型接口同步真实模型列表。")
     if not endpoint.startswith(("http://", "https://")):
         return _fallback_model_catalog(catalog_provider, "API 地址需要包含 http:// 或 https://，当前显示内置推荐模型。")
@@ -317,8 +323,9 @@ def chat_readiness_error(active_model: dict[str, Any] | None) -> str:
     if not active_model:
         return "未配置可用模型。"
     provider = str(active_model.get("provider", "")).lower()
+    catalog_provider = str(active_model.get("catalogProvider") or provider).lower()
     endpoint = _normalized_endpoint(active_model)
-    if provider not in LOCAL_PROVIDERS and not str(active_model.get("apiKey", "")):
+    if catalog_provider not in LOCAL_PROVIDERS and not str(active_model.get("apiKey", "")):
         return (
             f"{active_model.get('name', '当前模型')} 未配置 API Key。"
             "请通过 SECFLOW_LLM_API_KEY、DEEPSEEK_API_KEY 或 OPENAI_API_KEY 配置。"
@@ -819,7 +826,7 @@ def _wire_api(active_model: dict[str, Any]) -> str:
 
 
 def _supports_thinking_param(active_model: dict[str, Any]) -> bool:
-    provider = str(active_model.get("provider", "")).lower()
+    provider = str(active_model.get("catalogProvider") or active_model.get("provider", "")).lower()
     model = str(active_model.get("model", "")).lower()
     if provider == "deepseek":
         return "reasoner" in model
@@ -834,11 +841,15 @@ def _reasoning_options_for_config(config: dict[str, Any]) -> list[dict[str, Any]
     separate model, while OpenAI Responses models expose configurable effort.
     """
     provider = str(config.get("provider") or "").strip().lower()
+    catalog_provider = str(config.get("catalog_provider") or provider).strip().lower()
     model = str(config.get("model") or "").strip().lower()
     wire_api = str(config.get("wire_api") or PROVIDER_DEFAULTS.get(provider, {}).get("wire_api") or "").strip().lower()
 
     if provider == "deepseek":
         return [{"value": "high", "fixed": True}] if "reasoner" in model else [{"value": "none", "fixed": True}]
+
+    if catalog_provider in LOCAL_PROVIDERS:
+        return [{"value": "high", "fixed": True}] if any(token in model for token in ("reason", "thinking", "qwq")) else [{"value": "none", "fixed": True}]
 
     if provider == "openai" or wire_api == "responses":
         if model.startswith("gpt-4.1"):
@@ -877,7 +888,7 @@ def _fetch_provider_models(provider: str, endpoint: str, api_key: str, timeout_s
                 "anthropic-version": "2023-06-01",
             }
         )
-    else:
+    elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
     with httpx.Client(timeout=timeout_s) as client:

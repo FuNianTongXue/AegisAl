@@ -1,6 +1,6 @@
 use std::{
-    fs::File,
-    io::{self, Read},
+    fs::{File, OpenOptions},
+    io::{self, Read, Write},
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -18,7 +18,10 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, RunEvent, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 
 struct BackendProcess(Mutex<Option<CommandChild>>);
 static TASK_WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -30,7 +33,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![validate_project_directory, open_task_window])
+        .invoke_handler(tauri::generate_handler![
+            validate_project_directory,
+            open_task_window,
+            restart_backend,
+        ])
         .manage(BackendProcess(Mutex::new(None)))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "secflow-open-settings" => open_settings(app),
@@ -45,105 +52,228 @@ pub fn run() {
             // seconds on a cold macOS launch; doing it first left the visible
             // main window interactive while the local API process had not even
             // been spawned yet.
-            if std::env::var("SECFLOW_SERVER_URL").is_err() {
-                let data_dir = app.path().app_data_dir()?;
-                let resource_dir = app.path().resource_dir()?;
-                #[cfg(target_os = "windows")]
-                let backend_executable = resource_dir.join("backend/secflow-backend.exe");
-                #[cfg(not(target_os = "windows"))]
-                let backend_executable = resource_dir.join("backend/secflow-backend");
-                #[cfg(target_os = "windows")]
-                let semgrep_executable = resource_dir.join("semgrep/secflow-semgrep.exe");
-                #[cfg(not(target_os = "windows"))]
-                let semgrep_executable = resource_dir.join("semgrep/secflow-semgrep");
-                verify_backend_integrity(&backend_executable)?;
-                std::fs::create_dir_all(&data_dir)?;
-                let parent_pid = std::process::id().to_string();
-                let backend_port = option_env!("SECFLOW_BACKEND_PORT").unwrap_or("18781");
-                let trial_build = option_env!("SECFLOW_TAURI_TRIAL_BUILD") == Some("1");
-                let mut command = app
-                    .shell()
-                    .command(backend_executable)
-                    .args([
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        backend_port,
-                        "--parent-pid",
-                        &parent_pid,
-                    ])
-                    .env("SECFLOW_DATA_DIR", &data_dir)
-                    .env("SECFLOW_MEMORY_LOCAL_ONLY", "true")
-                    .env(
-                        "SECFLOW_BUNDLED_SEMGREP_BIN",
-                        semgrep_executable,
-                    )
-                    .env(
-                        "SECFLOW_SEMGREP_RULES",
-                        resource_dir.join("semgrep-rules"),
-                    )
-                    .env("SECFLOW_CODE_SCAN_MCP_STARTUP_TIMEOUT_SECONDS", "60")
-                    // Keep feed refresh, legacy translation backfill and full
-                    // catalog bootstrap out of the critical model-access
-                    // window immediately after launch.
-                    .env("SECFLOW_BACKGROUND_STARTUP_DELAY_SECONDS", "12")
-                    .env("PYTHONUNBUFFERED", "1");
-                if trial_build {
-                    command = command
-                        .env("SECFLOW_TRIAL_ENABLED", "1")
-                        .env("SECFLOW_TRIAL_DURATION_HOURS", "168")
-                        .env("SECFLOW_APP_RELEASE_CHANNEL", "7天试用版")
-                        .env("SECFLOW_KEYCHAIN_SERVICE", "ai.secflow.security-agent.trial7days");
+            start_backend(app.handle()).map_err(io::Error::other)?;
+
+            let log_path = app.path().app_log_dir().ok().map(|directory| {
+                let _ = std::fs::create_dir_all(&directory);
+                directory.join("backend.log")
+            });
+            append_backend_log(log_path.as_deref(), "[desktop] core setup complete");
+
+            // The transparent information window and template tray icon are
+            // macOS-specific surfaces. Creating them on Windows can terminate
+            // WebView2 before the primary window receives its first frame.
+            #[cfg(target_os = "macos")]
+            {
+                if let Err(error) = create_information_window(app.handle()) {
+                    append_backend_log(
+                        log_path.as_deref(),
+                        &format!("[desktop] information window unavailable: {error}"),
+                    );
                 }
-                let (mut receiver, child) = command.spawn()?;
-
-                *app.state::<BackendProcess>().0.lock().unwrap() = Some(child);
-                tauri::async_runtime::spawn(async move {
-                    while receiver.recv().await.is_some() {}
-                });
+                if let Err(error) = create_status_item(app.handle()) {
+                    append_backend_log(
+                        log_path.as_deref(),
+                        &format!("[desktop] status item unavailable: {error}"),
+                    );
+                }
             }
-
-            create_information_window(app.handle())?;
-            create_status_item(app.handle())?;
+            #[cfg(not(target_os = "macos"))]
+            append_backend_log(
+                log_path.as_deref(),
+                "[desktop] macOS auxiliary surfaces skipped",
+            );
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build SecFlow desktop client");
 
-    app.run(|handle, event| {
-        match event {
-            RunEvent::WindowEvent {
-                label,
-                event: WindowEvent::CloseRequested { api, .. },
-                ..
-            } if label == "main" => {
+    app.run(|handle, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            append_desktop_log(handle, "[desktop] main window close requested");
+            #[cfg(not(target_os = "windows"))]
+            {
                 api.prevent_close();
                 if let Some(window) = handle.get_webview_window("main") {
                     let _ = window.hide();
                 }
             }
-            RunEvent::WindowEvent {
-                label,
-                event: WindowEvent::CloseRequested { api, .. },
-                ..
-            } if label == "information" => {
-                api.prevent_close();
-                if let Some(window) = handle.get_webview_window("information") {
-                    let _ = window.hide();
-                }
-            }
-            RunEvent::Exit | RunEvent::ExitRequested { .. } => {
-                if let Some(child) = handle.state::<BackendProcess>().0.lock().unwrap().take() {
-                    let _ = child.kill();
-                }
-            }
-            _ => {}
+            #[cfg(target_os = "windows")]
+            let _ = api;
         }
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "information" => {
+            api.prevent_close();
+            if let Some(window) = handle.get_webview_window("information") {
+                let _ = window.hide();
+            }
+        }
+        RunEvent::ExitRequested { code, .. } => {
+            append_desktop_log(
+                handle,
+                &format!("[desktop] application exit requested: code={code:?}"),
+            );
+            if let Some(child) = handle.state::<BackendProcess>().0.lock().unwrap().take() {
+                let _ = child.kill();
+            }
+        }
+        RunEvent::Exit => {
+            append_desktop_log(handle, "[desktop] application exited");
+            if let Some(child) = handle.state::<BackendProcess>().0.lock().unwrap().take() {
+                let _ = child.kill();
+            }
+        }
+        _ => {}
     });
 }
 
+#[tauri::command]
+fn restart_backend(app: AppHandle) -> Result<(), String> {
+    if std::env::var("SECFLOW_SERVER_URL").is_ok() {
+        return Ok(());
+    }
+    if let Some(child) = app.state::<BackendProcess>().0.lock().unwrap().take() {
+        child.kill().map_err(|error| error.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(350));
+    }
+    start_backend(&app)
+}
+
+fn start_backend(app: &AppHandle) -> Result<(), String> {
+    if std::env::var("SECFLOW_SERVER_URL").is_ok()
+        || app.state::<BackendProcess>().0.lock().unwrap().is_some()
+    {
+        return Ok(());
+    }
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    let backend_executable = resource_dir.join("backend/secflow-backend.exe");
+    #[cfg(not(target_os = "windows"))]
+    let backend_executable = resource_dir.join("backend/secflow-backend");
+    #[cfg(target_os = "windows")]
+    let semgrep_executable = resource_dir.join("semgrep/secflow-semgrep.exe");
+    #[cfg(not(target_os = "windows"))]
+    let semgrep_executable = resource_dir.join("semgrep/secflow-semgrep");
+    verify_backend_integrity(&backend_executable).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+
+    let log_path = app.path().app_log_dir().ok().map(|directory| {
+        let _ = std::fs::create_dir_all(&directory);
+        directory.join("backend.log")
+    });
+    append_backend_log(log_path.as_deref(), "[desktop] starting local backend");
+
+    let parent_pid = std::process::id().to_string();
+    let backend_port = option_env!("SECFLOW_BACKEND_PORT").unwrap_or("18781");
+    let trial_build = option_env!("SECFLOW_TAURI_TRIAL_BUILD") == Some("1");
+    let mut command = app
+        .shell()
+        .command(backend_executable)
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            backend_port,
+            "--parent-pid",
+            &parent_pid,
+        ])
+        .env("SECFLOW_DATA_DIR", &data_dir)
+        .env("SECFLOW_APP_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("SECFLOW_MEMORY_LOCAL_ONLY", "true")
+        .env("SECFLOW_BUNDLED_SEMGREP_BIN", semgrep_executable)
+        .env("SECFLOW_SEMGREP_RULES", resource_dir.join("semgrep-rules"))
+        .env("SECFLOW_CODE_SCAN_MCP_STARTUP_TIMEOUT_SECONDS", "60")
+        .env("SECFLOW_BACKGROUND_STARTUP_DELAY_SECONDS", "12")
+        .env("PYTHONUNBUFFERED", "1");
+    if trial_build {
+        command = command
+            .env("SECFLOW_TRIAL_ENABLED", "1")
+            .env("SECFLOW_TRIAL_DURATION_HOURS", "168")
+            .env("SECFLOW_APP_RELEASE_CHANNEL", "7天试用版")
+            .env(
+                "SECFLOW_KEYCHAIN_SERVICE",
+                "ai.secflow.security-agent.trial7days",
+            );
+    }
+    let (mut receiver, child) = command.spawn().map_err(|error| error.to_string())?;
+    let child_pid = child.pid();
+    *app.state::<BackendProcess>().0.lock().unwrap() = Some(child);
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let terminated = matches!(event, CommandEvent::Terminated(_));
+            let line = match event {
+                CommandEvent::Stdout(bytes) => {
+                    format!("[stdout] {}", String::from_utf8_lossy(&bytes))
+                }
+                CommandEvent::Stderr(bytes) => {
+                    format!("[stderr] {}", String::from_utf8_lossy(&bytes))
+                }
+                CommandEvent::Error(error) => format!("[process-error] {error}"),
+                CommandEvent::Terminated(payload) => format!(
+                    "[desktop] backend terminated: code={:?}, signal={:?}",
+                    payload.code, payload.signal
+                ),
+                _ => continue,
+            };
+            append_backend_log(log_path.as_deref(), &line);
+            if terminated {
+                let backend_state = app_handle.state::<BackendProcess>();
+                let mut process = backend_state.0.lock().unwrap();
+                if process
+                    .as_ref()
+                    .is_some_and(|child| child.pid() == child_pid)
+                {
+                    process.take();
+                }
+                let _ = app_handle.emit("secflow:backend-terminated", line);
+            }
+        }
+    });
+    Ok(())
+}
+
+fn append_backend_log(path: Option<&Path>, line: &str) {
+    let Some(path) = path else { return };
+    if path
+        .metadata()
+        .map(|metadata| metadata.len() > 2 * 1024 * 1024)
+        .unwrap_or(false)
+    {
+        let _ = File::create(path);
+    }
+    if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(log, "{line}");
+    }
+}
+
+fn append_desktop_log(app: &AppHandle, line: &str) {
+    let log_path = app.path().app_log_dir().ok().map(|directory| {
+        let _ = std::fs::create_dir_all(&directory);
+        directory.join("backend.log")
+    });
+    append_backend_log(log_path.as_deref(), line);
+}
+
 fn verify_backend_integrity(path: &Path) -> io::Result<()> {
-    let Some(expected) = option_env!("SECFLOW_BACKEND_SHA256").filter(|value| !value.is_empty()) else {
+    let Some(expected) = option_env!("SECFLOW_BACKEND_SHA256").filter(|value| !value.is_empty())
+    else {
         return Ok(());
     };
     verify_file_integrity(path, expected)
@@ -190,7 +320,10 @@ mod integrity_tests {
         let error = verify_file_integrity(&path, expected).expect_err("modified fixture must fail");
 
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(fs::read(&path).expect("fixture remains readable"), b"modified-backend");
+        assert_eq!(
+            fs::read(&path).expect("fixture remains readable"),
+            b"modified-backend"
+        );
         fs::remove_file(path).expect("remove fixture");
     }
 }
@@ -255,7 +388,10 @@ fn create_status_item(app: &AppHandle) -> tauri::Result<()> {
     let settings = MenuItemBuilder::with_id("secflow-open-settings", "设置...").build(app)?;
     let quit = MenuItemBuilder::with_id("secflow-quit", "退出安全智脑").build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&information, &open_main, &settings, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&information, &open_main, &settings, &separator, &quit],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id("secflow-information")
         .tooltip("安全智脑 信息咨询")
@@ -363,15 +499,10 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let builder = builder
         .hidden_title(true)
         .title_bar_style(TitleBarStyle::Overlay);
-    builder
-        .center()
-        .build()
+    builder.center().build()
 }
 
-fn position_information_window(
-    window: &WebviewWindow,
-    anchor: Rect,
-) -> tauri::Result<()> {
+fn position_information_window(window: &WebviewWindow, anchor: Rect) -> tauri::Result<()> {
     let scale_factor = window.scale_factor()?;
     let anchor_position = anchor.position.to_physical::<f64>(scale_factor);
     let anchor_size = anchor.size.to_physical::<f64>(scale_factor);

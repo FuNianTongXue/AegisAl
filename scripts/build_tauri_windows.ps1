@@ -6,9 +6,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Version = "1.3.1"
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $TauriDir = Join-Path $RootDir "desktop\SecFlowTauri"
+$Version = (Get-Content -LiteralPath (Join-Path $TauriDir "package.json") -Raw | ConvertFrom-Json).version
+if (-not $Version) { throw "Unable to read client version from desktop\SecFlowTauri\package.json" }
 $TauriSourceDir = Join-Path $TauriDir "src-tauri"
 $ResourcesDir = Join-Path $TauriSourceDir "resources"
 $RulesPath = Join-Path $RootDir "config\semgrep"
@@ -37,7 +38,7 @@ if (-not (Test-Path -LiteralPath $RulesPath -PathType Container)) {
     throw "Missing offline Semgrep rules: $RulesPath"
 }
 
-& $Python -c "import platform,sys; assert platform.machine().lower() in {'amd64','x86_64'}; import PyInstaller,semgrep,reportlab,docx,xlsxwriter,tree_sitter,uvicorn"
+& $Python -c "import platform,sys; assert platform.machine().lower() in {'amd64','x86_64'}; import PyInstaller,semgrep,reportlab,docx,xlsxwriter,tree_sitter,uvicorn,pywintypes; from zoneinfo import ZoneInfo; ZoneInfo('Asia/Shanghai')"
 if ($LASTEXITCODE -ne 0) {
     throw "Python build dependencies are missing. Install requirements-windows.txt first."
 }
@@ -57,6 +58,7 @@ $BackendArguments = @(
     "--collect-all", "tree_sitter_c", "--collect-all", "tree_sitter_cpp",
     "--collect-all", "tree_sitter_cuda", "--collect-all", "tree_sitter_c_sharp",
     "--collect-all", "tree_sitter_rust", "--collect-all", "tree_sitter_solidity",
+    "--collect-all", "tzdata",
     "--hidden-import", "uvicorn.logging", "--hidden-import", "uvicorn.loops.asyncio",
     "--hidden-import", "uvicorn.protocols.http.h11_impl", "--hidden-import", "uvicorn.lifespan.on",
     "--exclude-module", "psycopg", "--exclude-module", "psycopg_binary",

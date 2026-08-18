@@ -17,23 +17,29 @@
 
 ---
 
-## v1.3.1 跨平台 7 天试用版
+## v1.3.3 跨平台 7 天试用版
 
-当前主客户端为 Tauri 2 + React/TypeScript + Python LangGraph sidecar。v1.3.1 同时提供 Windows x86_64、macOS Apple Silicon 和 macOS Intel 安装包，试用期从首次成功启动起连续计算 7 天：
+当前主客户端为 Tauri 2 + React/TypeScript + Python LangGraph sidecar。v1.3.3 同时提供 Windows x86_64、macOS Apple Silicon 和 macOS Intel 安装包，试用期从首次成功启动起连续计算 7 天：
 
 | 平台 | 7 天试用版 | 适用设备 |
 | --- | --- | --- |
-| Windows `x86_64` | [下载安装程序](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.1-trial-7days/SecFlow-v1.3.1-Windows-x86_64-Trial-7Days-Setup.exe) | Windows 10/11 64 位 |
-| macOS `arm64` | [下载 DMG](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.1-trial-7days/SecFlow-v1.3.1-macOS-ARM64-Trial-7Days.dmg) | Apple Silicon Mac |
-| macOS `x86_64` | [下载 DMG](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.1-trial-7days/SecFlow-v1.3.1-macOS-x86_64-Trial-7Days.dmg) | Intel Mac |
+| Windows `x86_64` | [下载安装程序](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.3-trial-7days/SecFlow-v1.3.3-Windows-x86_64-Trial-7Days-Setup.exe) | Windows 10/11 64 位 |
+| macOS `arm64` | [下载 DMG](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.3-trial-7days/SecFlow-v1.3.3-macOS-ARM64-Trial-7Days.dmg) | Apple Silicon Mac |
+| macOS `x86_64` | [下载 DMG](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/download/v1.3.3-trial-7days/SecFlow-v1.3.3-macOS-x86_64-Trial-7Days.dmg) | Intel Mac |
 
-正式版与试用版使用不同应用标识和本地端口，可以并存。GitHub Release 仅提供 7 天试用版；无限期正式版不上传公开仓库。完整变更与验证结果见 [v1.3.1 发行说明](docs/RELEASE_NOTES_v1.3.1.md)，安装包校验值见 [SHA-256 清单](docs/RELEASE_CHECKSUMS_v1.3.1.md)。
+正式版与试用版使用不同应用标识和本地端口，可以并存。GitHub Release 仅提供 7 天试用版；无限期正式版不上传公开仓库。Windows 试用版已在 Parallels Desktop 的 Windows 11 中完成安装、首次引导、健康检查、双 Worker 和父进程退出验收。完整变更见 [v1.3.3 发行说明](docs/RELEASE_NOTES_v1.3.3.md)，安装包校验值见 [SHA-256 清单](docs/RELEASE_CHECKSUMS_v1.3.3.md)。
 
-### 新版界面
+### 功能演示
 
-| 主工作区 | 内置 Agent / Skills / MCP | 报告链路 |
+| 首次配置 | 工作区、漏洞情报与漏洞库 | Agent、Skills 与 MCP |
 | --- | --- | --- |
-| ![SecFlow v1.3.1 主工作区](docs/assets/secflow-v1.3.1-home.png) | ![SecFlow v1.3.1 内置能力](docs/assets/secflow-v1.3.1-capabilities.png) | ![SecFlow v1.3.1 报告链路](docs/assets/secflow-v1.3.1-report.png) |
+| ![SecFlow v1.3.3 首次配置](docs/assets/demos/secflow-macos-onboarding.gif) | ![SecFlow v1.3.3 工作区](docs/assets/demos/secflow-macos-workspace.gif) | ![SecFlow v1.3.3 客户端能力](docs/assets/demos/secflow-macos-capabilities.gif) |
+
+### 源码架构
+
+![SecFlow v1.3.3 源码架构图](docs/assets/secflow-architecture-v1.3.3.png)
+
+详细边界见 [架构文档](docs/ARCHITECTURE.md)、[产品功能文档](docs/PRODUCT_FEATURES.md) 与 [API 接口文档](docs/API_REFERENCE.md)。机器可读 OpenAPI 位于 [docs/openapi.json](docs/openapi.json)。
 
 ## 历史 macOS 双架构试用版
 

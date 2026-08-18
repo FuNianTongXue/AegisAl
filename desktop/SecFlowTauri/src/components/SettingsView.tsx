@@ -24,7 +24,6 @@ import {
   MessagesSquare,
   Moon,
   Palette,
-  Plus,
   RefreshCcw,
   Save,
   Search,
@@ -42,10 +41,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CLIENT_LANGUAGES, type ClientLocale, translate, useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { providerPresets } from "../lib/modelControls";
+import { configForProvider, providerPresets, selectedProviderId } from "../lib/modelControls";
 import { handleWindowDrag } from "../lib/windowDrag";
 import { useAppStore } from "../store/appStore";
 import type { ClientCapabilityCatalog, InformationSnapshot, InformationSource, LlmConfig, ModelUsageSnapshot, UserProfile } from "../types";
+import { ModelProviderPicker } from "./ModelProviderPicker";
+import { ModelSelectControl } from "./ModelSelectControl";
 import { ProfileAvatar } from "./ProfileAvatar";
 import { WizardProgress } from "./WizardProgress";
 
@@ -317,14 +318,15 @@ function ModelSettings() {
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(true);
   const [showKey, setShowKey] = useState(false);
-  const [addingModel, setAddingModel] = useState(false);
-  const [newModel, setNewModel] = useState("");
   const [activePanel, setActivePanel] = useState<"provider" | "model" | "credential" | "advanced">("provider");
   useEffect(() => { if (state.llm) setConfig(state.llm); }, [state.llm]);
-  const update = (key: keyof LlmConfig, value: string | number | boolean) => setConfig((current) => ({ ...current, [key]: value }));
+  const update = (key: keyof LlmConfig, value: string | number | boolean) => {
+    setConfig((current) => ({ ...current, [key]: value }));
+    if (key === "model" || key === "endpoint" || key === "api_key") setStatus("");
+  };
   const loadModels = async () => { setBusy(true); setStatus("正在从模型厂商接口读取模型"); try { const result = await api.modelCatalog(state.userId, config); setModels(result.models || []); setStatus(`已读取 ${result.models?.length || 0} 个模型`); } catch (error) { setStatus(String(error)); } finally { setBusy(false); } };
   const test = async (targetConfig = config) => { setBusy(true); try { const result = await api.testLlmConfig(state.userId, targetConfig); if (result.status !== "success" || result.configured === false) throw new Error(result.message || "模型连接测试失败"); setStatus(result.latency_ms ? `模型连接正常 · ${result.latency_ms}ms` : "模型连接正常"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
-  const save = async () => { setBusy(true); setStatus("正在验证模型连接"); try { const nextConfig = { ...config, enabled: config.enabled !== false }; await api.testLlmConfig(state.userId, nextConfig); const result = await api.saveLlmConfig(state.userId, nextConfig); state.set({ llm: result }); setConfig(result); setLocked(true); setShowKey(false); setAddingModel(false); setStatus(result.enabled ? "模型配置已验证、保存并启用" : "模型配置已验证、保存并停用"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
+  const save = async () => { setBusy(true); setStatus("正在验证模型连接"); try { const nextConfig = { ...config, enabled: config.enabled !== false }; await api.testLlmConfig(state.userId, nextConfig); const result = await api.saveLlmConfig(state.userId, nextConfig); state.set({ llm: result }); setConfig(result); setLocked(true); setShowKey(false); setStatus(result.enabled ? "模型配置已验证、保存并启用" : "模型配置已验证、保存并停用"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
   const handleLockAction = () => {
     if (locked) {
       setLocked(false);
@@ -333,11 +335,13 @@ function ModelSettings() {
     }
     void save();
   };
-  const chooseProvider = (provider: string) => { const preset = providerPresets.find((item) => item.id === provider); const backendProvider = ["openai", "claude", "deepseek", "custom"].includes(provider) ? provider : "custom"; setConfig((current) => ({ ...current, provider: backendProvider, catalog_provider: provider, endpoint: preset?.endpoint || (provider === "custom" ? current.endpoint : ""), model: preset?.models?.[0] || current.model, wire_api: provider === "openai" ? "responses" : "chat" })); };
-  const addModel = () => { const clean = newModel.trim(); if (!clean) return; setModels((current) => [{ id: clean }, ...current.filter((item) => item.id !== clean)]); update("model", clean); setNewModel(""); setAddingModel(false); };
-  const selectedProvider = config.provider === "custom" && config.catalog_provider && config.catalog_provider !== "custom" ? config.catalog_provider : config.provider;
+  const chooseProvider = (provider: string) => {
+    setConfig((current) => configForProvider(current, provider));
+    setModels([]);
+    setStatus("");
+  };
+  const selectedProvider = selectedProviderId(config);
   const preset = providerPresets.find((item) => item.id === selectedProvider);
-  const modelOptions = Array.from(new Set([...(preset?.models || []), ...models.map((item) => item.id), ...(config.model ? [config.model] : [])]));
   const panels = [
     { id: "provider" as const, label: "选择厂商", description: preset?.label || "选择接入来源", icon: <Server />, complete: Boolean(selectedProvider) },
     { id: "model" as const, label: "选择模型", description: config.model || "指定模型 ID", icon: <Sparkles />, complete: Boolean(config.model) },
@@ -372,31 +376,13 @@ function ModelSettings() {
             {activePanel === "provider" ? (
               <div className="model-panel-section">
                 <div className="model-panel-heading"><div><Server /><span><strong>选择模型厂商</strong><small>厂商模板会自动填充官方地址和推荐模型。</small></span></div></div>
-                <div className="provider-cards">
-                  {providerPresets.map((provider) => (
-                    <button type="button" key={provider.id} className={`provider-card ${selectedProvider === provider.id ? "active" : ""}`} onClick={() => chooseProvider(provider.id)}>
-                      <span className="provider-card-name">{provider.label}{(provider.badge || selectedProvider === provider.id) ? <span className="provider-card-flags">{provider.badge ? <span className={`badge ${provider.badge === "推荐" ? "badge-amber" : "badge-navy"}`}>{provider.badge}</span> : null}{selectedProvider === provider.id ? <Check strokeWidth={3} /> : null}</span> : null}</span>
-                      <span className="provider-card-host">{provider.consoleHost || "自定义接入地址"}</span>
-                    </button>
-                  ))}
-                </div>
+                <ModelProviderPicker value={selectedProvider} onChange={chooseProvider} disabled={busy} />
               </div>
             ) : null}
             {activePanel === "model" ? (
               <div className="model-panel-section compact">
                 <div className="model-panel-heading"><div><Sparkles /><span><strong>选择可用模型</strong><small>读取厂商模型，或手动加入兼容的模型 ID。</small></span></div></div>
-                <div className="model-select-row">
-                  <select aria-label="选择模型" value={config.model || ""} onChange={(event) => update("model", event.target.value)}>
-                    <option value="">请选择模型</option>
-                    {modelOptions.map((id) => <option key={id} value={id}>{id}</option>)}
-                  </select>
-                  <div className={`model-select-actions ${addingModel ? "adding" : ""}`}>
-                    <button type="button" className="secondary" onClick={() => void loadModels()} disabled={busy}><RefreshCcw size={14} />从厂商读取</button>
-                    {addingModel ? (
-                      <div className="add-model-form"><input autoFocus value={newModel} placeholder="输入模型 ID" onChange={(event) => setNewModel(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addModel(); if (event.key === "Escape") setAddingModel(false); }} /><button type="button" onClick={addModel}>添加</button></div>
-                    ) : <button type="button" className="add-model-button" onClick={() => setAddingModel(true)}><Plus size={14} />添加模型</button>}
-                  </div>
-                </div>
+                <ModelSelectControl config={config} models={models} busy={busy} onModelChange={(model) => update("model", model)} onLoadModels={() => void loadModels()} />
               </div>
             ) : null}
             {activePanel === "credential" ? (

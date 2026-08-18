@@ -1,36 +1,83 @@
-import { Clock3, ShieldAlert } from "lucide-react";
+import { Clock3, RefreshCw, ServerCrash, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { waitForBackendReady } from "../hooks/useBackend";
 import { api } from "../lib/api";
+import { restartLocalBackend } from "../lib/backendRecovery";
 import type { TrialStatus } from "../types";
 
 export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
   const trialBuild = import.meta.env.VITE_SECFLOW_TRIAL_BUILD === "1";
   const [status, setStatus] = useState<TrialStatus | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [retrySequence, setRetrySequence] = useState(0);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     if (!trialBuild) return;
     let disposed = false;
+    let retryTimer: number | undefined;
+    setChecking(true);
     void waitForBackendReady()
       .then(() => api.trialStatus())
       .then((next) => {
-        if (!disposed) setStatus(next);
+        if (!disposed) {
+          setLoadError("");
+          setStatus(next);
+        }
       })
       .catch((error) => {
-        if (!disposed) setLoadError(error instanceof Error ? error.message : String(error));
+        if (!disposed) {
+          setLoadError(error instanceof Error ? error.message : String(error));
+          // A cold sidecar can be delayed by Gatekeeper, Rosetta or antivirus
+          // inspection. Keep probing instead of permanently classifying a
+          // transient connection failure as a damaged trial authorization.
+          retryTimer = window.setTimeout(() => {
+            void restartLocalBackend()
+              .catch((restartError) => console.error("SecFlow automatic backend restart failed", restartError))
+              .finally(() => setRetrySequence((value) => value + 1));
+          }, 5_000);
+        }
+      })
+      .finally(() => {
+        if (!disposed) setChecking(false);
       });
     return () => {
       disposed = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [trialBuild]);
+  }, [retrySequence, trialBuild]);
+
+  const retry = () => {
+    setLoadError("");
+    setStatus(null);
+    setChecking(true);
+    void restartLocalBackend()
+      .catch((error) => console.error("SecFlow local backend restart failed", error))
+      .finally(() => setRetrySequence((value) => value + 1));
+  };
 
   if (!trialBuild) return null;
   if (!status && !loadError) {
     return <div className="trial-status-chip loading" role="status"><Clock3 size={14} />正在验证试用授权</div>;
   }
-  if (!status || !status.usable) {
+  if (!status) {
+    return (
+      <div className="trial-blocker service-unavailable" role="alert" aria-label="本地安全服务不可用">
+        <div>
+          <span><ServerCrash size={24} /></span>
+          <h2>本地安全服务正在恢复</h2>
+          <p>暂时无法连接本机分析服务。这不代表试用授权或用户数据已损坏。</p>
+          <button type="button" className="trial-retry-button" onClick={retry} disabled={checking}>
+            <RefreshCw size={15} className={checking ? "spinning" : ""} />
+            {checking ? "正在重新连接" : "重新连接"}
+          </button>
+          <small>客户端会自动继续尝试。若多次失败，请重启应用并检查安全软件是否拦截了本地 sidecar。</small>
+        </div>
+      </div>
+    );
+  }
+  if (!status.usable) {
     return (
       <div className="trial-blocker" role="alert" aria-label="试用授权不可用">
         <div>

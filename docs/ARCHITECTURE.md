@@ -5,16 +5,20 @@
 | 项目 | 内容 |
 | --- | --- |
 | 产品 | SecFlow Knowledge Security Assistant / 安全智脑 |
-| 版本 | 1.3.1（企业报表与跨平台发布基线） |
+| 版本 | 1.3.3（跨平台生命周期与七天试用发布基线） |
 | 客户端 | Tauri 2 + React/TypeScript；保留 SwiftUI 兼容实现 |
 | 后端 | Python 3、FastAPI、LangGraph |
-| 桌面通信 | `http://127.0.0.1:18781` |
-| Bundle ID | `ai.secflow.knowledge-assistant` |
-| 文档基线 | Git `e546d30425616eeb58b151e793b1d01bd6523da0` 加当前工作树快照 |
+| 桌面通信 | 正式版 `127.0.0.1:18781`；试用版 `127.0.0.1:18783` |
+| 应用标识 | 正式版 `ai.secflow.security-agent`；试用版 `ai.secflow.security-agent.trial7days` |
+| 文档基线 | 2026-08-18 v1.3.3 发布源码快照 |
 
 ## 2. 总体架构
 
-v1.3.1 的企业报告链路采用单一事实源：Scanner、Analysis、RAG、Report Planner、Chart Planner、AI Writer 与 QA Agent 只生成或校验一份 `Unified Report JSON`；Template、Chart、Report、Word、Excel、PDF、HTML、Markdown 和 SARIF MCP 均消费这份冻结数据。平台适配器只处理字体、保存对话框、打开方式和预览，不改变报告事实。
+v1.3.3 的企业报告链路采用单一事实源：Scanner、Analysis、RAG、Report Planner、Chart Planner、AI Writer 与 QA Agent 只生成或校验一份 `Unified Report JSON`；Template、Chart、Report、Word、Excel、PDF、HTML、Markdown 和 SARIF MCP 均消费这份冻结数据。平台适配器只处理字体、保存对话框、打开方式和预览，不改变报告事实。
+
+![SecFlow v1.3.3 源码架构图](assets/secflow-architecture-v1.3.3.png)
+
+> 已将本章的抽象模块、协议和数据流作为提示词提交给 MedPeer 科研绘图；试用账号因平台研值前置条件未返回图片，且免费研值任务要求补充真实个人资料后审核。当前 PNG 由同一份抽象描述通过本地 [Graphviz 源文件](assets/secflow-architecture-v1.3.3.dot) 生成，不冒充 MedPeer 产物。提交给第三方的内容不包含源码、密钥、用户目录或运行数据。
 
 ```text
 Unified Report JSON
@@ -112,6 +116,8 @@ flowchart LR
 
 - `desktop/SecFlowTauri` 是第三阶段主客户端，React 只处理视图和本地交互状态，扫描、报告和 Agent 决策仍由 Python LangGraph 完成。
 - Rust 宿主通过 Tauri `externalBin` 启动 FastAPI sidecar，显式注入应用数据目录、Semgrep 可执行文件和离线规则目录，并在应用退出时终止子进程。
+- Rust 宿主把 `CARGO_PKG_VERSION` 注入 `SECFLOW_APP_VERSION`，保证安装包、关于页和 OpenAPI 使用同一个版本号。
+- Windows 不创建 macOS 专属透明资讯窗口和状态栏入口；父进程存活探测使用 Win32 `OpenProcess` / `WaitForSingleObject`，宿主被强制终止后 sidecar 会退出。
 - 问答正文按 50 ms 合并 SSE 分片；任务先读快照，再按 `sequence` 合并事件，终态事件后重新读取完整结果。
 - 侧栏使用固定 72 px 布局轨道和覆盖式悬停展开，展开时不修改主工作区网格宽度，避免复杂聊天页面发生连续布局重排。
 - UI 只采用真实 21st.dev `人工智能前端` 收藏清单中的 Advanced Stats、Card、Chatgpt Prompt Input 和 AI Planning 四种信息结构；映射、ZCode 取舍、E2E 和打包说明见 [第三阶段基线](TAURI_PHASE3.md)。

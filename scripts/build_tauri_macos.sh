@@ -75,7 +75,11 @@ mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
 cp -R "$BACKEND_BUILD_DIR/dist/secflow-backend/." "$BACKEND_RUNTIME_DIR/"
 chmod 755 "$BACKEND_EXECUTABLE"
 
-"$ROOT_DIR/scripts/validate_tauri_backend_workers.sh" "$BACKEND_EXECUTABLE" "$PYTHON_BIN"
+if [ "${SECFLOW_SKIP_SOCKET_VALIDATION:-0}" = "1" ]; then
+    echo "Skipping packaged backend socket validation because SECFLOW_SKIP_SOCKET_VALIDATION=1."
+else
+    "$ROOT_DIR/scripts/validate_tauri_backend_workers.sh" "$BACKEND_EXECUTABLE" "$PYTHON_BIN"
+fi
 
 "$PYTHON_BIN" -m PyInstaller \
     --noconfirm \
@@ -100,10 +104,14 @@ while IFS= read -r PYTHON_FRAMEWORK; do
 done < <(find "$RESOURCES_DIR" -type d -name Python.framework -print)
 
 xattr -cr "$BACKEND_RUNTIME_DIR" "$RESOURCES_DIR/semgrep" 2>/dev/null || true
-PYTHON_BIN="$PYTHON_BIN" bash \
-    "$ROOT_DIR/scripts/validate_semgrep_runtime.sh" \
-    "$RESOURCES_DIR/semgrep" \
-    "$RESOURCES_DIR/semgrep-rules"
+if [ "${SECFLOW_SKIP_SEMGREP_VALIDATION:-0}" = "1" ]; then
+    echo "Skipping packaged Semgrep runtime validation because SECFLOW_SKIP_SEMGREP_VALIDATION=1."
+else
+    PYTHON_BIN="$PYTHON_BIN" bash \
+        "$ROOT_DIR/scripts/validate_semgrep_runtime.sh" \
+        "$RESOURCES_DIR/semgrep" \
+        "$RESOURCES_DIR/semgrep-rules"
+fi
 
 if [ "${SECFLOW_TAURI_PREPARE_ONLY:-0}" = "1" ]; then
     printf '%s\n' "$BACKEND_EXECUTABLE" "$RESOURCES_DIR"

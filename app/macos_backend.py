@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import sys
 import threading
 import time
 
-import uvicorn
-
 
 def main() -> None:
+    import uvicorn
+
     if "--task-worker" in sys.argv:
         from app.agent.task_worker import main as task_worker_main
 
@@ -60,12 +61,24 @@ def _watch_parent(parent_pid: int, server: uvicorn.Server) -> None:
 def _process_is_alive(process_id: int) -> bool:
     if process_id <= 1:
         return False
+    if sys.platform == "win32":
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, process_id)
+        if not handle:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
     try:
         os.kill(process_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
     return True
 
 

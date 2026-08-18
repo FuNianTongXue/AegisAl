@@ -1,4 +1,6 @@
 -r requirements.txt
 pyinstaller>=6.14.0
 pywebview>=5.4,<7.0
+pywin32>=308
 semgrep==1.170.0
+tzdata>=2025.2

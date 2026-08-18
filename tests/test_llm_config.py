@@ -8,6 +8,7 @@ from unittest.mock import patch
 from app.llm import (
     _fetch_provider_models,
     active_model_from_env,
+    chat_readiness_error,
     diagnose_chat_completion,
     list_llm_models,
     llm_public_config,
@@ -17,6 +18,36 @@ from app.storage import StateStore, default_state
 
 
 class LLMConfigTests(unittest.TestCase):
+    def test_ollama_catalog_uses_local_models_without_an_api_key(self) -> None:
+        active_model = {
+            "name": "Ollama:qwen3:8b",
+            "provider": "custom",
+            "catalogProvider": "ollama",
+            "model": "qwen3:8b",
+            "endpoint": "http://localhost:11434/v1",
+            "apiKey": "",
+        }
+        self.assertEqual(chat_readiness_error(active_model), "")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("app.llm.store", local_store),
+                patch("app.llm._fetch_provider_models") as fetch_models,
+            ):
+                fetch_models.return_value = [{"id": "qwen3:8b", "name": "qwen3:8b"}]
+                catalog = list_llm_models(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "ollama",
+                        "endpoint": "http://localhost:11434/v1",
+                    }
+                )
+
+        fetch_models.assert_called_once_with("ollama", "http://localhost:11434/v1", "", 30.0)
+        self.assertEqual(catalog["source"], "provider")
+        self.assertEqual(catalog["models"][0]["id"], "qwen3:8b")
+
     def test_public_config_exposes_only_reasoning_levels_supported_by_the_selected_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             local_store = StateStore(Path(temp_dir) / "state.json")

@@ -4,8 +4,8 @@
 
 | 项目 | 值 |
 | --- | --- |
-| API 版本 | 应用版本 1.2.0；macOS 契约 `2026-07-subscriptions-v1` |
-| 桌面 Base URL | `http://127.0.0.1:18781` |
+| API 版本 | 应用版本 1.3.3；桌面契约 `2026-07-subscriptions-v1` |
+| 桌面 Base URL | 正式版 `http://127.0.0.1:18781`；试用版 `http://127.0.0.1:18783` |
 | 开发 Base URL | `http://127.0.0.1:8000`（示例） |
 | 默认 Content-Type | `application/json` |
 | OpenAPI | `openapi.json`，运行时也可访问 `/openapi.json` |
@@ -32,7 +32,7 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 
 ## 3. 接口总览
 
-当前 OpenAPI 包含 67 个路径、77 个 HTTP 操作和 30 个 Schema。
+当前 OpenAPI 包含 78 个路径、88 个 HTTP 操作和 33 个 Schema，完整机器可读契约见同目录 `openapi.json`。
 
 ### 3.1 基础与试用
 

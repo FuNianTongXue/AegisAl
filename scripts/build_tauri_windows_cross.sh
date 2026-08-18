@@ -9,7 +9,15 @@ BUILD_ROOT="${SECFLOW_WINDOWS_CROSS_BUILD_ROOT:-${TMPDIR:-/tmp}/secflow-windows-
 PYTHON_ARCHIVE="$BUILD_ROOT/python-windows-x86_64.tar.gz"
 PYTHON_URL="${SECFLOW_WINDOWS_PYTHON_URL:-https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.11.15%2B20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz}"
 EDITION="${1:-formal}"
-VERSION="1.3.1"
+VERSION="$(python3 - "$TAURI_DIR/package.json" <<'PY'
+import json
+import pathlib
+import sys
+
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
+PY
+)"
+[ -n "$VERSION" ] || { echo "Unable to read client version from desktop/SecFlowTauri/package.json" >&2; exit 1; }
 
 case "$EDITION" in
     formal) BACKEND_PORT=18781; TRIAL_BUILD=0; EDITION_LABEL="Formal" ;;
@@ -43,6 +51,13 @@ python3 -m pip install \
     -r "$ROOT_DIR/requirements-windows-cross.txt" \
     'cryptography<46' \
     'semgrep==1.170.0'
+
+PYWIN32_PTH="$RESOURCES_DIR/backend/Lib/site-packages/pywin32.pth"
+PYWIN32_TYPES_DLL="$(find "$RESOURCES_DIR/backend/Lib/site-packages" -type f -iname 'pywintypes*.dll' -print -quit)"
+TZDATA_SHANGHAI="$RESOURCES_DIR/backend/Lib/site-packages/tzdata/zoneinfo/Asia/Shanghai"
+[ -f "$PYWIN32_PTH" ] || { echo "Missing pywin32.pth in the bundled Windows runtime" >&2; exit 1; }
+[ -n "$PYWIN32_TYPES_DLL" ] || { echo "Missing pywintypes DLL in the bundled Windows runtime" >&2; exit 1; }
+[ -f "$TZDATA_SHANGHAI" ] || { echo "Missing Asia/Shanghai tzdata in the bundled Windows runtime" >&2; exit 1; }
 
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
     CARGO_HTTP_PROXY='' cargo xwin build \

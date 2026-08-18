@@ -1,16 +1,14 @@
 import { ArrowLeft, ArrowRight, Check, KeyRound, LoaderCircle, Lock, UserRound } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { api } from "../lib/api";
-import { providerPresets } from "../lib/modelControls";
+import { configForProvider, selectedProviderId } from "../lib/modelControls";
 import { useAppStore } from "../store/appStore";
 import type { LlmConfig, UserProfile } from "../types";
 import { BrandMark } from "./BrandMark";
+import { ModelProviderPicker } from "./ModelProviderPicker";
+import { ModelSelectControl } from "./ModelSelectControl";
 import { WizardProgress } from "./WizardProgress";
-
-const setupProviders = providerPresets.filter((provider) =>
-  ["openai", "claude", "deepseek", "custom"].includes(provider.id),
-);
 
 const roles = ["安全分析师", "安全工程师", "研发工程师", "安全负责人", "审计人员"];
 const setupSteps = [
@@ -38,11 +36,8 @@ export function InitialSetupView() {
   const [busy, setBusy] = useState(false);
   const [verified, setVerified] = useState(false);
   const [status, setStatus] = useState("");
-  const preset = setupProviders.find((item) => item.id === config.provider);
-  const models = useMemo(
-    () => Array.from(new Set([...(preset?.models || []), ...(config.model ? [config.model] : [])])),
-    [config.model, preset],
-  );
+  const [models, setModels] = useState<Array<{ id: string; name?: string }>>([]);
+  const selectedProvider = selectedProviderId(config);
 
   const updateProfile = (key: keyof UserProfile, value: string) => {
     setProfile((current) => ({ ...current, [key]: value }));
@@ -53,14 +48,24 @@ export function InitialSetupView() {
     setStatus("");
   };
   const chooseProvider = (provider: string) => {
-    const next = setupProviders.find((item) => item.id === provider);
-    updateConfig({
-      provider,
-      catalog_provider: provider,
-      endpoint: next?.endpoint || "",
-      model: next?.models[0] || "",
-      wire_api: provider === "openai" ? "responses" : "chat",
-    });
+    setConfig((current) => configForProvider(current, provider));
+    setModels([]);
+    setVerified(false);
+    setStatus("");
+  };
+
+  const loadModels = async () => {
+    setBusy(true);
+    setStatus("正在从模型厂商接口读取模型…");
+    try {
+      const result = await api.modelCatalog(state.userId, config);
+      setModels(result.models || []);
+      setStatus(`已读取 ${result.models?.length || 0} 个模型`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const saveProfile = async () => {
@@ -141,17 +146,19 @@ export function InitialSetupView() {
             ) : (
               <form onSubmit={(event) => { event.preventDefault(); void finish(); }}>
                 <div className="initial-setup-heading"><KeyRound /><div><h2>接入模型</h2><p>选择厂商、填写凭证，并在保存前验证模型可用性。</p></div></div>
-                <div className="initial-provider-row">
-                  {setupProviders.map((provider) => <button type="button" className={config.provider === provider.id ? "active" : ""} key={provider.id} onClick={() => chooseProvider(provider.id)}><span>{provider.label}</span>{config.provider === provider.id ? <Check /> : null}</button>)}
+                <div className="initial-model-stack">
+                  <section className="initial-model-section">
+                    <div className="initial-model-section-heading"><strong>选择模型厂商</strong><small>与设置页使用同一份厂商目录和映射规则。</small></div>
+                    <ModelProviderPicker value={selectedProvider} onChange={chooseProvider} disabled={busy} className="initial-provider-cards" />
+                  </section>
+                  <section className="initial-model-section">
+                    <div className="initial-model-section-heading"><strong>选择可用模型</strong><small>可读取厂商目录，也可添加兼容的模型 ID。</small></div>
+                    <ModelSelectControl key={selectedProvider} config={config} models={models} busy={busy} onModelChange={(model) => updateConfig({ model })} onLoadModels={() => void loadModels()} />
+                  </section>
                 </div>
-                <div className="settings-form-grid">
+                <div className="settings-form-grid initial-credential-grid">
                   <label>Base URL<input required value={config.endpoint} onChange={(event) => updateConfig({ endpoint: event.target.value })} /></label>
-                  <label>模型{config.provider === "custom" ? (
-                    <input required value={config.model} placeholder="输入兼容接口的模型 ID" onChange={(event) => updateConfig({ model: event.target.value })} />
-                  ) : (
-                    <select value={config.model} onChange={(event) => updateConfig({ model: event.target.value })}>{models.map((model) => <option key={model}>{model}</option>)}</select>
-                  )}</label>
-                  <label className="wide">API Key<input required={!config.api_key_configured} type="password" value={config.api_key || ""} placeholder={config.api_key_configured ? "已配置，留空保持不变" : "输入模型厂商 API Key"} onChange={(event) => updateConfig({ api_key: event.target.value })} /></label>
+                  <label>API Key<input required={selectedProvider !== "ollama" && !config.api_key_configured} type="password" value={config.api_key || ""} placeholder={selectedProvider === "ollama" ? "本地 Ollama 无需密钥" : config.api_key_configured ? "已配置，留空保持不变" : "输入模型厂商 API Key"} onChange={(event) => updateConfig({ api_key: event.target.value })} /></label>
                 </div>
                 <footer>
                   <button className="ghost" type="button" onClick={() => { setStep(1); setStatus(""); }} disabled={busy}><ArrowLeft />返回</button>

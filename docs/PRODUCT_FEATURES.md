@@ -6,7 +6,7 @@ SecFlow 是面向安全分析师、研发人员和安全运营团队的本地优
 
 当前智能体运行时采用 Multi-Agent Supervisor：由 Supervisor 理解开放式目标，再交接给 Project Context、Code Scan、Component Intelligence、SBOM、Vulnerability Intelligence、Report 或 Security Conversation Agent，最后由 Result Aggregator 统一输出。每个 Agent 使用独立能力和工具白名单，并保留可审计 handoff；这不是将普通 LangGraph 节点简单改名为 Agent。
 
-当前版本为 1.2.0 内测版，最低支持 macOS 14.0。
+当前发布版本为 1.3.3，提供 Windows 10/11 x86_64、macOS Apple Silicon 与 macOS Intel 客户端。macOS 最低支持 14.0；试用版从首次成功启动起连续可用 7 天。
 
 ## 2. 核心用户流程
 
@@ -141,11 +141,10 @@ SecFlow 是面向安全分析师、研发人员和安全运营团队的本地优
 
 ### 3.9 模型配置
 
-- 登录后设置采用 6 步向导：用户资料、角色、模型厂商、具体模型、连接信息、验证完成。
+- Tauri 客户端首次设置采用两步向导：本机用户资料、模型接入与连接验证。
 - 新账号从资料开始；资料已完成但模型缺失时从模型厂商继续；资料和模型都有效的已有账号直接进入工作区。
 - 昵称、部门和角色保存成功后才能进入模型步骤；模型连接测试成功后才能加密保存并启用。
-- 登录账号由当前登录信息带入且不可在向导中修改，退出或切换账号会清空未保存的向导草稿。
-- 支持 OpenAI、Anthropic Claude、DeepSeek 和 OpenAI 兼容自定义端点。
+- 支持 Moonshot Kimi、OpenAI、Anthropic Claude、DeepSeek、Ollama 本地模型和 OpenAI 兼容自定义端点。
 - 模型下拉框优先通过各提供商官方模型 API 拉取，失败时使用内置目录和手工模型名。
 - 可配置端点、API Key、最大 Token、temperature、top_p、超时、wire API 和推理强度。
 - 保存前可测试连接；界面不会回显完整 API Key。

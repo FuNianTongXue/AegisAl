@@ -4,7 +4,10 @@ import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
 import type { AgentTask, AgentTaskEvent, HealthSnapshot } from "../types";
 
-const BACKEND_READY_TIMEOUT_MS = 45_000;
+// First launch may require Gatekeeper, Rosetta or antivirus to inspect the
+// bundled Python runtime. Do not turn a healthy but slow cold start into a
+// permanent trial-lock screen.
+const BACKEND_READY_TIMEOUT_MS = 120_000;
 let backendReadyRequest: Promise<HealthSnapshot> | null = null;
 
 export function useBackendBootstrap() {
