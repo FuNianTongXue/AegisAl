@@ -59,6 +59,16 @@ describe("PromptComposer project attachment", () => {
     expect(useAppStore.getState().activeTaskId).toBe("task-from-old-project");
   });
 
+  it("gives the primary prompt and icon-only send action accessible names", async () => {
+    render(<PromptComposer busy={false} onSubmit={vi.fn()} onStop={vi.fn()} />);
+    await act(async () => undefined);
+
+    const prompt = screen.getByRole("textbox", { name: "描述需要对该项目执行的安全任务" });
+    expect(prompt).toHaveAttribute("name", "assistant-prompt");
+    expect(prompt).toHaveAttribute("autocomplete", "off");
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+  });
+
   it("submits the attachment with the message and clears the chip afterwards", async () => {
     const onSubmit = vi.fn().mockReturnValue(true);
     render(<PromptComposer busy={false} onSubmit={onSubmit} onStop={vi.fn()} />);
@@ -109,6 +119,89 @@ describe("PromptComposer project attachment", () => {
     act(() => handlers.onError("请拖入一个完整的项目目录，不能只拖入单个文件。"));
 
     expect(screen.getByRole("alert")).toHaveTextContent("请拖入一个完整的项目目录");
+  });
+
+  it("uses APG keyboard navigation and restores focus for the model menu", async () => {
+    useAppStore.setState({
+      llm: {
+        provider: "openai",
+        endpoint: "https://api.openai.com/v1",
+        model: "gpt-5.6-sol",
+        max_tokens: 8192,
+        timeout_ms: 120000,
+        enabled: true,
+        wire_api: "responses",
+        reasoning_effort: "medium",
+      },
+    });
+    render(<PromptComposer busy={false} onSubmit={vi.fn()} onStop={vi.fn()} />);
+    await act(async () => undefined);
+
+    const trigger = screen.getByRole("button", { name: "gpt-5.6-sol" });
+    fireEvent.click(trigger);
+
+    const selected = screen.getByRole("menuitemradio", { name: /^gpt-5\.6-sol/ });
+    expect(selected).toHaveFocus();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(trigger).toHaveAttribute("aria-controls", screen.getByRole("menu", { name: "选择模型" }).id);
+
+    fireEvent.keyDown(selected, { key: "ArrowDown" });
+    expect(screen.getByRole("menuitemradio", { name: /^gpt-5\.6\s/ })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "End" });
+    expect(screen.getByRole("menuitem", { name: "管理模型接入" })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "Home" });
+    expect(selected).toHaveFocus();
+    fireEvent.keyDown(selected, { key: "ArrowUp" });
+    expect(screen.getByRole("menuitem", { name: "管理模型接入" })).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.keyDown(trigger, { key: "ArrowUp" });
+    expect(screen.getByRole("menuitem", { name: "管理模型接入" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(screen.getByRole("menuitemradio", { name: /^gpt-5\.6-sol/ })).toHaveFocus();
+  });
+
+  it("navigates reasoning options and lets Tab leave the open menu", async () => {
+    useAppStore.setState({
+      llm: {
+        provider: "openai",
+        endpoint: "https://api.openai.com/v1",
+        model: "gpt-5.6-sol",
+        max_tokens: 8192,
+        timeout_ms: 120000,
+        enabled: true,
+        wire_api: "responses",
+        reasoning_effort: "medium",
+      },
+    });
+    render(<PromptComposer busy={false} onSubmit={vi.fn()} onStop={vi.fn()} />);
+    await act(async () => undefined);
+
+    const modelTrigger = screen.getByRole("button", { name: "gpt-5.6-sol" });
+    const reasoningButton = screen.getByRole("button", { name: "选择推理强度" });
+    fireEvent.click(reasoningButton);
+
+    const selected = screen.getByRole("menuitemradio", { name: /^中推理/ });
+    expect(selected).toHaveFocus();
+    fireEvent.keyDown(selected, { key: "ArrowDown" });
+    expect(screen.getByRole("menuitemradio", { name: /^高推理/ })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "End" });
+    expect(screen.getByRole("menuitemradio", { name: /^最大推理/ })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "Home" });
+    expect(screen.getByRole("menuitemradio", { name: /^标准/ })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(reasoningButton).toHaveFocus();
+
+    fireEvent.click(reasoningButton);
+    const reopenedSelected = screen.getByRole("menuitemradio", { name: /^中推理/ });
+    expect(reopenedSelected).toHaveFocus();
+    fireEvent.keyDown(reopenedSelected, { key: "Tab", shiftKey: true });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(modelTrigger).toHaveFocus();
   });
 
   it("offers model-specific reasoning levels and persists the selected effort", async () => {

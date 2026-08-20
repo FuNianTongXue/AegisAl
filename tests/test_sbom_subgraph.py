@@ -192,9 +192,14 @@ class SBOMDocumentTests(unittest.TestCase):
         self.assertEqual(matching["unresolved_version_count"], 1)
         self.assertEqual(matching["vulnerability_count"], 1)
         self.assertEqual(len(enriched["vulnerabilities"][0]["affects"]), 1)
-        self.assertIn("漏洞", matching["records"][0]["summary_zh"])
-        self.assertNotEqual(matching["records"][0]["summary_zh"], matching["records"][0]["summary"])
-        self.assertIn("漏洞", enriched["vulnerabilities"][0]["description"])
+        localized_summary = matching["records"][0]["summary_zh"]
+        localized_description = enriched["vulnerabilities"][0]["description"]
+        for localized in (localized_summary, localized_description):
+            self.assertRegex(localized, r"[\u3400-\u9fff]")
+            self.assertIn("JNDI", localized)
+            self.assertIn("Log4j", localized)
+            self.assertNotIn("JNDI lookup injection in vulnerable Log4j versions.", localized)
+        self.assertNotEqual(localized_summary, matching["records"][0]["summary"])
         self.assertEqual(enriched["vulnerabilities"][0]["source"]["name"], "OSV 开源漏洞数据库")
         self.assertEqual(
             next(
@@ -260,7 +265,8 @@ class SBOMDocumentTests(unittest.TestCase):
             self.assertIn("风险等级", vulnerability_sheet_text)
             self.assertIn("严重", vulnerability_sheet_text)
             self.assertNotIn("CRITICAL", vulnerability_sheet_text)
-            self.assertIn("严重漏洞", vulnerability_sheet_text)
+            self.assertIn("JNDI", vulnerability_sheet_text)
+            self.assertIn("Log4j", vulnerability_sheet_text)
             self.assertIn("OSV 开源漏洞数据库", vulnerability_sheet_text)
             self.assertNotIn("JNDI lookup injection in vulnerable Log4j versions.", vulnerability_sheet_text)
             self.assertNotIn("SecFlow vulnerability intelligence", vulnerability_sheet_text)
@@ -286,7 +292,8 @@ class SBOMSubgraphTests(unittest.TestCase):
             graph = ProjectSBOMSubgraph(license_scanner=fake_license_scan)
             with (
                 patch("app.langgraph.sbom_graph.match_sbom_vulnerabilities") as matcher,
-                patch("app.langgraph.sbom_graph.invoke_sbom_excel_mcp", return_value=fake_artifact()) as excel,
+                patch("app.langgraph.sbom_graph.call_mcp_tool", return_value={}),
+                patch("app.langgraph.sbom_graph.publish_mcp_workbook", return_value=fake_artifact()) as excel,
             ):
                 matcher.side_effect = lambda sbom, _scan, response_language: (
                     {**sbom, "vulnerabilities": [{"id": "CVE-2021-44228", "affects": []}]},
@@ -322,7 +329,10 @@ class SBOMSubgraphTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             Path(directory, "pom.xml").write_text(POM, encoding="utf-8")
             graph = ProjectSBOMSubgraph(license_scanner=fake_license_scan)
-            with patch("app.langgraph.sbom_graph.invoke_sbom_excel_mcp", return_value=fake_artifact()):
+            with (
+                patch("app.langgraph.sbom_graph.call_mcp_tool", return_value={}),
+                patch("app.langgraph.sbom_graph.publish_mcp_workbook", return_value=fake_artifact()),
+            ):
                 started = graph.start(
                     {"question": "导出 SBOM", "workspace_path": directory, "user_id": "u", "session_id": "s"}
                 )
@@ -451,7 +461,7 @@ class SBOMIntentAndAPITests(unittest.TestCase):
         self.assertEqual(data["kind"], "assistant")
         self.assertEqual(data["answer"]["mode"], "project_sbom_export")
         self.assertEqual(data["answer"]["interrupt"]["kind"], "sbom_vulnerability_match_confirmation")
-        self.assertEqual(data["answer"]["fields"]["下载目标"], "desktop")
+        self.assertEqual(data["answer"]["fields"]["下载目标"], "桌面")
         create.assert_not_called()
 
     def test_generic_resume_api_routes_sbom_thread(self) -> None:

@@ -15,42 +15,51 @@ export function useBackendBootstrap() {
   const set = useAppStore((state) => state.set);
 
   const refresh = useCallback(async () => {
-    const health = await waitForBackendReady();
-    set({ health });
+    set({ bootstrapError: undefined });
+    try {
+      const health = await waitForBackendReady();
+      set({ health });
 
-    // Model access and user settings are startup-critical. Publish each result
-    // as soon as it arrives instead of making them wait for task history and
-    // archive queries, which may touch much larger SQLite result sets.
-    const critical = await Promise.allSettled([
-      api.settings(userId),
-      api.llmConfig(userId),
-    ] as const);
-    logBootstrapFailures(critical);
-    const settings = critical[0].status === "fulfilled" ? critical[0].value : undefined;
-    const llm = critical[1].status === "fulfilled" ? critical[1].value : undefined;
-    set({
-      ...(settings ? { settings } : {}),
-      ...(llm ? { llm } : {}),
-      bootstrapReady: true,
-      initialSetupRequired: Boolean(
-        settings
-        && llm
-        && (!settings.profile.updated_at || !llm.configured),
-      ),
-    });
+      // Model access and user settings are startup-critical. Publish each result
+      // as soon as it arrives instead of making them wait for task history and
+      // archive queries, which may touch much larger SQLite result sets.
+      const critical = await Promise.allSettled([
+        api.settings(userId),
+        api.llmConfig(userId),
+      ] as const);
+      const failure = critical.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+      const settings = critical[0].status === "fulfilled" ? critical[0].value : undefined;
+      const llm = critical[1].status === "fulfilled" ? critical[1].value : undefined;
+      set({
+        ...(settings ? { settings } : {}),
+        ...(llm ? { llm } : {}),
+        bootstrapReady: true,
+        bootstrapError: undefined,
+        initialSetupRequired: Boolean(
+          settings
+          && llm
+          && (!settings.profile.updated_at || !llm.configured),
+        ),
+      });
 
-    logBootstrapFailures(await Promise.allSettled([
-      api.tasks(userId).then((tasks) => set({ tasks })),
-      api.tasks(userId, true).then((archivedTasks) => set({ archivedTasks })),
-      api.conversations(userId).then((conversations) => set({ conversations })),
-      api.conversations(userId, true).then((archivedConversations) => set({ archivedConversations })),
-    ]));
+      logBootstrapFailures(await Promise.allSettled([
+        api.tasks(userId).then((tasks) => set({ tasks })),
+        api.tasks(userId, true).then((archivedTasks) => set({ archivedTasks })),
+        api.conversations(userId).then((conversations) => set({ conversations })),
+        api.conversations(userId, true).then((archivedConversations) => set({ archivedConversations })),
+      ]));
+    } catch (error) {
+      console.error("SecFlow bootstrap failed", error);
+      // StrictMode and explicit refreshes can overlap. A successful caller
+      // must not be replaced by a late failure from an older startup attempt.
+      if (useAppStore.getState().bootstrapReady) set({ bootstrapError: undefined });
+      else set({ bootstrapReady: false, bootstrapError: errorMessage(error) });
+    }
   }, [set, userId]);
 
   useEffect(() => {
-    void refresh().catch((error) => {
-      console.error("SecFlow bootstrap failed", error);
-    });
+    void refresh();
   }, [refresh]);
 
   return refresh;
@@ -88,6 +97,11 @@ function logBootstrapFailures(results: PromiseSettledResult<unknown>[]) {
   results.forEach((result) => {
     if (result.status === "rejected") console.error("SecFlow bootstrap request failed", result.reason);
   });
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return String(error || "本机服务暂时无法连接");
 }
 
 export function useActiveTaskStream(onTerminal?: (task: AgentTask) => void) {

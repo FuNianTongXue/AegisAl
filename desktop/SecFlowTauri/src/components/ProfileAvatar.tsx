@@ -25,7 +25,7 @@ export function ProfileAvatar({
 
   return (
     <span className={className} aria-hidden="true">
-      {avatarUrl && !failed ? <img src={avatarUrl} alt="" onError={() => setFailed(true)} /> : initial}
+      {avatarUrl && !failed ? <img src={avatarUrl} alt="" width={40} height={40} onError={() => setFailed(true)} /> : initial}
     </span>
   );
 }

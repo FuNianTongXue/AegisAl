@@ -91,5 +91,6 @@ def test_information_consultation_returns_local_compliance_guidance_when_model_i
 
         assert "法律法规" in result["summary"]
         assert "等级保护与数据治理" in result["summary"]
-        assert "Insufficient Balance" in result["summary"]
+        assert "余额不足" in result["summary"]
+        assert "Insufficient Balance" not in result["summary"]
         assert service.get_history("analyst") == []

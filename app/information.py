@@ -10,6 +10,7 @@ import re
 import socket
 import ssl
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -67,6 +68,7 @@ WECHAT_IMAGE_HOSTS = ("mmbiz.qpic.cn", "mmbiz.qlogo.cn", "wx.qlogo.cn", "qpic.cn
 MAX_OPML_SOURCES = 1_000
 MAX_ENABLED_OPML_SOURCES = 50
 INFORMATION_FEED_PARSER_VERSION = 3
+INFORMATION_RESPONSE_LANGUAGES = ("zh-Hans", "zh-Hant", "en")
 INFORMATION_REFRESH_WORKERS = 12
 INFORMATION_SOURCE_LOGO_RETRY_SECONDS = 3_600
 OFFICIAL_SOURCE_BRANDS = {
@@ -371,10 +373,16 @@ class InformationService:
         sort: str = "latest",
         limit: int = 80,
         refresh: bool = False,
+        response_language: str = "zh-Hans",
     ) -> dict[str, Any]:
+        language = normalize_information_language(response_language)
         state = self._store.read()
         info = _information_state(state)
-        should_refresh = refresh or not info["items"] or _cache_is_stale(str(info.get("updated_at") or ""))
+        should_refresh = (
+            refresh
+            or not info["items"]
+            or _cache_is_stale(str(info.get("updated_at") or ""))
+        )
         if should_refresh:
             return self.request_refresh(
                 query=query,
@@ -382,8 +390,15 @@ class InformationService:
                 sort=sort,
                 limit=limit,
                 force=refresh,
+                response_language=language,
             )
-        return self._current_snapshot(query=query, category=category, sort=sort, limit=limit)
+        return self._current_snapshot(
+            query=query,
+            category=category,
+            sort=sort,
+            limit=limit,
+            response_language=language,
+        )
 
     def request_refresh(
         self,
@@ -393,16 +408,28 @@ class InformationService:
         sort: str = "latest",
         limit: int = 80,
         force: bool = False,
+        response_language: str = "zh-Hans",
     ) -> dict[str, Any]:
+        language = normalize_information_language(response_language)
         with self._refresh_state_lock:
             if self._refresh_future is None or self._refresh_future.done():
                 self._refresh_started_at = now_iso()
-                self._refresh_future = self._refresh_executor.submit(self._run_background_refresh, force)
-        return self._current_snapshot(query=query, category=category, sort=sort, limit=limit)
+                self._refresh_future = self._refresh_executor.submit(self._run_background_refresh, force, language)
+        return self._current_snapshot(
+            query=query,
+            category=category,
+            sort=sort,
+            limit=limit,
+            response_language=language,
+        )
 
-    def _run_background_refresh(self, force: bool) -> dict[str, Any]:
+    def _run_background_refresh(self, force: bool, response_language: str) -> dict[str, Any]:
         try:
-            snapshot = self.refresh(force=force, _enrich_images=False)
+            snapshot = self.refresh(
+                force=force,
+                _enrich_images=False,
+                response_language=response_language,
+            )
         except Exception as exc:  # noqa: BLE001 - cached content remains readable after a background failure.
             with self._lock:
                 state = self._store.read()
@@ -410,7 +437,7 @@ class InformationService:
                 info["message"] = f"后台刷新失败，已保留本地缓存：{_compact_error(exc)}"
                 info["last_refresh"] = now_iso()
                 self._store.write(state)
-            return self._current_snapshot()
+            return self._current_snapshot(response_language=response_language)
         self._schedule_image_enrichment()
         return snapshot
 
@@ -421,10 +448,19 @@ class InformationService:
         category: str = "全部",
         sort: str = "latest",
         limit: int = 80,
+        response_language: str = "zh-Hans",
     ) -> dict[str, Any]:
+        language = normalize_information_language(response_language)
         state = self._store.read()
         info = _information_state(state)
-        snapshot = _build_snapshot(info, query=query, category=category, sort=sort, limit=limit)
+        snapshot = _build_snapshot(
+            info,
+            query=query,
+            category=category,
+            sort=sort,
+            limit=limit,
+            response_language=language,
+        )
         with self._refresh_state_lock:
             future = self._refresh_future
             refreshing = future is not None and not future.done()
@@ -515,13 +551,20 @@ class InformationService:
         limit: int = 80,
         force: bool = False,
         _enrich_images: bool = True,
+        response_language: str = "zh-Hans",
     ) -> dict[str, Any]:
+        language = normalize_information_language(response_language)
         with self._lock:
             state = self._store.read()
             info = _information_state(state)
             sources = _source_statuses(info)
             enabled = [source for source in INFORMATION_SOURCES if sources[source.id]["enabled"]]
-            previous = [item for item in info.get("items", []) if isinstance(item, dict)]
+            previous = [
+                _prepare_information_item(item)
+                for item in info.get("items", [])
+                if isinstance(item, dict)
+            ]
+            info["items"] = previous
             previous_published_at = {
                 (str(item.get("source_id") or ""), _canonical_url(str(item.get("url") or ""))): str(
                     item.get("published_at") or ""
@@ -534,7 +577,14 @@ class InformationService:
                 info["message"] = "当前没有启用的资讯来源。"
                 info["last_refresh"] = refreshed_at
                 self._store.write(state)
-                return _build_snapshot(info, query=query, category=category, sort=sort, limit=limit)
+                return _build_snapshot(
+                    info,
+                    query=query,
+                    category=category,
+                    sort=sort,
+                    limit=limit,
+                    response_language=language,
+                )
 
             due = [source for source in enabled if _source_refresh_due(source, sources[source.id], force=force)]
             if not due:
@@ -542,7 +592,14 @@ class InformationService:
                 info["last_refresh"] = refreshed_at
                 info["updated_at"] = refreshed_at
                 self._store.write(state)
-                return _build_snapshot(info, query=query, category=category, sort=sort, limit=limit)
+                return _build_snapshot(
+                    info,
+                    query=query,
+                    category=category,
+                    sort=sort,
+                    limit=limit,
+                    response_language=language,
+                )
 
             replacements: dict[str, list[dict[str, Any]]] = {}
             failures: list[str] = []
@@ -613,6 +670,7 @@ class InformationService:
             refreshed_items = [item for items in replacements.values() for item in items]
             if replacements:
                 _reuse_cached_images(refreshed_items, previous)
+                refreshed_items = [_prepare_information_item(item) for item in refreshed_items]
                 if self._image_enricher is not None and _enrich_images:
                     try:
                         self._image_enricher(
@@ -644,7 +702,13 @@ class InformationService:
                 parts.append(f"{len(failures)} 个暂时不可用")
             info["message"] = "，".join(parts) + "。"
             self._store.write(state)
-            return self._current_snapshot(query=query, category=category, sort=sort, limit=limit)
+            return self._current_snapshot(
+                query=query,
+                category=category,
+                sort=sort,
+                limit=limit,
+                response_language=language,
+            )
 
     def set_source_enabled(self, source_id: str, enabled: bool) -> dict[str, Any]:
         return self.set_sources_enabled([source_id], enabled)[0]
@@ -1239,6 +1303,8 @@ def _normalize_item(
         "source_kind": source.kind,
         "title": title,
         "summary": summary,
+        "title_original": title,
+        "summary_original": summary,
         "url": url,
         "image_url": _safe_remote_url(str(raw.get("image_url") or "")),
         "source_image_url": source_image_url,
@@ -1251,6 +1317,81 @@ def _normalize_item(
     }
 
 
+def normalize_information_language(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "zh": "zh-Hans",
+        "zh-cn": "zh-Hans",
+        "zh-sg": "zh-Hans",
+        "zh-hans": "zh-Hans",
+        "zh-tw": "zh-Hant",
+        "zh-hk": "zh-Hant",
+        "zh-mo": "zh-Hant",
+        "zh-hant": "zh-Hant",
+        "en": "en",
+        "en-us": "en",
+        "en-gb": "en",
+    }
+    language = aliases.get(text)
+    if language is None:
+        requested = str(value or "").strip() or "<empty>"
+        raise ValueError(
+            f"Unsupported information response language: {requested}. "
+            f"Supported languages: {', '.join(INFORMATION_RESPONSE_LANGUAGES)}"
+        )
+    return language
+
+
+def _prepare_information_item(item: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(item)
+    title = _plain_text(str(prepared.get("title_original") or prepared.get("title") or ""), 260)
+    summary = _plain_text(str(prepared.get("summary_original") or prepared.get("summary") or ""), 520)
+    prepared["title"] = title
+    prepared["summary"] = summary
+    prepared["title_original"] = title
+    prepared["summary_original"] = summary
+    for field in (
+        "title_zh",
+        "summary_zh",
+        "title_zh_hant",
+        "summary_zh_hant",
+        "title_en",
+        "summary_en",
+        "information_translation",
+    ):
+        prepared.pop(field, None)
+    return prepared
+
+
+def _project_information_item(item: dict[str, Any]) -> dict[str, Any]:
+    projected = {
+        key: deepcopy(item[key])
+        for key in (
+            "id",
+            "source_id",
+            "source_name",
+            "source_kind",
+            "url",
+            "image_url",
+            "source_image_url",
+            "image_checked_at",
+            "published_at",
+            "author",
+            "category",
+            "tags",
+            "breaking",
+        )
+        if key in item
+    }
+    projected.update(
+        {
+            "title": str(item.get("title_original") or item.get("title") or ""),
+            "summary": str(item.get("summary_original") or item.get("summary") or ""),
+        }
+    )
+    return projected
+
+
 def _build_snapshot(
     info: dict[str, Any],
     *,
@@ -1258,7 +1399,9 @@ def _build_snapshot(
     category: str,
     sort: str,
     limit: int,
+    response_language: str = "zh-Hans",
 ) -> dict[str, Any]:
+    language = normalize_information_language(response_language)
     statuses = _source_statuses(info)
     enabled_ids = {source_id for source_id, status in statuses.items() if status.get("enabled")}
     source_by_id = INFORMATION_SOURCE_BY_ID
@@ -1309,8 +1452,10 @@ def _build_snapshot(
 
     safe_limit = max(1, min(int(limit), 200))
     source_list = [statuses[source.id] for source in INFORMATION_SOURCES]
+    projected_items = [_project_information_item(item) for item in filtered[:safe_limit]]
+    projected_briefs = [_project_information_item(item) for item in all_items[:6]]
     return {
-        "items": filtered[:safe_limit],
+        "items": projected_items,
         "total": len(filtered),
         "available_total": len(all_items),
         "categories": [
@@ -1319,7 +1464,7 @@ def _build_snapshot(
             if name == "全部" or counts.get(name, 0) > 0
         ],
         "popular_tags": _popular_tags(all_items),
-        "briefs": all_items[:6],
+        "briefs": projected_briefs,
         "sources": source_list,
         "source_summary": {
             "total": len(source_list),
@@ -1337,6 +1482,7 @@ def _build_snapshot(
         "stale": _cache_is_stale(str(info.get("updated_at") or "")),
         "partial": any(source.get("enabled") and source.get("status") == "error" for source in source_list),
         "message": str(info.get("message") or "等待首次在线更新。"),
+        "response_language": language,
     }
 
 

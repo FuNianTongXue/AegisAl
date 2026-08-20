@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -97,6 +98,35 @@ def secure_metadata_key(key: str) -> str:
         return key
     digest = hashlib.sha256(f"secflow-metadata:{key}".encode("utf-8")).hexdigest()
     return f"m:{digest[:32]}"
+
+
+def sign_local_payload(value: Any, purpose: str) -> str:
+    """Sign a Host-owned local attestation with the platform storage key."""
+
+    payload = _canonical_attestation_payload(value)
+    salt = hashlib.sha256(f"SecFlowLocalAttestation:{purpose}:v1".encode("utf-8")).digest()
+    key = _derive_key(_master_key(), salt, f"{purpose}:attestation".encode("utf-8"))
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def verify_local_payload_signature(value: Any, purpose: str, signature: Any) -> bool:
+    if type(signature) is not str or len(signature) != 64:
+        return False
+    try:
+        expected = sign_local_payload(value, purpose)
+    except (OSError, TypeError, ValueError):
+        return False
+    return hmac.compare_digest(signature.lower(), expected)
+
+
+def _canonical_attestation_payload(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def storage_crypto_status() -> dict[str, Any]:

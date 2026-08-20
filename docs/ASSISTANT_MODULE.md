@@ -68,8 +68,8 @@ SSE 的 `content.delta` 优先直接来自 OpenAI Responses、OpenAI-compatible 
   tests.test_assistant_stream \
   tests.test_task_agent
 
-swift test --package-path macos/SecFlowMac \
-  --filter AgentTaskViewTests
+cd desktop/SecFlowTauri
+pnpm test
 ```
 
 独立路由契约测试会确认问答、SSE、Interrupt 和会话接口存在，同时确认扫描任务和订阅路由没有进入独立应用。

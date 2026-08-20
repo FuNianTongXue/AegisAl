@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.contracts import AgentExecution, AgentManifest
+from app.mcp.protocol import call_mcp_tool
 from app.privacy import public_answer_payload
 from app.storage import now_iso
 
@@ -114,16 +115,23 @@ class SBOMLicenseCapability:
         if self._scanner is not None:
             result = self._scanner(workspace_path)
         else:
-            from app.mcp.license_scan import invoke_license_scan_mcp
-
-            result = invoke_license_scan_mcp({"workspace_path": workspace_path})
+            result = call_mcp_tool(
+                agent_id="sbom_agent",
+                tool_id="mcp__license_scan__identify_project_licenses",
+                arguments={"workspace_path": workspace_path},
+                cancelled=cancel_check,
+            )
         if cancel_check():
             raise RuntimeError("License MCP call was cancelled")
         if not isinstance(result, dict):
             raise ValueError("SBOM Agent license capability returned no structured result")
         audit = result.get("_license_mcp") if isinstance(result.get("_license_mcp"), dict) else {}
+        runtime_audit = result.get("_mcp_runtime") if isinstance(result.get("_mcp_runtime"), dict) else {}
         if audit:
             audit["agent_id"] = "sbom_agent"
+            audit["transport"] = str(runtime_audit.get("transport") or "stdio")
+            audit["endpoint"] = "managed-child-process"
+            audit["host"] = runtime_audit
             result["_license_mcp"] = audit
         return result
 
@@ -246,7 +254,7 @@ class CodeScanAgent(GraphSpecialistAgent):
                 "mode": "project_scan",
                 "summary": (
                     f"已由代码扫描 Agent 为 {project_name} 创建{'重新' if intent == 'project_rescan' else '完整'}扫描任务。"
-                    "扫描将使用已验证源码工作区，并通过独立 Code Scan MCP SSE 服务执行。"
+                    "扫描将使用已验证源码工作区，并通过独立 Code Scan MCP stdio 子进程执行。"
                 ),
                 "fields": {
                     "项目": project_name,

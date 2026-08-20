@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.mcp.artifacts import MCPArtifactReference, stage_output_artifact
 
 
 class MermaidDiagram(BaseModel):
@@ -22,7 +24,8 @@ class MermaidDiagram(BaseModel):
     source: str
     source_sha256: str
     image_media_type: Literal["image/jpeg"] = "image/jpeg"
-    image_base64: str
+    image_base64: str = ""
+    artifact_index: int | None = None
     image_sha256: str
     width: int
     height: int
@@ -34,6 +37,7 @@ class MermaidReportOutput(BaseModel):
     schema_version: int = 2
     renderer: Literal["secflow-mermaid-jpeg-v2"] = "secflow-mermaid-jpeg-v2"
     diagrams: list[MermaidDiagram]
+    artifacts: list[MCPArtifactReference] = Field(default_factory=list)
     input_sha256: str
     chart_sha256: str
     taint_path_count: int
@@ -59,6 +63,8 @@ def build_report_mermaid(
     report_charts: dict[str, Any] | None = None,
     sarif: dict[str, Any] | None = None,
     language: str = "zh-Hans",
+    *,
+    output_dir: str,
 ) -> MermaidReportOutput:
     from app.reports import validate_scan_result_json
 
@@ -112,8 +118,26 @@ def build_report_mermaid(
                 language,
             )
         )
+    artifact_references: list[MCPArtifactReference] = []
+    staged_diagrams: list[MermaidDiagram] = []
+    for diagram in diagrams:
+        payload = base64.b64decode(diagram.image_base64, validate=True)
+        reference = stage_output_artifact(
+            output_dir,
+            file_name=f"{diagram.id}.jpg",
+            payload=payload,
+            media_type=diagram.image_media_type,
+        )
+        artifact_references.append(reference)
+        staged_diagrams.append(
+            diagram.model_copy(
+                update={"image_base64": "", "artifact_index": len(artifact_references) - 1}
+            )
+        )
+    diagrams = staged_diagrams
     return MermaidReportOutput(
         diagrams=diagrams,
+        artifacts=artifact_references,
         input_sha256=input_sha256,
         chart_sha256=_sha256_json(charts),
         taint_path_count=len(taint_paths),

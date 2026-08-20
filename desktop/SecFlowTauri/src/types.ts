@@ -306,13 +306,41 @@ export interface DashboardSnapshot {
   catalog_progress?: number;
   catalog_count?: number;
   catalog_error?: string;
+  response_language?: VulnerabilityContentLanguage;
+  translation_status?: VulnerabilityTranslationStatus;
+  translation_progress?: number;
+  translation_count?: number;
+  translation_ready_count?: number;
+  translation_error?: string;
 }
+
+export type VulnerabilityContentLanguage = "zh-Hans" | "zh-Hant" | "en" | "mixed" | "unknown";
+
+export type VulnerabilityTranslationStatus =
+  | "translated"
+  | "translating"
+  | "pending"
+  | "retrying"
+  | "failed"
+  | "passthrough"
+  | "original"
+  | "not_required"
+  | "unknown";
 
 export interface VulnerabilityRecord {
   id: string;
   title: string;
+  title_original?: string;
+  title_zh?: string;
+  title_zh_hant?: string;
   description?: string;
+  description_original?: string;
+  description_zh?: string;
+  description_zh_hant?: string;
   summary?: string;
+  summary_original?: string;
+  summary_zh?: string;
+  summary_zh_hant?: string;
   severity?: string;
   cvss?: number;
   cvss_score?: number;
@@ -322,7 +350,11 @@ export interface VulnerabilityRecord {
   affected_products?: string[];
   affected_versions?: string[];
   fixed_versions?: string[];
+  aliases?: string[];
+  cwes?: string[];
   references?: string[];
+  content_language?: VulnerabilityContentLanguage;
+  translation_status?: VulnerabilityTranslationStatus;
   [key: string]: unknown;
 }
 
@@ -352,6 +384,7 @@ export interface InformationSnapshot {
   available_total?: number;
   refreshing?: boolean;
   refreshed_at?: string;
+  response_language?: "zh-Hans" | "zh-Hant" | "en";
 }
 
 export interface IntelligenceSource {

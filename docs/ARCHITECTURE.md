@@ -5,12 +5,12 @@
 | 项目 | 内容 |
 | --- | --- |
 | 产品 | SecFlow Knowledge Security Assistant / 安全智脑 |
-| 版本 | 1.3.3（跨平台生命周期与七天试用发布基线） |
-| 客户端 | Tauri 2 + React/TypeScript；保留 SwiftUI 兼容实现 |
+| 版本 | 1.3.3（Tauri 跨平台正式版基线） |
+| 客户端 | Tauri 2 + React/TypeScript |
 | 后端 | Python 3、FastAPI、LangGraph |
 | 桌面通信 | 正式版 `127.0.0.1:18781`；试用版 `127.0.0.1:18783` |
 | 应用标识 | 正式版 `ai.secflow.security-agent`；试用版 `ai.secflow.security-agent.trial7days` |
-| 文档基线 | 2026-08-18 v1.3.3 发布源码快照 |
+| 文档基线 | 2026-08-20 v1.3.3 修复发布源码快照 |
 
 ## 2. 总体架构
 
@@ -35,9 +35,7 @@ Unified Report JSON
 ```mermaid
 flowchart LR
     U["用户"] --> M["Tauri 2 桌面客户端<br/>React / TypeScript"]
-    U --> L["SwiftUI 兼容客户端"]
     M -->|"HTTP / SSE, 127.0.0.1:18781"| A["FastAPI 应用层"]
-    L -->|"HTTP / SSE"| A
     A --> J["SQLite WAL 持久任务队列"]
     J --> W["独立 Python LangGraph Worker"]
     W --> T["工作区扫描任务图"]
@@ -68,7 +66,7 @@ flowchart LR
 
 | 路径 | 职责 |
 | --- | --- |
-| `app/api/routes/application.py` | FastAPI 应用、中间件、API 路由和静态 Web 控制台 |
+| `app/api/routes/application.py` | FastAPI 应用、中间件、API 路由和服务信息入口 |
 | `app/langgraph/assistant_graph.py` | 智能问答主图、意图分类、知识图谱、静态分析、LLM 与记忆 |
 | `app/langgraph/multi_agent_graph.py` | Supervisor、专业 Agent 路由、显式 handoff、结果聚合和在线规则隔离策略 |
 | `app/agent/contracts.py` | Agent 能力清单、统一执行结果与 handoff 审计契约 |
@@ -100,8 +98,7 @@ flowchart LR
 | `app/intelligence.py`、`app/information.py` | 漏洞情报、订阅源、缓存、刷新与图片回退 |
 | `app/storage.py`、`app/secure_storage.py` | 本地状态、密钥派生与加密存储 |
 | `app/reports.py` | 扫描结果、报告元数据与文件制品 |
-| `macos/SecFlowMac/` | Swift Package、SwiftUI 客户端、资源和客户端测试 |
-| `desktop/SecFlowTauri/` | 第三阶段 Tauri 2、React/TypeScript 客户端和 Rust sidecar 生命周期 |
+| `desktop/SecFlowTauri/` | Tauri 2、React/TypeScript 客户端和 Rust sidecar 生命周期 |
 | `config/semgrep/` | 按语言维护的安全规则 |
 | `config/evaluation/` | 冻结评测项目清单、真值和裁决配置 |
 | `scripts/` | 构建、评测、真值校验和回归门禁脚本 |
@@ -120,23 +117,7 @@ flowchart LR
 - Windows 不创建 macOS 专属透明资讯窗口和状态栏入口；父进程存活探测使用 Win32 `OpenProcess` / `WaitForSingleObject`，宿主被强制终止后 sidecar 会退出。
 - 问答正文按 50 ms 合并 SSE 分片；任务先读快照，再按 `sequence` 合并事件，终态事件后重新读取完整结果。
 - 侧栏使用固定 72 px 布局轨道和覆盖式悬停展开，展开时不修改主工作区网格宽度，避免复杂聊天页面发生连续布局重排。
-- UI 只采用真实 21st.dev `人工智能前端` 收藏清单中的 Advanced Stats、Card、Chatgpt Prompt Input 和 AI Planning 四种信息结构；映射、ZCode 取舍、E2E 和打包说明见 [第三阶段基线](TAURI_PHASE3.md)。
-
-#### 4.1.2 SwiftUI 兼容客户端
-
-- `SecFlowMacApp` 管理主窗口、设置窗口、菜单命令和后端生命周期。
-- `RootView` 在登录后根据资料和模型完成态路由到 6 步 `PostLoginSetupView` 或工作区；向导可恢复到第一个缺失阶段。
-- `PostLoginSetupView` 复用设置资料 API 和模型配置 API，资料与角色保存成功后才开放模型步骤，模型测试成功后才允许启用并进入工作区。
-- `WorkspaceShellView` 提供鼠标悬停自动展开、移出自动收回的覆盖式侧边栏，主操作仅保留“新建任务”。
-- 智能问答支持会话、文件上传、SSE 正文增量输出、Skeleton、Markdown/Mermaid、漏洞卡片、来源面板、消息操作、提示词差异卡片和 LangGraph 节点状态。
-- Agent 时间线只消费后端真实 trace；Tool Call 和 Sources 默认折叠，Thinking 只投影高层节点任务，不传输或展示私有推理。
-- UI 交互层参考 21st.dev 的 AI Tool Call、Chain of Thought、Sources、Prompt Box 和 Actions 模式，以原生 SwiftUI 重新实现，不引入 React 运行时。
-- 普通问答历史作为“智能问答”项目显示在“项目”区；活动对话和扫描项目并列管理，归档对话进入统一归档区，右键菜单提供归档、恢复和二次确认删除。
-- 信息咨询使用固定在屏幕右上角的独立 `NSPanel`；漏洞情报总览使用独立 `NSWindow`，仅消费漏洞情报目录统计，不展示代码扫描结果，二者均不占用主导航项。
-- 设置包含用户资料、模型配置、订阅管理、日志管理、通用设置和关于。
-- 字体入口由统一设计系统管理：中文优先 PingFang SC，英文优先 SF Pro Text，Emoji 由 Apple Color Emoji 回退。
-- 高频状态不再全部由 `AppModel` 发布：`AssistantStore` 负责正文、trace 和会话，`AgentTaskStore` 负责任务快照和事件；`AppModel` 仅保留兼容访问器。聊天工作区和项目历史按需订阅这两个 Store，进度更新不会让设置、情报和总览页面重算。
-- 问答 SSE 的正文分片在客户端按 50 ms 窗口合并后再提交主线程，trace 按稳定 ID 增量覆盖；`result` 或 `error` 到达前强制清空缓冲。
+- UI 采用 Advanced Stats、Card、Chatgpt Prompt Input 和 AI Planning 四类信息结构；映射、ZCode 取舍、E2E 和打包说明见 [Tauri 客户端基线](TAURI_PHASE3.md)。
 
 ### 4.2 FastAPI 应用
 
@@ -316,18 +297,25 @@ python3 -m venv .venv
 .venv/bin/uvicorn app.api.routes.application:app --host 127.0.0.1 --port 8000
 ```
 
-macOS 客户端开发与测试：
+Tauri 客户端开发与测试：
 
 ```bash
-cd macos/SecFlowMac
-swift run SecFlowMac
-swift test
+cd desktop/SecFlowTauri
+pnpm install --frozen-lockfile
+pnpm test
+pnpm build
 ```
 
-正式 macOS 打包：
+正式 macOS 打包（Intel runner 设置 `SECFLOW_MACOS_ARCH=x86_64`）：
 
 ```bash
-./scripts/build_macos_app.sh
+./scripts/build_tauri_macos.sh
 ```
 
-构建脚本会创建原生 Swift 可执行文件、嵌入 Python 后端和依赖、复制许可文件、签名 App，并生成 `dist/SecFlow.zip`。
+正式 Windows x86_64 打包：
+
+```powershell
+./scripts/build_tauri_windows.ps1 -Edition formal
+```
+
+构建脚本会编译 Tauri 宿主、嵌入 Python 后端、Worker、扫描运行时与许可文件，并输出对应平台安装包。

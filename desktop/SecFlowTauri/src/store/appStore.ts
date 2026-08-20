@@ -11,6 +11,7 @@ import type {
 } from "../types";
 
 export type WorkspaceView = "assistant" | "intelligence" | "records" | "settings" | "archive";
+export type SidebarView = "projects" | "tasks";
 
 interface AppState {
   userId: string;
@@ -18,9 +19,11 @@ interface AppState {
   theme: "light" | "dark" | "system";
   fontScale: number;
   sidebarOpen: boolean;
+  sidebarView: SidebarView;
   inspectorOpen: boolean;
   commandOpen: boolean;
   bootstrapReady: boolean;
+  bootstrapError?: string;
   initialSetupRequired: boolean;
   workspacePath: string;
   workspaceName: string;
@@ -40,6 +43,7 @@ interface AppState {
   turns: ChatTurn[];
   set: (patch: Partial<AppState>) => void;
   selectWorkspace: (path: string) => void;
+  openProjectForTask: (path: string) => void;
   replaceTask: (task: AgentTask) => void;
   removeTask: (taskId: string) => void;
   removeConversation: (sessionId: string, conversationId?: string) => void;
@@ -49,17 +53,21 @@ interface AppState {
   resetConversation: () => void;
 }
 
+type PersistedAppState = Pick<AppState, "userId" | "theme" | "fontScale" | "sidebarOpen" | "inspectorOpen">;
+
 export const useAppStore = create<AppState>()(
-  persist(
+  persist<AppState, [], [], PersistedAppState>(
     (set) => ({
       userId: "default",
       view: "assistant",
       theme: "system",
       fontScale: 1,
       sidebarOpen: true,
+      sidebarView: "tasks",
       inspectorOpen: false,
       commandOpen: false,
       bootstrapReady: false,
+      bootstrapError: undefined,
       initialSetupRequired: false,
       workspacePath: "",
       workspaceName: "",
@@ -77,9 +85,23 @@ export const useAppStore = create<AppState>()(
         set({
           view: "assistant",
           workspacePath: path,
-          workspaceName: path.split(/[\\/]/).filter(Boolean).pop() || path,
+          workspaceName: workspaceNameFromPath(path),
           activeTaskId: "",
         }),
+      openProjectForTask: (path) => {
+        const name = workspaceNameFromPath(path);
+        set({
+          view: "assistant",
+          sidebarView: "tasks",
+          activeTaskId: "",
+          activeSessionId: "",
+          workspacePath: path,
+          workspaceName: name,
+          composerAttachment: { path, name },
+          composerAttachmentLeaving: false,
+          turns: [],
+        });
+      },
       replaceTask: (task) =>
         set((state) => ({
           tasks: [task, ...state.tasks.filter((item) => item.id !== task.id)],
@@ -132,6 +154,7 @@ export const useAppStore = create<AppState>()(
       returnToTaskHome: () =>
         set({
           view: "assistant",
+          sidebarView: "tasks",
           // Returning to the task landing page is navigation, not task
           // creation.  Leave the session empty so the next submitted prompt
           // can receive its backend-issued session without creating a ghost
@@ -147,6 +170,7 @@ export const useAppStore = create<AppState>()(
       resetConversation: () =>
         set({
           view: "assistant",
+          sidebarView: "tasks",
           // Every newly-created task window receives its own durable session.
           // This keeps project/task history in long-term memory without
           // collapsing unrelated windows into the legacy `default` session.
@@ -167,10 +191,33 @@ export const useAppStore = create<AppState>()(
         fontScale: state.fontScale,
         sidebarOpen: state.sidebarOpen,
         inspectorOpen: state.inspectorOpen,
-        workspacePath: state.workspacePath,
-        workspaceName: state.workspaceName,
-        activeTaskId: state.activeTaskId,
-        activeSessionId: state.activeSessionId,
+      }),
+      version: 2,
+      migrate: (persistedState) => {
+        const persisted = persistedState as Partial<AppState>;
+        return {
+          userId: persisted.userId || "default",
+          theme: persisted.theme || "system",
+          fontScale: persisted.fontScale || 1,
+          sidebarOpen: persisted.sidebarOpen ?? true,
+          inspectorOpen: persisted.inspectorOpen ?? false,
+        };
+      },
+      merge: (persistedState, currentState) => ({
+        ...currentState,
+        ...(persistedState as PersistedAppState),
+        // Active identifiers are only meaningful together with backend detail
+        // or in-memory turns. Always start on the recoverable task home and
+        // let the backend catalogs repopulate navigable task history.
+        view: "assistant",
+        sidebarView: "tasks",
+        activeTaskId: "",
+        activeSessionId: "",
+        workspacePath: "",
+        workspaceName: "",
+        composerAttachment: null,
+        composerAttachmentLeaving: false,
+        turns: [],
       }),
     },
   ),
@@ -181,4 +228,8 @@ function createTaskSessionId() {
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `task:${id}`;
+}
+
+function workspaceNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }

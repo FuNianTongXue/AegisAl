@@ -17,6 +17,7 @@ RESOURCES_DIR="$TAURI_SOURCE_DIR/resources"
 RULES_PATH="${SECFLOW_SEMGREP_RULES_PATH:-$ROOT_DIR/config/semgrep}"
 BACKEND_RUNTIME_DIR="$RESOURCES_DIR/backend"
 BACKEND_EXECUTABLE="$BACKEND_RUNTIME_DIR/secflow-backend"
+TRANSLATION_MODEL_DIR="$ROOT_DIR/app/resources/translation-models/opus-mt-en-zh-1.9"
 
 case "$MACOS_ARCH:$TARGET_TRIPLE" in
     arm64:aarch64-apple-darwin|x86_64:x86_64-apple-darwin) ;;
@@ -28,12 +29,13 @@ PYTHON_ARCH="$($PYTHON_BIN -c 'import platform; print(platform.machine())')"
     echo "Python architecture is $PYTHON_ARCH, expected $MACOS_ARCH: $PYTHON_BIN" >&2
     exit 1
 }
-for MODULE in PyInstaller semgrep reportlab docx tree_sitter uvicorn xlsxwriter; do
+for MODULE in PyInstaller semgrep reportlab docx tree_sitter uvicorn xlsxwriter numpy ctranslate2 sentencepiece opencc; do
     "$PYTHON_BIN" -c "import $MODULE" >/dev/null 2>&1 || {
         echo "Missing Python module: $MODULE" >&2
         exit 1
     }
 done
+"$PYTHON_BIN" "$ROOT_DIR/scripts/validate_translation_model.py" "$TRANSLATION_MODEL_DIR"
 [ -d "$RULES_PATH" ] || { echo "Missing offline Semgrep rules: $RULES_PATH" >&2; exit 1; }
 
 rm -rf "$BUILD_ROOT" "$RESOURCES_DIR"
@@ -46,7 +48,6 @@ mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
     --onedir \
     --name secflow-backend \
     --paths "$ROOT_DIR" \
-    --add-data "$ROOT_DIR/app/static:app/static" \
     --add-data "$ROOT_DIR/app/resources:app/resources" \
     --collect-all reportlab \
     --collect-all docx \
@@ -61,6 +62,13 @@ mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
     --collect-all tree_sitter_c_sharp \
     --collect-all tree_sitter_rust \
     --collect-all tree_sitter_solidity \
+    --collect-all ctranslate2 \
+    --collect-all sentencepiece \
+    --collect-all opencc \
+    --copy-metadata numpy \
+    --copy-metadata ctranslate2 \
+    --copy-metadata sentencepiece \
+    --copy-metadata opencc-python-reimplemented \
     --hidden-import uvicorn.logging \
     --hidden-import uvicorn.loops.asyncio \
     --hidden-import uvicorn.protocols.http.h11_impl \
@@ -74,6 +82,10 @@ mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
 
 cp -R "$BACKEND_BUILD_DIR/dist/secflow-backend/." "$BACKEND_RUNTIME_DIR/"
 chmod 755 "$BACKEND_EXECUTABLE"
+BUNDLED_TRANSLATION_MODEL_DIR="$(find "$BACKEND_RUNTIME_DIR" -path '*/app/resources/translation-models/opus-mt-en-zh-1.9' -type d -print -quit)"
+[ -n "$BUNDLED_TRANSLATION_MODEL_DIR" ] || { echo "Bundled offline translation model is missing from the backend." >&2; exit 1; }
+"$PYTHON_BIN" "$ROOT_DIR/scripts/validate_translation_model.py" "$BUNDLED_TRANSLATION_MODEL_DIR"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/validate_packaged_translation_runtime.py" "$BACKEND_EXECUTABLE"
 
 if [ "${SECFLOW_SKIP_SOCKET_VALIDATION:-0}" = "1" ]; then
     echo "Skipping packaged backend socket validation because SECFLOW_SKIP_SOCKET_VALIDATION=1."
@@ -96,6 +108,24 @@ fi
 cp -R "$SEMGREP_BUILD_DIR/dist/secflow-semgrep/." "$RESOURCES_DIR/semgrep/"
 cp -R "$RULES_PATH/." "$RESOURCES_DIR/semgrep-rules/"
 cp "$ROOT_DIR/licenses/THIRD-PARTY-NOTICES.txt" "$RESOURCES_DIR/licenses/THIRD-PARTY-NOTICES.txt"
+cp "$ROOT_DIR/licenses/NumPy-BSD-3-Clause.txt" "$RESOURCES_DIR/licenses/NumPy-BSD-3-Clause.txt"
+cp "$ROOT_DIR/licenses/CTranslate2-MIT.txt" "$RESOURCES_DIR/licenses/CTranslate2-MIT.txt"
+cp "$ROOT_DIR/licenses/SentencePiece-Apache-2.0.txt" "$RESOURCES_DIR/licenses/SentencePiece-Apache-2.0.txt"
+cp "$ROOT_DIR/licenses/OpenCC-Python-Reimplemented-Apache-2.0.txt" "$RESOURCES_DIR/licenses/OpenCC-Python-Reimplemented-Apache-2.0.txt"
+cp "$ROOT_DIR/licenses/OpenCC-Python-Reimplemented-NOTICE.txt" "$RESOURCES_DIR/licenses/OpenCC-Python-Reimplemented-NOTICE.txt"
+cp "$ROOT_DIR/licenses/OPUS-MT-CC-BY-4.0.txt" "$RESOURCES_DIR/licenses/OPUS-MT-CC-BY-4.0.txt"
+NUMPY_BINARY_LICENSE_PATH="$($PYTHON_BIN - <<'PY'
+from importlib.metadata import distribution
+
+package = distribution("numpy")
+for entry in package.files or []:
+    if str(entry).replace("\\", "/").endswith("licenses/LICENSE.txt"):
+        print(package.locate_file(entry))
+        break
+PY
+)"
+[ -f "$NUMPY_BINARY_LICENSE_PATH" ] || { echo "Unable to locate the NumPy binary notices." >&2; exit 1; }
+cp "$NUMPY_BINARY_LICENSE_PATH" "$RESOURCES_DIR/licenses/NumPy-Binary-Notices.txt"
 
 while IFS= read -r PYTHON_FRAMEWORK; do
     for ALIAS in Python Resources Versions/Current; do

@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from urllib.parse import urlencode
+from uuid import uuid4
 
 from app.secure_storage import decrypt_json_from_text, encrypt_json_to_text
 from app.storage import DATA_DIR, now_iso
@@ -60,7 +62,10 @@ class ReportDownloadArtifactStore:
 
     def save(self, content: bytes, *, file_name: str, media_type: str, user_id: str) -> dict[str, Any]:
         digest = hashlib.sha256(content).hexdigest()
-        artifact_id = f"report-artifact-{digest[:24]}"
+        owner = str(user_id or "").strip()
+        if not owner:
+            raise ValueError("Artifact owner user_id is required")
+        artifact_id = f"report-artifact-{uuid4().hex}"
         safe_name = Path(str(file_name or "SecFlow-report.bin")).name
         suffix = Path(safe_name).suffix.lower() or ".bin"
         path = self.root / f"{artifact_id}{suffix}"
@@ -70,39 +75,53 @@ class ReportDownloadArtifactStore:
             "kind": "report",
             "file_name": safe_name,
             "media_type": media_type,
-            "download_path": f"/api/assistant/artifacts/{artifact_id}",
+            "download_path": f"/api/assistant/artifacts/{artifact_id}?{urlencode({'user_id': owner})}",
             "sha256": digest,
             "size": len(content),
             "generated_at": generated_at,
-            "user_id": str(user_id or "default"),
+            "user_id": owner,
             "storage_name": path.name,
         }
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(path.suffix + ".tmp")
-            temporary.write_bytes(content)
-            temporary.chmod(0o600)
-            os.replace(temporary, path)
-            index = [entry for entry in self._read_index() if entry.get("id") != artifact_id]
-            index.insert(0, item)
-            stale = index[self.retain :]
-            self._write_index(index[: self.retain])
-            for entry in stale:
-                stale_path = self.root / Path(str(entry.get("storage_name") or "")).name
-                if stale_path.parent.resolve() == self.root.resolve():
-                    stale_path.unlink(missing_ok=True)
+            temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            index = self._read_index()
+            index.append(item)
+            self._write_index(index)
         return {key: value for key, value in item.items() if key not in {"user_id", "storage_name"}}
 
-    def resolve(self, artifact_id: str) -> tuple[Path, str, str]:
+    def resolve(self, artifact_id: str, *, user_id: str = "default") -> tuple[Path, str, str]:
         clean_id = str(artifact_id or "").strip()
-        if not re.fullmatch(r"report-artifact-[a-f0-9]{24}", clean_id):
+        if not re.fullmatch(r"report-artifact-[a-f0-9]{32}", clean_id):
             raise KeyError(artifact_id)
+        owner = str(user_id or "").strip()
         with self._lock:
-            item = next((entry for entry in self._read_index() if entry.get("id") == clean_id), None)
+            item = next(
+                (
+                    entry
+                    for entry in self._read_index()
+                    if entry.get("id") == clean_id and entry.get("user_id") == owner
+                ),
+                None,
+            )
             if not item:
                 raise KeyError(artifact_id)
             path = self.root / Path(str(item.get("storage_name") or "")).name
-            if not path.is_file() or path.parent.resolve() != self.root.resolve():
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or path.parent.resolve() != self.root.resolve()
+                or path.stat().st_nlink != 1
+            ):
                 raise KeyError(artifact_id)
         return path, Path(str(item.get("file_name") or path.name)).name, str(item.get("media_type") or "application/octet-stream")
 
@@ -532,11 +551,33 @@ def _report_severity_label(value: Any, language: str) -> str:
     }.get(normalized_language, "Unknown")
 
 
-def _report_finding_remediation(finding: dict[str, Any]) -> str:
+def _report_finding_remediation(
+    finding: dict[str, Any],
+    language: str = "zh-Hans",
+) -> str:
     for key in ("remediation", "recommendation", "fix", "fix_recommendation"):
         value = _report_plain_text(finding.get(key) or "")
         if value and value != "-":
             return value
+    normalized_language = _normalize_report_language(language)
+    if normalized_language == "en":
+        if finding.get("fixed_snippet"):
+            return (
+                "Replace the risky call with the fixed code below, then add security regression tests "
+                "for input boundaries, error paths, and affected business flows."
+            )
+        return (
+            "Constrain the dangerous call or unsafe configuration described by the finding and prefer "
+            "a project-validated safe API or setting. Add unit, integration, and security regression "
+            "tests for the affected location, then verify that the complete Source-to-Sink path is blocked."
+        )
+    if normalized_language == "zh-Hant":
+        if finding.get("fixed_snippet"):
+            return "依照下方修復程式碼替換風險呼叫，並補充涵蓋輸入邊界、異常路徑與業務流程的安全迴歸測試。"
+        return (
+            "根據風險說明收斂對應危險呼叫或不安全設定，優先採用專案已驗證的安全 API 或設定；"
+            "補充涵蓋該風險位置的單元測試、整合測試與安全迴歸，並複核 Source→Sink 路徑已被阻斷。"
+        )
     if finding.get("fixed_snippet"):
         return "按下方修复代码替换风险调用，并补充覆盖输入边界、异常路径和业务流程的安全回归测试。"
     return (
@@ -2182,7 +2223,7 @@ def _finding_markdown(
             f"- {_rt(language, 'risk_location')}: {file_name}:{risk_line}",
             f"- {_rt(language, 'code_range')}: {_rt(language, 'line') % line_range}",
             f"- {_rt(language, 'confidence')}: {finding.get('confidence') or 'medium'}",
-            f"- {_rt(language, 'remediation')}: {_report_finding_remediation(finding)}",
+            f"- {_rt(language, 'remediation')}: {_report_finding_remediation(finding, language)}",
             f"- CFG: {finding.get('cfg') or _rt(language, 'not_specified')}",
             f"- DFG: {finding.get('dfg') or _rt(language, 'not_specified')}",
         ]
@@ -5017,9 +5058,9 @@ def build_scan_result_json(
 ) -> dict[str, Any]:
     clean_source_kind = str(source_kind or "assistant_scan").strip() or "assistant_scan"
     if clean_source_kind == "agent_task":
-        payload = _materialize_agent_scan_json(scan_data)
+        payload = _materialize_agent_scan_json(scan_data, language=language)
     else:
-        payload = _materialize_assistant_scan_json(scan_data)
+        payload = _materialize_assistant_scan_json(scan_data, language=language)
     facts = _scan_result_facts(payload, clean_source_kind)
     document = {
         "$schema": _SCAN_RESULT_JSON_SCHEMA,
@@ -5070,7 +5111,11 @@ def validate_scan_result_json(value: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-def _materialize_agent_scan_json(scan_data: dict[str, Any]) -> dict[str, Any]:
+def _materialize_agent_scan_json(
+    scan_data: dict[str, Any],
+    *,
+    language: str = "zh-Hans",
+) -> dict[str, Any]:
     payload = _json_report_value(scan_data)
     original_task = scan_data.get("task") if isinstance(scan_data.get("task"), dict) else scan_data
     task = payload.get("task") if isinstance(payload.get("task"), dict) else payload
@@ -5096,11 +5141,15 @@ def _materialize_agent_scan_json(scan_data: dict[str, Any]) -> dict[str, Any]:
                 if snippet:
                     _set_structured_snippet(finding, snippet, line_start, risk_line)
                     finding["snippet_source"] = snippet_source
-                finding["remediation"] = _report_finding_remediation(finding)
+                finding["remediation"] = _report_finding_remediation(finding, language)
     return payload
 
 
-def _materialize_assistant_scan_json(scan_data: dict[str, Any]) -> dict[str, Any]:
+def _materialize_assistant_scan_json(
+    scan_data: dict[str, Any],
+    *,
+    language: str = "zh-Hans",
+) -> dict[str, Any]:
     payload = _json_report_value(scan_data)
     static_analysis = payload.get("static_analysis") if isinstance(payload.get("static_analysis"), dict) else {}
     findings = static_analysis.get("findings") if isinstance(static_analysis.get("findings"), list) else []
@@ -5119,7 +5168,7 @@ def _materialize_assistant_scan_json(scan_data: dict[str, Any]) -> dict[str, Any
             risk_line = _positive_report_line(finding.get("risk_line") or finding.get("line") or sink.get("line"))
             line_start = _positive_report_line(finding.get("line_start")) or risk_line
             _set_structured_snippet(finding, _safe_report_code(snippet), line_start, risk_line)
-        finding["remediation"] = _report_finding_remediation(finding)
+        finding["remediation"] = _report_finding_remediation(finding, language)
     return payload
 
 
@@ -5506,24 +5555,27 @@ def _render_binary_report_artifacts_with_mcps(
     *,
     metadata: dict[str, Any],
 ) -> tuple[dict[str, bytes], dict[str, str]]:
-    import base64
-
-    from app.mcp.report_pdf import invoke_report_pdf_mcp
-    from app.mcp.report_excel import invoke_report_excel_mcp
-    from app.mcp.report_word import invoke_report_word_mcp
+    from app.mcp.protocol import call_mcp_tool, read_mcp_artifact, release_mcp_artifacts
 
     artifacts: dict[str, bytes] = {}
     errors: dict[str, str] = {}
     audits = metadata.get("report_mcps") if isinstance(metadata.get("report_mcps"), list) else []
-    for report_format, server, tool, invoke in (
-        ("docx", "SecFlow Word MCP", "render_word_report", invoke_report_word_mcp),
-        ("xlsx", "SecFlow Excel MCP", "render_excel_report", invoke_report_excel_mcp),
-        ("pdf", "SecFlow PDF MCP", "render_pdf_report", invoke_report_pdf_mcp),
+    for report_format, server, tool, tool_id in (
+        ("docx", "SecFlow Word MCP", "render_word_report", "mcp__report_word__render_word_report"),
+        ("xlsx", "SecFlow Excel MCP", "render_excel_report", "mcp__report_excel__render_excel_report"),
+        ("pdf", "SecFlow PDF MCP", "render_pdf_report", "mcp__report_pdf__render_pdf_report"),
     ):
         invoked_at = now_iso()
         try:
-            result = invoke({"report_document": report_document})
-            payload = base64.b64decode(str(result.get("artifact_base64") or ""), validate=True)
+            result = call_mcp_tool(
+                agent_id="report_agent",
+                tool_id=tool_id,
+                arguments={"report_document": report_document},
+            )
+            try:
+                payload = read_mcp_artifact(result)
+            finally:
+                release_mcp_artifacts(result)
             expected_digest = str(result.get("output_sha256") or "")
             actual_digest = hashlib.sha256(payload).hexdigest()
             if not expected_digest or expected_digest != actual_digest:
@@ -5533,7 +5585,8 @@ def _render_binary_report_artifacts_with_mcps(
                 {
                     "server": server,
                     "tool": tool,
-                    "transport": "in-process",
+                    "transport": str((result.get("_mcp_runtime") or {}).get("transport") or "stdio"),
+                    "endpoint": "managed-child-process",
                     "status": "completed",
                     "invoked_at": invoked_at,
                     "input_sha256": str(result.get("input_sha256") or ""),
@@ -5548,7 +5601,8 @@ def _render_binary_report_artifacts_with_mcps(
                 {
                     "server": server,
                     "tool": tool,
-                    "transport": "in-process",
+                    "transport": "stdio",
+                    "endpoint": "managed-child-process",
                     "status": "failed",
                     "invoked_at": invoked_at,
                     "error": str(exc),

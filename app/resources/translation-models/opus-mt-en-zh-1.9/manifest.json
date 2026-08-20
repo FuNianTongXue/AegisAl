@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "model_id": "opus-mt-en-zh-1.9",
+  "engine": {
+    "name": "CTranslate2",
+    "version": "4.8.1"
+  },
+  "tokenizer": {
+    "name": "SentencePiece",
+    "version": "0.2.2"
+  },
+  "languages": {
+    "source": "en",
+    "target": "zh-Hans"
+  },
+  "runtime_policy": {
+    "network_access": false,
+    "requires_api_key": false,
+    "uses_llm_tokens": false
+  },
+  "upstream": {
+    "package": "translate-en_zh-1_9.argosmodel",
+    "package_version": "1.9",
+    "source_url": "https://argos-net.com/v1/translate-en_zh-1_9.argosmodel",
+    "archive_sha256": "433e7c4f034d87fbe2353161e05f18646d7999452f801a4e1f0378522b9850ab",
+    "license": "CC-BY-4.0",
+    "authors": [
+      "J\u00f6rg Tiedemann",
+      "Santhosh Thottingal"
+    ]
+  },
+  "files": [
+    {
+      "path": "LICENSE.txt",
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+      "size": 18657,
+      "role": "license"
+    },
+    {
+      "path": "README.md",
+      "sha256": "02e30d7b378b79d7c767c56f7d7cfed8d55d53c249baea916559a08031613795",
+      "size": 1574,
+      "role": "documentation"
+    },
+    {
+      "path": "UPSTREAM-README.md",
+      "sha256": "050e546664f0e70d80b6f83aa1da5f04ee85335f4a1b62d1c89184f76100b5dc",
+      "size": 401,
+      "role": "upstream-attribution"
+    },
+    {
+      "path": "metadata.json",
+      "sha256": "106086bc1b77d2d5c298aa38be69e8e87263eeb4167b4614b08a030c43d31b6a",
+      "size": 135,
+      "role": "upstream-metadata"
+    },
+    {
+      "path": "model/config.json",
+      "sha256": "3a8660f12559a223969532ff191e5e6f50d4ff24164517edbd6a5090dc5144c6",
+      "size": 216,
+      "role": "ctranslate2-config"
+    },
+    {
+      "path": "model/model.bin",
+      "sha256": "1a039114d9456b6528fabb65b455b6f156319634a0f984b1f6018f7737d67598",
+      "size": 82713318,
+      "role": "ctranslate2-model"
+    },
+    {
+      "path": "model/shared_vocabulary.json",
+      "sha256": "c0b6e24705ec0489d5b810de365959c1013aecd644cfeca161b54ea1df6a7dc0",
+      "size": 1367577,
+      "role": "shared-vocabulary"
+    },
+    {
+      "path": "sentencepiece.model",
+      "sha256": "872224b85a11edc9d769a94949fd387b67ea85b50708db9f91f32f5b497a9af3",
+      "size": 806370,
+      "role": "sentencepiece-model"
+    }
+  ]
+}

@@ -39,7 +39,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { CLIENT_LANGUAGES, type ClientLocale, translate, useI18n } from "../i18n";
+import { CLIENT_LANGUAGES, clientLocaleTag, type ClientLocale, translate, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { configForProvider, providerPresets, selectedProviderId } from "../lib/modelControls";
 import { handleWindowDrag } from "../lib/windowDrag";
@@ -100,13 +100,38 @@ export function SettingsView({ onBack }: { onBack?: () => void }) {
   const state = useAppStore();
   const { t } = useI18n();
   const [tab, setTab] = useState<SettingsTab>("model");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const back = onBack || (() => state.set({ view: "assistant" }));
+  const confirmDiscard = () => (
+    !hasUnsavedChanges
+    || window.confirm(t("当前设置尚未保存，确定要放弃修改吗？"))
+  );
+  const selectTab = (nextTab: SettingsTab) => {
+    if (nextTab === tab || !confirmDiscard()) return;
+    setHasUnsavedChanges(false);
+    setTab(nextTab);
+  };
+  const leaveSettings = () => {
+    if (!confirmDiscard()) return;
+    setHasUnsavedChanges(false);
+    back();
+  };
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasUnsavedChanges]);
 
   return (
     <div className="settings-layout zcode-settings">
       <div className="settings-window-drag" data-tauri-drag-region onMouseDown={handleWindowDrag} />
       <aside className="settings-navigation" aria-label={t("设置导航")}>
-        <button className="settings-back" onClick={back}><ArrowLeft size={16} /><span>{t("返回工作区")}</span></button>
+        <button className="settings-back" aria-label={t("返回工作区")} onClick={leaveSettings}><ArrowLeft size={16} /><span>{t("返回工作区")}</span></button>
         <div className="settings-nav-scroll">
           {settingsGroups.map((group) => (
             <section className="settings-nav-group" key={group.label}>
@@ -117,32 +142,32 @@ export function SettingsView({ onBack }: { onBack?: () => void }) {
                   aria-label={t(item.ariaLabel || item.label)}
                   aria-current={tab === item.id ? "page" : undefined}
                   className={tab === item.id ? "active" : ""}
-                  onClick={() => setTab(item.id)}
+                  onClick={() => selectTab(item.id)}
                 >
                   {item.icon}<span>{t(item.label)}</span>
                 </button>
               ))}
             </section>
           ))}
-          <button className={`settings-guide ${tab === "guide" ? "active" : ""}`} onClick={() => setTab("guide")}>
+          <button className={`settings-guide ${tab === "guide" ? "active" : ""}`} aria-label={t("引导")} onClick={() => selectTab("guide")}>
             <Sparkles size={16} /><span>{t("引导")}</span>
           </button>
         </div>
         <div className="settings-account-row">
-          <button className="settings-account" onClick={() => setTab("general")}>
+          <button className="settings-account" aria-label={t("打开用户资料设置")} onClick={() => selectTab("general")}>
             <ProfileAvatar profile={state.settings?.profile} userId={state.userId} className="settings-account-avatar" />
             <span><strong>{state.settings?.profile.display_name || t("本机用户")}</strong><small>{state.llm?.model || t("连接使用")}</small></span>
           </button>
-          <button className="settings-account-action" aria-label={t("打开用户资料设置")} title={t("用户资料设置")} onClick={() => setTab("general")}><Settings size={16} /></button>
+          <button className="settings-account-action" aria-label={t("打开用户资料设置")} title={t("用户资料设置")} onClick={() => selectTab("general")}><Settings size={16} /></button>
         </div>
       </aside>
       <main className="settings-stage">
-        <button className="settings-help" aria-label={t("打开设置引导")} title={t("设置引导")} onClick={() => setTab("guide")}><CircleHelp size={17} /></button>
+        <button className="settings-help" aria-label={t("打开设置引导")} title={t("设置引导")} onClick={() => selectTab("guide")}><CircleHelp size={17} /></button>
         <div className="settings-content">
           <div className="settings-panel" key={tab} data-settings-tab={tab}>
-            {tab === "general" ? <ProfileSettings /> : null}
+            {tab === "general" ? <ProfileSettings onDirtyChange={setHasUnsavedChanges} /> : null}
             {tab === "appearance" ? <AppearanceSettings /> : null}
-            {tab === "model" ? <ModelSettings /> : null}
+            {tab === "model" ? <ModelSettings onDirtyChange={setHasUnsavedChanges} /> : null}
             {tab === "browser" ? <InformationSubscriptionSettings /> : null}
             {tab === "index" ? <IntelligenceSourceSettings /> : null}
             {tab === "usage" ? <UsageSettings /> : null}
@@ -162,7 +187,7 @@ function SettingsHeader({ title, description, action }: { title: string; descrip
   return <header className="settings-header"><div><h1>{t(title)}</h1>{action}</div><p>{t(description)}</p></header>;
 }
 
-function ProfileSettings() {
+function ProfileSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
   const state = useAppStore();
   const { locale, t } = useI18n();
   const [profile, setProfile] = useState<UserProfile>(state.settings?.profile || { display_name: "", email: "", department: "", role: "" });
@@ -176,8 +201,12 @@ function ProfileSettings() {
     if (!state.settings?.profile) return;
     setProfile(state.settings.profile);
     setLocked(Boolean(state.settings.profile.updated_at));
-  }, [state.settings?.profile]);
-  const field = (key: keyof UserProfile, value: string) => setProfile((current) => ({ ...current, [key]: value }));
+    onDirtyChange(false);
+  }, [onDirtyChange, state.settings?.profile]);
+  const field = (key: keyof UserProfile, value: string) => {
+    setProfile((current) => ({ ...current, [key]: value }));
+    onDirtyChange(true);
+  };
   const applyProfile = (result: UserProfile) => {
     setProfile(result);
     const latest = useAppStore.getState().settings;
@@ -190,6 +219,7 @@ function ProfileSettings() {
       const result = await api.saveProfile(state.userId, profile);
       applyProfile(result);
       setLocked(true);
+      onDirtyChange(false);
       setStatus(t("已保存"));
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -264,6 +294,7 @@ function ProfileSettings() {
     }
     if (state.settings?.profile) setProfile(state.settings.profile);
     setLocked(true);
+    onDirtyChange(false);
     setStatus(t("已取消未保存的修改"));
   };
   return (
@@ -279,20 +310,20 @@ function ProfileSettings() {
           <ProfileAvatar profile={profile} userId={state.userId} previewUrl={avatarPreview} />
           <span className="profile-avatar-edit">{avatarBusy ? <LoaderCircle className="spin" /> : <Camera />}</span>
         </button>
-        <input ref={avatarInput} className="profile-avatar-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void uploadAvatar(event.target.files?.[0])} />
+        <input ref={avatarInput} className="profile-avatar-input" type="file" name="profile_avatar" accept="image/jpeg,image/png,image/webp" onChange={(event) => void uploadAvatar(event.target.files?.[0])} />
         <div className="profile-identity-copy"><strong>{profile.display_name || t("本机用户")}</strong><small>{profile.role ? t(profile.role) : t("尚未选择角色")}</small></div>
         {profile.avatar_available ? <button type="button" className="profile-avatar-remove" aria-label={t("移除头像")} title={t("移除头像")} onClick={() => void removeAvatar()} disabled={avatarBusy}><Trash2 /></button> : null}
       </div>
       <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <div className="settings-form-grid">
-          <label>{t("显示名称")}<input required maxLength={80} value={profile.display_name} onChange={(event) => field("display_name", event.target.value)} /></label>
-          <label>{t("邮箱")}<input required maxLength={160} type="email" value={profile.email} onChange={(event) => field("email", event.target.value)} /></label>
-          <label>{t("部门")}<input maxLength={120} value={profile.department} onChange={(event) => field("department", event.target.value)} /></label>
-          <label>{t("角色")}<select value={profile.role} onChange={(event) => field("role", event.target.value)}><option value="">{t("请选择角色")}</option>{!roles.includes(profile.role) && profile.role ? <option>{profile.role}</option> : null}{roles.map((role) => <option value={role} key={role}>{t(role)}</option>)}</select></label>
-          <label>{t("手机号")}<input maxLength={80} value={profile.phone || ""} onChange={(event) => field("phone", event.target.value)} /></label>
-          <label>{t("员工编号")}<input maxLength={80} value={profile.employee_id || ""} onChange={(event) => field("employee_id", event.target.value)} /></label>
-          <label>{t("客户端语言")}<select aria-label={t("客户端语言")} value={locale} onChange={(event) => void changeLanguage(event.target.value as ClientLocale)}>{CLIENT_LANGUAGES.map((language) => <option value={language.value} key={language.value}>{language.label}</option>)}</select></label>
-          <label className="wide">{t("个人简介")}<textarea maxLength={200} rows={3} value={profile.bio || ""} onChange={(event) => field("bio", event.target.value)} /></label>
+          <label>{t("显示名称")}<input required maxLength={80} name="display_name" autoComplete="name" value={profile.display_name} onChange={(event) => field("display_name", event.target.value)} /></label>
+          <label>{t("邮箱")}<input required maxLength={160} name="email" type="email" autoComplete="email" spellCheck={false} value={profile.email} onChange={(event) => field("email", event.target.value)} /></label>
+          <label>{t("部门")}<input maxLength={120} name="department" autoComplete="organization" value={profile.department} onChange={(event) => field("department", event.target.value)} /></label>
+          <label>{t("角色")}<select name="role" autoComplete="off" value={profile.role} onChange={(event) => field("role", event.target.value)}><option value="">{t("请选择角色")}</option>{!roles.includes(profile.role) && profile.role ? <option>{profile.role}</option> : null}{roles.map((role) => <option value={role} key={role}>{t(role)}</option>)}</select></label>
+          <label>{t("手机号")}<input maxLength={80} name="phone" type="tel" inputMode="tel" autoComplete="tel" value={profile.phone || ""} onChange={(event) => field("phone", event.target.value)} /></label>
+          <label>{t("员工编号")}<input maxLength={80} name="employee_id" autoComplete="off" spellCheck={false} value={profile.employee_id || ""} onChange={(event) => field("employee_id", event.target.value)} /></label>
+          <label>{t("客户端语言")}<select aria-label={t("客户端语言")} name="language" autoComplete="off" value={locale} onChange={(event) => void changeLanguage(event.target.value as ClientLocale)}>{CLIENT_LANGUAGES.map((language) => <option value={language.value} key={language.value}>{language.label}</option>)}</select></label>
+          <label className="wide">{t("个人简介")}<textarea maxLength={200} rows={3} name="bio" autoComplete="off" value={profile.bio || ""} onChange={(event) => field("bio", event.target.value)} /></label>
         </div>
         <div className="settings-actions"><span aria-live="polite">{status}</span><button className="primary" type="submit" disabled={locked || busy || avatarBusy}>{busy ? <LoaderCircle className="spin" /> : status === t("已保存") ? <Check size={14} /> : <Save size={14} />}{busy ? t("正在保存") : t("保存资料并锁定")}</button></div>
       </form>
@@ -310,8 +341,9 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
-function ModelSettings() {
+function ModelSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
   const state = useAppStore();
+  const { t } = useI18n();
   const [config, setConfig] = useState<LlmConfig>(state.llm || { provider: "openai", endpoint: "", model: "", max_tokens: 1800, timeout_ms: 60000, enabled: true });
   const [models, setModels] = useState<Array<{ id: string; name?: string }>>([]);
   const [status, setStatus] = useState("");
@@ -319,14 +351,19 @@ function ModelSettings() {
   const [locked, setLocked] = useState(true);
   const [showKey, setShowKey] = useState(false);
   const [activePanel, setActivePanel] = useState<"provider" | "model" | "credential" | "advanced">("provider");
-  useEffect(() => { if (state.llm) setConfig(state.llm); }, [state.llm]);
+  useEffect(() => {
+    if (!state.llm) return;
+    setConfig(state.llm);
+    onDirtyChange(false);
+  }, [onDirtyChange, state.llm]);
   const update = (key: keyof LlmConfig, value: string | number | boolean) => {
     setConfig((current) => ({ ...current, [key]: value }));
+    onDirtyChange(true);
     if (key === "model" || key === "endpoint" || key === "api_key") setStatus("");
   };
   const loadModels = async () => { setBusy(true); setStatus("正在从模型厂商接口读取模型"); try { const result = await api.modelCatalog(state.userId, config); setModels(result.models || []); setStatus(`已读取 ${result.models?.length || 0} 个模型`); } catch (error) { setStatus(String(error)); } finally { setBusy(false); } };
   const test = async (targetConfig = config) => { setBusy(true); try { const result = await api.testLlmConfig(state.userId, targetConfig); if (result.status !== "success" || result.configured === false) throw new Error(result.message || "模型连接测试失败"); setStatus(result.latency_ms ? `模型连接正常 · ${result.latency_ms}ms` : "模型连接正常"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
-  const save = async () => { setBusy(true); setStatus("正在验证模型连接"); try { const nextConfig = { ...config, enabled: config.enabled !== false }; await api.testLlmConfig(state.userId, nextConfig); const result = await api.saveLlmConfig(state.userId, nextConfig); state.set({ llm: result }); setConfig(result); setLocked(true); setShowKey(false); setStatus(result.enabled ? "模型配置已验证、保存并启用" : "模型配置已验证、保存并停用"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
+  const save = async () => { setBusy(true); setStatus("正在验证模型连接"); try { const nextConfig = { ...config, enabled: config.enabled !== false }; await api.testLlmConfig(state.userId, nextConfig); const result = await api.saveLlmConfig(state.userId, nextConfig); state.set({ llm: result }); setConfig(result); setLocked(true); setShowKey(false); onDirtyChange(false); setStatus(result.enabled ? "模型配置已验证、保存并启用" : "模型配置已验证、保存并停用"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
   const handleLockAction = () => {
     if (locked) {
       setLocked(false);
@@ -337,6 +374,7 @@ function ModelSettings() {
   };
   const chooseProvider = (provider: string) => {
     setConfig((current) => configForProvider(current, provider));
+    onDirtyChange(true);
     setModels([]);
     setStatus("");
   };
@@ -358,7 +396,7 @@ function ModelSettings() {
     <section className="model-settings-page">
       <SettingsHeader
         title="模型设置"
-        description="管理自定义模型供应商，配置后可在安全分析时选择使用。"
+        description={t("推理模型仅用于安全分析与内容生成；漏洞翻译由本机离线能力完成，不依赖模型配置，也不计入 Token 用量。")}
         action={<div className="model-settings-header-actions"><button className={`settings-icon-button ${locked ? "locked" : "unlocked"}`} aria-label={locked ? "解锁模型配置" : "保存并锁定模型配置"} title={locked ? "解锁后编辑模型配置" : config.enabled !== false ? "保存并启用，然后锁定" : "保存并停用，然后锁定"} onClick={handleLockAction} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : locked ? <Lock /> : <LockOpen />}</button><button className="settings-icon-button" aria-label="刷新模型列表" title="刷新模型列表" onClick={() => void loadModels()} disabled={locked || busy}><RefreshCcw /></button></div>}
       />
       <div className={`model-settings-card model-transition-card ${locked ? "locked" : ""}`} aria-readonly={locked}>
@@ -389,8 +427,8 @@ function ModelSettings() {
               <div className="model-panel-section compact">
                 <div className="model-panel-heading"><div><KeyRound /><span><strong>验证接入凭证</strong><small>密钥仅保存在本机安全存储，不会显示完整内容。</small></span></div><button type="button" className="credential-test-button" onClick={() => void test()} disabled={busy}><TestTube2 size={14} />测试连接</button></div>
                 <div className="provider-fields-grid">
-                  <label className="provider-field">Base URL<input value={config.endpoint || ""} placeholder="使用厂商官方默认地址" onChange={(event) => update("endpoint", event.target.value)} /></label>
-                  <label className="provider-field provider-key-field">API Key<div><input type={showKey ? "text" : "password"} value={config.api_key || ""} placeholder={config.api_key_configured ? "已配置，留空保持不变" : "输入 API Key"} onChange={(event) => update("api_key", event.target.value)} /><button type="button" aria-label={showKey ? "隐藏 API Key" : "显示 API Key"} title={showKey ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label>
+                  <label className="provider-field" htmlFor="model-endpoint">Base URL<input id="model-endpoint" name="model_endpoint" type="url" inputMode="url" autoComplete="off" spellCheck={false} value={config.endpoint || ""} placeholder="例如 https://api.example.com/v1…" onChange={(event) => update("endpoint", event.target.value)} /></label>
+                  <div className="provider-field provider-key-field"><label htmlFor="model-api-key">API Key</label><div><input id="model-api-key" name="model_api_key" type={showKey ? "text" : "password"} autoComplete="off" spellCheck={false} value={config.api_key || ""} placeholder={config.api_key_configured ? "已配置，留空保持不变…" : "输入模型厂商 API Key…"} onChange={(event) => update("api_key", event.target.value)} /><button type="button" aria-label={showKey ? "隐藏 API Key" : "显示 API Key"} title={showKey ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></div>
                 </div>
               </div>
             ) : null}
@@ -443,13 +481,13 @@ function AppearanceSettings() {
           <input aria-label={t(theme.label)} type="radio" name="theme" checked={state.theme === theme.id} onChange={() => persistAppearance(theme.id, state.fontScale)} />
         </label>
       ))}
-      <div className="font-scale-setting"><div><Type size={18} /><strong>字体大小</strong></div><div className="font-segments">{[[0.9,"小"],[1,"标准"],[1.12,"大"]].map(([value,label]) => <button key={String(value)} className={state.fontScale === value ? "active" : ""} onClick={() => persistAppearance(state.theme, Number(value))}>{label}</button>)}</div></div>
+      <div className="font-scale-setting"><div><Type size={18} /><strong>字体大小</strong></div><div className="font-segments" role="group" aria-label="字体大小">{[[0.9,"小"],[1,"标准"],[1.12,"大"]].map(([value,label]) => <button key={String(value)} aria-pressed={state.fontScale === value} className={state.fontScale === value ? "active" : ""} onClick={() => persistAppearance(state.theme, Number(value))}>{label}</button>)}</div></div>
     </section>
   );
 }
 
 function IntelligenceSourceSettings() {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [storedCount, setStoredCount] = useState<number>();
   const [error, setError] = useState("");
   useEffect(() => {
@@ -473,7 +511,7 @@ function IntelligenceSourceSettings() {
       <SettingsHeader title="索引库" description="查看本机情报库当前已存储的数据量。" />
       <div className="index-storage-card" aria-busy={storedCount === undefined && !error}>
         <span><Database /></span>
-        <strong>{storedCount === undefined ? "--" : storedCount.toLocaleString("zh-CN")}</strong>
+        <strong>{storedCount === undefined ? "--" : new Intl.NumberFormat(clientLocaleTag(locale)).format(storedCount)}</strong>
         <b>{t("条已存储数据")}</b>
       </div>
       {error ? <p className="capability-error">{error}</p> : null}
@@ -486,7 +524,7 @@ function InformationSubscriptionSettings() {
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("全部分组");
   const [enabledOnly, setEnabledOnly] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(60);
+  const [visibleCount, setVisibleCount] = useState(40);
   const [busySource, setBusySource] = useState("");
   const [message, setMessage] = useState("");
   useEffect(() => {
@@ -507,12 +545,12 @@ function InformationSubscriptionSettings() {
   }, []);
   const sources = snapshot?.sources || [];
   const groups = useMemo(() => ["全部分组", ...Array.from(new Set(sources.map((source) => source.group || "其他"))).sort()], [sources]);
-  const filtered = useMemo(() => { const keyword = query.trim().toLocaleLowerCase("zh-CN"); return sources.filter((source) => { if (enabledOnly && !source.enabled) return false; if (group !== "全部分组" && (source.group || "其他") !== group) return false; return !keyword || `${source.name} ${source.group || ""} ${source.region || ""}`.toLocaleLowerCase("zh-CN").includes(keyword); }); }, [enabledOnly, group, query, sources]);
+  const filtered = useMemo(() => { const keyword = query.trim().toLocaleLowerCase(); return sources.filter((source) => { if (enabledOnly && !source.enabled) return false; if (group !== "全部分组" && (source.group || "其他") !== group) return false; return !keyword || `${source.name} ${source.group || ""} ${source.region || ""}`.toLocaleLowerCase().includes(keyword); }); }, [enabledOnly, group, query, sources]);
   const replaceSource = (next: InformationSource) => setSnapshot((current) => current ? { ...current, sources: (current.sources || []).map((source) => source.id === next.id ? next : source), source_summary: current.source_summary ? { ...current.source_summary, enabled: (current.sources || []).reduce((count, source) => count + ((source.id === next.id ? next : source).enabled ? 1 : 0), 0), opml_enabled: (current.sources || []).reduce((count, source) => { const value = source.id === next.id ? next : source; return count + (value.catalog === "chinese-security-rss" && value.enabled ? 1 : 0); }, 0) } : undefined } : current);
   const toggle = async (source: InformationSource) => { setBusySource(source.id); setMessage(""); try { replaceSource(await api.updateInformationSource(source.id, !source.enabled)); } catch (reason) { setMessage(String(reason)); } finally { setBusySource(""); } };
   const test = async (source: InformationSource) => { setBusySource(source.id); setMessage(`正在测试 ${source.name}`); try { const result = await api.testInformationSource(source.id); replaceSource(result); setMessage(result.message || `${source.name} 测试完成`); } catch (reason) { setMessage(String(reason)); } finally { setBusySource(""); } };
   const summary = snapshot?.source_summary;
-  return <section><SettingsHeader title="咨询订阅" description="管理信息咨询使用的新闻、研究与安全社区订阅。" /><div className="source-summary"><span><small>全部来源</small><strong>{summary?.total ?? sources.length}</strong></span><span><small>已启用</small><strong>{summary?.enabled ?? sources.filter((source) => source.enabled).length}</strong></span><span><small>OPML 已启用</small><strong>{summary ? `${summary.opml_enabled}/${summary.opml_enabled_limit}` : "-"}</strong></span></div><div className="source-toolbar"><label><Search size={14} /><input aria-label="搜索咨询来源" value={query} placeholder="搜索来源或分组" onChange={(event) => { setQuery(event.target.value); setVisibleCount(60); }} /></label><select aria-label="咨询来源分组" value={group} onChange={(event) => { setGroup(event.target.value); setVisibleCount(60); }}>{groups.map((item) => <option key={item}>{item}</option>)}</select><label className="enabled-filter"><input type="checkbox" checked={enabledOnly} onChange={(event) => setEnabledOnly(event.target.checked)} />只看已启用</label></div>{message ? <p className="source-message">{message}</p> : null}<div className="source-list information-source-list">{filtered.slice(0, visibleCount).map((source) => <div key={source.id}><span className="source-avatar">{source.name.slice(0, 1)}</span><span><strong>{source.name}</strong><small>{source.group || "其他"} · {source.item_count} 条 · {source.message || "等待更新"}</small></span><b className={`source-status ${source.status}`}>{sourceStatusLabel(source)}</b><button className="source-test" title={`测试 ${source.name} 连接`} onClick={() => void test(source)} disabled={Boolean(busySource)}>{busySource === source.id ? <LoaderCircle className="spin" /> : <TestTube2 />}</button><input aria-label={`${source.name}订阅`} type="checkbox" checked={source.enabled} onChange={() => void toggle(source)} disabled={Boolean(busySource)} /></div>)}{!filtered.length ? <p className="settings-empty"><Bell size={18} />{sources.length ? "没有匹配的咨询来源" : message || "正在读取咨询订阅"}</p> : null}</div>{filtered.length > visibleCount ? <button className="source-more secondary" onClick={() => setVisibleCount((value) => value + 60)}>再显示 60 个来源</button> : null}</section>;
+  return <section><SettingsHeader title="咨询订阅" description="管理信息咨询使用的新闻、研究与安全社区订阅。" /><div className="source-summary"><span><small>全部来源</small><strong>{summary?.total ?? sources.length}</strong></span><span><small>已启用</small><strong>{summary?.enabled ?? sources.filter((source) => source.enabled).length}</strong></span><span><small>OPML 已启用</small><strong>{summary ? `${summary.opml_enabled}/${summary.opml_enabled_limit}` : "-"}</strong></span></div><div className="source-toolbar"><label><Search size={14} aria-hidden="true" /><input aria-label="搜索咨询来源" name="information_source_query" autoComplete="off" value={query} placeholder="例如 FreeBuf 或安全媒体…" onChange={(event) => { setQuery(event.target.value); setVisibleCount(40); }} /></label><select aria-label="咨询来源分组" name="information_source_group" autoComplete="off" value={group} onChange={(event) => { setGroup(event.target.value); setVisibleCount(40); }}>{groups.map((item) => <option key={item}>{item}</option>)}</select><label className="enabled-filter"><input type="checkbox" name="information_source_enabled" checked={enabledOnly} onChange={(event) => setEnabledOnly(event.target.checked)} />只看已启用</label></div><p className="source-message" role="status" aria-live="polite">{message}</p><div className="source-list information-source-list">{filtered.slice(0, visibleCount).map((source) => <div key={source.id}><span className="source-avatar" aria-hidden="true">{source.name.slice(0, 1)}</span><span><strong>{source.name}</strong><small>{source.group || "其他"} · {source.item_count} 条 · {source.message || "等待更新"}</small></span><b className={`source-status ${source.status}`}>{sourceStatusLabel(source)}</b><button className="source-test" aria-label={`测试 ${source.name} 连接`} title={`测试 ${source.name} 连接`} onClick={() => void test(source)} disabled={Boolean(busySource)}>{busySource === source.id ? <LoaderCircle className="spin" /> : <TestTube2 />}</button><input aria-label={`${source.name}订阅`} type="checkbox" checked={source.enabled} onChange={() => void toggle(source)} disabled={Boolean(busySource)} /></div>)}{!filtered.length ? <p className="settings-empty"><Bell size={18} />{sources.length ? "没有匹配的咨询来源" : message || "正在读取咨询订阅…"}</p> : null}</div>{filtered.length > visibleCount ? <button className="source-more secondary" onClick={() => setVisibleCount((value) => value + 40)}>再显示 40 个来源</button> : null}</section>;
 }
 
 function sourceStatusLabel(source: InformationSource) {
@@ -579,7 +617,7 @@ function UsageSettings() {
         )}
       />
 
-      {error ? <div className="usage-error"><BarChart3 /><span>{error}</span></div> : null}
+      {error ? <div className="usage-error" role="alert"><BarChart3 /><span>{error}</span></div> : null}
       <div className={`usage-metrics ${loading ? "loading" : ""}`} aria-busy={loading}>
         {metrics.map((metric) => (
           <article className={`usage-metric ${metric.featured ? "featured" : ""}`} key={metric.key} title={metric.key === "tokens" ? `${totalTokens} Tokens` : undefined}>
@@ -597,23 +635,25 @@ function UsageSettings() {
 
       <div className="usage-section usage-activity">
         <header><h2>{t("活跃热力图")}</h2><span><small>{t("较少")}</small>{[0, 1, 2, 3, 4].map((level) => <i className={`level-${level}`} key={level} />)}<small>{t("较多")}</small></span></header>
-        <div className="usage-heatmap" style={{ gridTemplateRows: `repeat(${Math.min(7, days)}, 14px)` }}>
+        <div className="usage-heatmap" role="img" aria-label={t("最近 {days} 天活跃热力图", { days })} style={{ gridTemplateRows: `repeat(${Math.min(7, days)}, 14px)` }}>
           {(usage?.heatmap || []).map((item) => (
             <i className={`level-${item.level}`} key={item.date} title={`${formatUsageDate(item.date, locale)}：${item.count}`} />
           ))}
         </div>
+        <table className="sr-only"><caption>{t("最近 {days} 天活跃热力图", { days })}</caption><thead><tr><th>{t("日期")}</th><th>{t("调用次数")}</th></tr></thead><tbody>{(usage?.heatmap || []).map((item) => <tr key={item.date}><td>{formatUsageDate(item.date, locale)}</td><td>{formatUsageNumber(item.count, locale)}</td></tr>)}</tbody></table>
         {!loading && !usage?.active_days ? <p className="usage-empty">{t("所选时间范围内还没有模型调用，完成问答后会在这里形成活动记录。")}</p> : null}
       </div>
 
       <div className="usage-section usage-trend">
         <header><h2>{t("按天 Token 趋势")}</h2><span>{t("最高 {count}", { count: formatUsageNumber(maximumDailyTokens === 1 && !totalTokens ? 0 : maximumDailyTokens, locale) })}</span></header>
-        <div className="usage-trend-chart" aria-label={t("最近 {days} 天 Token 趋势", { days })}>
+        <div className="usage-trend-chart" role="img" aria-label={t("最近 {days} 天 Token 趋势", { days })}>
           {(usage?.daily || []).map((item) => (
             <i key={item.date} title={`${formatUsageDate(item.date, locale)}：${formatUsageNumber(item.total_tokens, locale)} Tokens`}>
               <b style={{ height: `${item.total_tokens ? Math.max(5, item.total_tokens / maximumDailyTokens * 100) : 0}%` }} />
             </i>
           ))}
         </div>
+        <table className="sr-only"><caption>{t("最近 {days} 天 Token 趋势", { days })}</caption><thead><tr><th>{t("日期")}</th><th>Tokens</th></tr></thead><tbody>{(usage?.daily || []).map((item) => <tr key={item.date}><td>{formatUsageDate(item.date, locale)}</td><td>{formatUsageNumber(item.total_tokens, locale)}</td></tr>)}</tbody></table>
         <div className="usage-trend-axis"><span>{formatUsageDate(usage?.daily[0]?.date || "", locale)}</span><span>{formatUsageDate(usage?.daily.at(-1)?.date || "", locale)}</span></div>
       </div>
 
@@ -623,16 +663,14 @@ function UsageSettings() {
 }
 
 function formatUsageNumber(value: number, locale: ClientLocale) {
-  const language = locale === "en" ? "en-US" : locale === "zh-Hant" ? "zh-Hant" : "zh-CN";
-  return new Intl.NumberFormat(language).format(Math.max(0, Number(value || 0)));
+  return new Intl.NumberFormat(clientLocaleTag(locale)).format(Math.max(0, Number(value || 0)));
 }
 
 function formatUsageDate(value: string, locale: ClientLocale) {
   if (!value) return "";
   const parsed = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return value;
-  const language = locale === "en" ? "en-US" : locale === "zh-Hant" ? "zh-Hant" : "zh-CN";
-  return new Intl.DateTimeFormat(language, { month: "short", day: "numeric", timeZone: "UTC" }).format(parsed);
+  return new Intl.DateTimeFormat(clientLocaleTag(locale), { month: "short", day: "numeric", timeZone: "UTC" }).format(parsed);
 }
 
 function CapabilitySettings({ category }: { category: "agents" | "skills" | "mcp" }) {

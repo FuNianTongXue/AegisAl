@@ -424,6 +424,40 @@ class InformationServiceTests(unittest.TestCase):
         self.assertEqual(timeout.read, 18.0)
         self.assertEqual(type(context).__module__, "truststore._api")
 
+    def test_information_uses_source_text_and_ignores_old_translation_failures(self) -> None:
+        fake_store = FakeStore()
+        fake_store.state = self.state_with_only_enabled("freebuf")
+        fake_store.state["information"]["items"] = [
+            {
+                "id": "news-original",
+                "source_id": "freebuf",
+                "source_name": "FreeBuf",
+                "title": "企业漏洞优先级怎么排？",
+                "summary": "结合资产与在野利用情况确定修复顺序。",
+                "title_original": "企业漏洞优先级怎么排？",
+                "summary_original": "结合资产与在野利用情况确定修复顺序。",
+                "url": "https://example.test/original",
+                "published_at": "2026-08-20T00:00:00+00:00",
+                "information_translation": {
+                    "version": 1,
+                    "languages": {"zh-Hans": {"status": "failed"}},
+                },
+            }
+        ]
+
+        snapshot = InformationService(fake_store, fetcher=lambda _source: [])._current_snapshot(
+            response_language="zh-Hans"
+        )
+        prepared = information_module._prepare_information_item(
+            fake_store.state["information"]["items"][0]
+        )
+
+        self.assertEqual(snapshot["items"][0]["title"], "企业漏洞优先级怎么排？")
+        self.assertEqual(snapshot["items"][0]["summary"], "结合资产与在野利用情况确定修复顺序。")
+        self.assertNotIn("translation_status", snapshot["items"][0])
+        self.assertNotIn("translation_status", snapshot)
+        self.assertNotIn("information_translation", prepared)
+
     def test_https_feed_redirect_cannot_downgrade_transport(self) -> None:
         with self.assertRaisesRegex(ValueError, "HTTPS"):
             information_module._reject_https_downgrade(

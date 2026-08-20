@@ -10,10 +10,12 @@ import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from app.agent.translation_agent import TranslationAgentResult
 from app.langgraph.assistant_graph import KnowledgeSecurityGraph
 from app.report_mcp import invoke_report_chart_mcp, report_mcp_specs
 from app.mcp.report_mermaid import _image_font, build_report_mermaid
 from app.mcp.report_sarif import build_scan_sarif
+from app.mcp.protocol import call_mcp_tool as protocol_call_mcp_tool
 from app.report_subgraph import ReportCapabilitySubgraph
 from app.reports import ReportStore, build_scan_result_json, report_artifact_store
 from app.task_agent import TaskAgentGraph, agent_task_report_metrics
@@ -78,7 +80,14 @@ class ReportSubgraphTests(unittest.TestCase):
             "value_31 = step_31(value_30)",
         )
 
-        mermaid = build_report_mermaid(scan_json, sarif=sarif, language="zh-Hans")
+        with tempfile.TemporaryDirectory() as output_dir:
+            mermaid = build_report_mermaid(
+                scan_json,
+                sarif=sarif,
+                language="zh-Hans",
+                output_dir=output_dir,
+            )
+            image_payload = (Path(output_dir) / mermaid.artifacts[0].path).read_bytes()
         diagram = mermaid.diagrams[0]
         self.assertEqual(mermaid.taint_path_count, 1)
         self.assertEqual(mermaid.taint_node_count, 32)
@@ -87,7 +96,8 @@ class ReportSubgraphTests(unittest.TestCase):
         self.assertIn("ordered-node-0", diagram.source)
         self.assertIn("ordered-node-31", diagram.source)
         self.assertIn("value_31 = step_31(value_30)", diagram.source)
-        self.assertTrue(base64.b64decode(diagram.image_base64).startswith(b"\xff\xd8\xff"))
+        self.assertEqual(diagram.image_base64, "")
+        self.assertTrue(image_payload.startswith(b"\xff\xd8\xff"))
         self.assertGreater(diagram.height, 32 * 100)
 
     def test_report_agent_uses_completed_task_scan_json_for_generation_interrupt(self) -> None:
@@ -543,7 +553,9 @@ class ReportSubgraphTests(unittest.TestCase):
                 ["md", "html", "docx", "xlsx", "pdf"],
                 user_id="analyst",
             )
-            bundle_path, _, _ = report_artifact_store.resolve(bundle_artifact["id"])
+            bundle_path, _, _ = report_artifact_store.resolve(
+                bundle_artifact["id"], user_id="analyst"
+            )
             with zipfile.ZipFile(bundle_path) as bundle:
                 bundle_names = bundle.namelist()
                 self.assertEqual(sum(name.endswith(".json") for name in bundle_names), 2)
@@ -558,7 +570,9 @@ class ReportSubgraphTests(unittest.TestCase):
             )
             self.assertEqual(downloaded["status"], "completed")
             self.assertEqual(downloaded["artifacts"][0]["media_type"], "application/pdf")
-            artifact_path, _, _ = report_artifact_store.resolve(downloaded["artifacts"][0]["id"])
+            artifact_path, _, _ = report_artifact_store.resolve(
+                downloaded["artifacts"][0]["id"], user_id="analyst"
+            )
             self.assertTrue(artifact_path.read_bytes().startswith(b"%PDF"))
 
     def test_cancel_generation_does_not_write_report(self) -> None:
@@ -585,9 +599,14 @@ class ReportSubgraphTests(unittest.TestCase):
             self.assertEqual(store.list_reports(), [])
 
     def test_mcp_failure_is_visible_and_blocks_report_generation(self) -> None:
+        def call_or_fail(**kwargs):
+            if kwargs.get("tool_id") == "mcp__report_chart__build_scan_report_charts":
+                raise RuntimeError("renderer unavailable")
+            return protocol_call_mcp_tool(**kwargs)
+
         with tempfile.TemporaryDirectory() as temp_dir, patch(
-            "app.report_subgraph.invoke_report_chart_mcp",
-            side_effect=RuntimeError("renderer unavailable"),
+            "app.report_subgraph.call_mcp_tool",
+            side_effect=call_or_fail,
         ):
             store = ReportStore(Path(temp_dir) / "reports")
             graph = ReportCapabilitySubgraph()
@@ -614,10 +633,67 @@ class ReportSubgraphTests(unittest.TestCase):
         self.assertEqual(failed["report"], {})
         self.assertEqual(store.list_reports(), [])
 
-    def test_mermaid_image_failure_never_falls_back_to_raw_relationship_state(self) -> None:
+    def test_unresolved_translation_blocks_report_generation(self) -> None:
+        def unresolved_translation(payload, **_kwargs):
+            return TranslationAgentResult(
+                payload=payload,
+                audit={
+                    "server": "SecFlow Translation MCP",
+                    "tool": "translate_json_payload",
+                    "status": "partial",
+                    "translation_status": "fallback",
+                    "target_language": "zh-Hans",
+                    "candidate_fields": 2,
+                    "translated_fields": 1,
+                    "unresolved_fields": 1,
+                    "input_sha256": "a" * 64,
+                    "output_sha256": "b" * 64,
+                },
+            )
+
         with tempfile.TemporaryDirectory() as temp_dir, patch(
-            "app.report_subgraph.invoke_report_mermaid_mcp",
-            side_effect=RuntimeError("mermaid image renderer unavailable"),
+            "app.report_subgraph.translation_agent.translate_json",
+            side_effect=unresolved_translation,
+        ):
+            store = ReportStore(Path(temp_dir) / "reports")
+            graph = ReportCapabilitySubgraph()
+            started = graph.start(
+                {
+                    "action": "generate",
+                    "user_id": "analyst",
+                    "session_id": "session-translation-failure",
+                    "response_language": "zh-Hans",
+                    "source_kind": "assistant_scan",
+                    "scan_data": {
+                        "question": "scan",
+                        "summary": "Remote code execution remains unresolved.",
+                        "static_analysis": {"findings": []},
+                    },
+                    "report_store_root": str(store.root),
+                }
+            )
+            failed = graph.resume(
+                started["thread_id"],
+                decision="confirm",
+                user_id="analyst",
+                session_id="session-translation-failure",
+            )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["report"], {})
+        self.assertIn("翻译 MCP", failed["error"])
+        self.assertIn("报告未生成", failed["error"])
+        self.assertEqual(store.list_reports(), [])
+
+    def test_mermaid_image_failure_never_falls_back_to_raw_relationship_state(self) -> None:
+        def call_or_fail(**kwargs):
+            if kwargs.get("tool_id") == "mcp__report_mermaid__build_report_mermaid":
+                raise RuntimeError("mermaid image renderer unavailable")
+            return protocol_call_mcp_tool(**kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "app.report_subgraph.call_mcp_tool",
+            side_effect=call_or_fail,
         ):
             store = ReportStore(Path(temp_dir) / "reports")
             graph = ReportCapabilitySubgraph()
@@ -674,7 +750,9 @@ class ReportSubgraphTests(unittest.TestCase):
                 session_id="session-3",
             )
             artifact = completed["artifacts"][0]
-            path, _, media_type = report_artifact_store.resolve(artifact["id"])
+            path, _, media_type = report_artifact_store.resolve(
+                artifact["id"], user_id="analyst"
+            )
             self.assertEqual(media_type, "application/zip")
             with zipfile.ZipFile(path) as bundle:
                 names = bundle.namelist()
@@ -759,7 +837,9 @@ class ReportSubgraphTests(unittest.TestCase):
                 user_id="analyst",
                 session_id="download-all-formats",
             )
-            artifact_path, _, media_type = report_artifact_store.resolve(completed["artifacts"][0]["id"])
+            artifact_path, _, media_type = report_artifact_store.resolve(
+                completed["artifacts"][0]["id"], user_id="analyst"
+            )
             self.assertEqual(media_type, "application/zip")
             with zipfile.ZipFile(artifact_path) as bundle:
                 self.assertEqual(
@@ -786,7 +866,7 @@ class ReportSubgraphTests(unittest.TestCase):
                 session_id="download-selectable-all-formats",
             )
             selectable_path, selectable_name, selectable_media_type = report_artifact_store.resolve(
-                selectable_completed["artifacts"][0]["id"]
+                selectable_completed["artifacts"][0]["id"], user_id="analyst"
             )
             self.assertTrue(selectable_name.endswith(".zip"))
             self.assertEqual(selectable_media_type, "application/zip")

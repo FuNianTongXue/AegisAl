@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
-import type { AskResult } from "../types";
+import type { AskResult, InformationItem } from "../types";
 import { InformationPanel } from "./InformationPanel";
 
 describe("InformationPanel", () => {
@@ -100,19 +100,69 @@ describe("InformationPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "停止生成" }));
 
     expect(requestSignal?.aborted).toBe(true);
-    expect(await screen.findByText("已停止本次咨询。")).toBeInTheDocument();
+    expect((await screen.findAllByText("已停止本次咨询。")).length).toBeGreaterThan(0);
     await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument());
   });
 
+  it("renders consultation turns in batches of 60 and resets the window for a new consultation", async () => {
+    vi.spyOn(api, "clearShortTermSession").mockResolvedValue({
+      session_id: "information:test",
+      cleared_turn_count: 62,
+    });
+    vi.spyOn(api, "streamQuestion").mockImplementation(async (body) => ({
+      answer: `回答 ${String(body.question).split(" ").at(-1)}`,
+      session_id: String(body.session_id),
+    } as AskResult));
+
+    render(<InformationPanel open onClose={vi.fn()} />);
+    const textbox = screen.getByLabelText("独立咨询问题");
+    const sendExchanges = async (prefix: string) => {
+      for (let index = 1; index <= 31; index += 1) {
+        fireEvent.change(textbox, { target: { value: `${prefix} ${index}` } });
+        fireEvent.click(screen.getByRole("button", { name: "发送" }));
+        await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument());
+      }
+    };
+
+    await sendExchanges("首轮问题");
+
+    const log = screen.getByRole("log", { name: "咨询对话记录" });
+    expect(log).toHaveAttribute("aria-live", "off");
+    expect(log.querySelectorAll(".chat-turn")).toHaveLength(60);
+    expect(screen.queryByText("首轮问题 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("回答 1")).not.toBeInTheDocument();
+    expect(screen.getByText("首轮问题 2")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "显示更早消息" }));
+    expect(log.querySelectorAll(".chat-turn")).toHaveLength(62);
+    expect(screen.getByText("首轮问题 1")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "显示更早消息" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "新建独立咨询" }));
+    expect(log.querySelectorAll(".chat-turn")).toHaveLength(0);
+    await sendExchanges("次轮问题");
+    expect(log.querySelectorAll(".chat-turn")).toHaveLength(60);
+    expect(screen.queryByText("次轮问题 1")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "显示更早消息" })).toBeInTheDocument();
+  }, 15_000);
+
   it("keeps the existing security feed available as a separate view", async () => {
     vi.spyOn(api, "information").mockResolvedValue({
-      items: [{ id: "feed-1", title: "供应链安全通告", source_name: "SecFlow", published_at: "2026-08-01T10:00:00+08:00" }],
+      items: [{
+        id: "feed-1",
+        title: "供应链安全通告",
+        source_name: "SecFlow",
+        published_at: "2026-08-01T10:00:00+08:00",
+        translation_status: "failed",
+        translation_message: "离线翻译暂不可用，请稍后重试。",
+      } as InformationItem & { translation_status: string; translation_message: string }],
     });
 
     render(<InformationPanel open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("tab", { name: "资讯" }));
 
     expect(await screen.findByText("供应链安全通告")).toBeInTheDocument();
+    expect(screen.queryByText(/离线翻译暂不可用/)).not.toBeInTheDocument();
     expect(api.information).toHaveBeenCalledOnce();
   });
 

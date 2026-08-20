@@ -1,60 +1,73 @@
 import { Activity, AlertTriangle, Bug, CalendarDays, RefreshCcw, ShieldAlert, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { clientLocaleTag, type ClientLocale, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import type { DashboardSnapshot } from "../types";
+import {
+  VulnerabilityReadiness,
+  vulnerabilityTitle,
+} from "./VulnerabilityTranslationStatus";
 
 export function IntelligenceView() {
+  const { locale, t } = useI18n();
   const [data, setData] = useState<DashboardSnapshot>();
   const [loading, setLoading] = useState(true);
-  const load = async () => { setLoading(true); try { setData(await api.dashboard()); } finally { setLoading(false); } };
-  useEffect(() => { void load(); }, []);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setData(await api.dashboard(locale));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [locale]);
+  useEffect(() => { void load(); }, [load]);
   const stats = data?.stats || {};
   const total = Number(stats.total || data?.records?.length || 0);
   const severities = [
-    { label: "严重", value: Number(stats.critical || 0), color: "#d14343" },
-    { label: "高危", value: Number(stats.high || 0), color: "#e4762c" },
-    { label: "中危", value: Number(stats.medium || 0), color: "#d9a124" },
-    { label: "低危", value: Number(stats.low || 0), color: "#3c9b73" },
+    { label: t("严重"), value: Number(stats.critical || 0), color: "#d14343" },
+    { label: t("高危"), value: Number(stats.high || 0), color: "#e4762c" },
+    { label: t("中危"), value: Number(stats.medium || 0), color: "#d9a124" },
+    { label: t("低危"), value: Number(stats.low || 0), color: "#3c9b73" },
   ];
   const donut = useMemo(() => buildConic(severities, total), [total, stats.critical, stats.high, stats.medium, stats.low]);
   const trend = useMemo(() => normalizeTrend(data?.trend), [data?.trend]);
-  const catalogStatus = data?.catalog_status || "pending";
 
   return (
     <div className="page-scroll intelligence-view">
-      <div className="page-heading"><div><h1>漏洞情报</h1><p>公开漏洞情报统计，不代表项目扫描结果。</p></div><button className="secondary" onClick={() => void load()} disabled={loading}><RefreshCcw size={14} className={loading ? "spin" : ""} />刷新情报</button></div>
-      {catalogStatus !== "ready" ? <div className={`catalog-progress ${catalogStatus}`}><span><DatabaseStatus status={catalogStatus} /><strong>{catalogStatus === "retrying" ? "完整漏洞目录等待断点续传" : catalogStatus === "building" ? "正在构建完整漏洞目录" : "正在准备完整漏洞目录"}</strong></span><small>{data?.catalog_error || `已收录 ${(data?.catalog_count || total).toLocaleString("zh-CN")} 条，基线进度 ${data?.catalog_progress || 0}%`}</small>{catalogStatus === "building" ? <i><b style={{ width: `${data?.catalog_progress || 0}%` }} /></i> : null}</div> : null}
+      <div className="page-heading"><div><h1>{t("漏洞情报")}</h1><p>{t("公开漏洞情报统计，不代表项目扫描结果。")}</p></div><button className="secondary" onClick={() => void load()} disabled={loading}><RefreshCcw size={14} className={loading ? "spin" : ""} aria-hidden="true" />{t("刷新情报")}</button></div>
+      {error ? <div className="records-load-error" role="alert"><span>{t("漏洞情报加载失败：{error}", { error })}</span><button className="secondary" onClick={() => void load()}>{t("重新加载")}</button></div> : null}
+      {data ? <VulnerabilityReadiness snapshot={data} /> : null}
       <div className="stat-grid">
-        <Stat icon={<Bug />} label="漏洞总量" value={total} change="当前筛选范围" />
-        <Stat icon={<ShieldAlert />} label="严重与高危" value={Number(stats.critical || 0) + Number(stats.high || 0)} change={`${percent(Number(stats.critical || 0) + Number(stats.high || 0), total)}%`} tone="danger" />
-        <Stat icon={<AlertTriangle />} label="CISA KEV" value={Number(stats.kev || 0)} change="已知在野利用" tone="warning" />
-        <Stat icon={<ShieldCheck />} label="已验证利用" value={Number(stats.poc || 0)} change="具有公开 PoC" tone="success" />
+        <Stat icon={<Bug />} label={t("漏洞总量")} value={total} change={t("当前筛选范围")} locale={locale} />
+        <Stat icon={<ShieldAlert />} label={t("严重与高危")} value={Number(stats.critical || 0) + Number(stats.high || 0)} change={`${percent(Number(stats.critical || 0) + Number(stats.high || 0), total)}%`} tone="danger" locale={locale} />
+        <Stat icon={<AlertTriangle />} label="CISA KEV" value={Number(stats.kev || 0)} change={t("已知在野利用")} tone="warning" locale={locale} />
+        <Stat icon={<ShieldCheck />} label={t("已验证利用")} value={Number(stats.poc || 0)} change={t("具有公开 PoC")} tone="success" locale={locale} />
       </div>
       <div className="dashboard-grid">
         <section className="dashboard-section severity-overview">
-          <header><div><h2>严重度分布</h2><p>按 CVSS 与情报源评级聚合</p></div><Activity size={17} /></header>
-          <div className="donut-layout"><div className="donut-chart" style={{ background: donut }}><span><strong>{total}</strong><small>漏洞</small></span></div><div className="legend-list">{severities.map((item) => <div key={item.label}><span style={{ background: item.color }} /><strong>{item.label}</strong><small>{item.value} · {percent(item.value, total)}%</small></div>)}</div></div>
+          <header><div><h2>{t("严重度分布")}</h2><p>{t("按 CVSS 与情报源评级聚合")}</p></div><Activity size={17} aria-hidden="true" /></header>
+          <div className="donut-layout"><div className="donut-chart" style={{ background: donut }}><span><strong>{formatNumber(total, locale)}</strong><small>{t("漏洞")}</small></span></div><div className="legend-list">{severities.map((item) => <div key={item.label}><span style={{ background: item.color }} /><strong>{item.label}</strong><small>{formatNumber(item.value, locale)} · {percent(item.value, total)}%</small></div>)}</div></div>
         </section>
         <section className="dashboard-section activity-chart">
-          <header><div><h2>近期情报更新趋势</h2><p>近 7 天按更新时间统计情报变更</p></div><CalendarDays size={17} /></header>
-          <TrendChart items={trend} />
+          <header><div><h2>{t("近期情报更新趋势")}</h2><p>{t("近 7 天按更新时间统计情报变更")}</p></div><CalendarDays size={17} aria-hidden="true" /></header>
+          <TrendChart items={trend} locale={locale} t={t} />
         </section>
       </div>
       <section className="record-band">
-        <header><div><h2>优先关注</h2><p>最近更新的高风险漏洞情报</p></div></header>
-        <div className="record-table"><div className="table-head"><span>漏洞</span><span>严重度</span><span>来源</span><span>更新时间</span></div>{(data?.records || []).slice(0, 12).map((record) => <div className="table-row" key={record.id}><span><strong>{record.id}</strong><small>{record.title}</small></span><span><b className={`severity ${record.severity?.toLowerCase() || "unknown"}`}>{severityLabel(record.severity)}</b></span><span>{record.source || "公开情报"}</span><span>{formatDate(record.updated_at || record.published_at)}</span></div>)}</div>
+        <header><div><h2>{t("优先关注")}</h2><p>{t("最近更新的高风险漏洞情报")}</p></div></header>
+        <table className="record-table"><caption className="sr-only">{t("最近更新的高风险漏洞情报")}</caption><thead><tr className="table-head"><th scope="col">{t("漏洞")}</th><th scope="col">{t("严重度")}</th><th scope="col">{t("来源")}</th><th scope="col">{t("更新时间")}</th></tr></thead><tbody>{(data?.records || []).slice(0, 12).map((record) => <tr className="table-row" key={record.id}><td><strong translate="no">{record.id}</strong><small>{vulnerabilityTitle(record, locale) || t("漏洞内容准备中")}</small></td><td><b className={`severity ${safeSeverityClass(record.severity)}`}>{severityLabel(record.severity, t)}</b></td><td translate="no">{record.source || t("公开情报")}</td><td>{formatDate(record.updated_at || record.published_at, locale)}</td></tr>)}{!loading && !error && !data?.records.length ? <tr><td className="table-empty" colSpan={4}>{t("暂无漏洞情报")}</td></tr> : null}</tbody></table>
       </section>
     </div>
   );
 }
 
-function DatabaseStatus({ status }: { status: string }) {
-  return status === "retrying" ? <AlertTriangle size={16} /> : <Activity size={16} className={status === "building" ? "spin" : ""} />;
-}
-
-function TrendChart({ items }: { items: Array<{ date: string; count: number; ratio: number }> }) {
-  if (!items.length) return <div className="trend-empty">暂无近期情报更新数据</div>;
+function TrendChart({ items, locale, t }: { items: Array<{ date: string; count: number; ratio: number }>; locale: ClientLocale; t: (source: string) => string }) {
+  if (!items.length) return <div className="trend-empty">{t("暂无近期情报更新数据")}</div>;
   const width = 700;
   const height = 190;
   const baseline = 158;
@@ -68,7 +81,7 @@ function TrendChart({ items }: { items: Array<{ date: string; count: number; rat
   const area = `${line} L${points.at(-1)?.x.toFixed(1)},${baseline} L${points[0].x.toFixed(1)},${baseline} Z`;
   return (
     <div className="trend-chart">
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="近 7 天情报更新趋势">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={t("近 7 天情报更新趋势")}>
         <defs>
           <linearGradient id="intelligenceTrendFill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="var(--primary)" stopOpacity="0.28" />
@@ -78,15 +91,15 @@ function TrendChart({ items }: { items: Array<{ date: string; count: number; rat
         {[top, (top + baseline) / 2, baseline].map((y) => <line key={y} className="trend-grid-line" x1="0" x2={width} y1={y} y2={y} />)}
         <path className="trend-area" d={area} />
         <path className="trend-line" d={line} />
-        {points.map((point) => <circle key={point.date} className="trend-point" cx={point.x} cy={point.y} r="3"><title>{point.date}：{point.count}</title></circle>)}
+        {points.map((point) => <circle key={point.date} className="trend-point" cx={point.x} cy={point.y} r="3"><title>{formatTrendDate(point.date, locale)}：{formatNumber(point.count, locale)}</title></circle>)}
       </svg>
-      <div className="trend-labels">{points.map((point, index) => <small key={point.date} className={index % 2 ? "compact-label" : ""}>{point.date.slice(5)}</small>)}</div>
+      <div className="trend-labels">{points.map((point, index) => <small key={point.date} className={index % 2 ? "compact-label" : ""}>{formatTrendDate(point.date, locale)}</small>)}</div>
     </div>
   );
 }
 
-function Stat({ icon, label, value, change, tone = "neutral" }: { icon: React.ReactNode; label: string; value: number; change: string; tone?: string }) {
-  return <div className={`stat-card ${tone}`}><span className="stat-icon">{icon}</span><div><small>{label}</small><strong>{value.toLocaleString("zh-CN")}</strong><p>{change}</p></div></div>;
+function Stat({ icon, label, value, change, locale, tone = "neutral" }: { icon: React.ReactNode; label: string; value: number; change: string; locale: ClientLocale; tone?: string }) {
+  return <div className={`stat-card ${tone}`}><span className="stat-icon" aria-hidden="true">{icon}</span><div><small>{label}</small><strong>{formatNumber(value, locale)}</strong><p>{change}</p></div></div>;
 }
 
 function buildConic(items: Array<{ value: number; color: string }>, total: number) {
@@ -104,5 +117,17 @@ function normalizeTrend(trend?: Array<{ date: string; count: number }>) {
 }
 
 const percent = (value: number, total: number) => total ? Math.round((value / total) * 100) : 0;
-const severityLabel = (value?: string) => ({ critical: "严重", high: "高危", medium: "中危", low: "低危" }[value?.toLowerCase() || ""] || "待定");
-const formatDate = (value?: string) => value ? new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value)) : "-";
+const severityLabel = (value: string | undefined, t: (source: string) => string) => t({ critical: "严重", high: "高危", medium: "中危", low: "低危" }[value?.toLowerCase() || ""] || "待定");
+const safeSeverityClass = (value?: string) => ["critical", "high", "medium", "low"].includes(value?.toLowerCase() || "") ? value!.toLowerCase() : "unknown";
+const formatNumber = (value: number, locale: ClientLocale) => new Intl.NumberFormat(clientLocaleTag(locale)).format(Number(value || 0));
+const formatTrendDate = (value: string, locale: ClientLocale) => {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat(clientLocaleTag(locale), { month: "2-digit", day: "2-digit", timeZone: "UTC" }).format(parsed);
+};
+const formatDate = (value: string | undefined, locale: ClientLocale) => {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "-";
+  return new Intl.DateTimeFormat(clientLocaleTag(locale), { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
+};

@@ -20,6 +20,14 @@ def main() -> None:
 
         code_scan_mcp_main([item for item in sys.argv[1:] if item != "--code-scan-mcp"])
         return
+    if "--mcp-server" in sys.argv:
+        from mcp_stdio_launcher import main as mcp_server_main
+
+        index = sys.argv.index("--mcp-server")
+        if index + 1 >= len(sys.argv):
+            raise SystemExit("--mcp-server requires a built-in server id")
+        mcp_server_main(["--server", sys.argv[index + 1]])
+        return
     from app.api.routes.application import app
 
     parser = argparse.ArgumentParser(description="SecFlow embedded macOS backend")

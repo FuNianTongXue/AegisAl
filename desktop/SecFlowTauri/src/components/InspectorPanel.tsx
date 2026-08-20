@@ -34,8 +34,9 @@ export function InspectorPanel() {
           <span><HardDrive /><small>数据边界</small><strong>本机</strong></span>
         </div>
       </section>
-      <section className="inspector-section execution-plan-section" aria-live="polite">
+      <section className="inspector-section execution-plan-section">
         <h3><Clock3 size={14} />执行计划</h3>
+        <span className="sr-only" role="status" aria-live="polite">{currentStep ? `${currentStep.title}：${currentStep.message || statusLabel(currentStep.status)}` : running ? "综合分析中" : "等待任务"}</span>
         {steps.length ? (
           <ol className="plan-list">
             {steps.map((step, index) => (

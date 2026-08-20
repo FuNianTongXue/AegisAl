@@ -81,7 +81,10 @@ describe("ChatMessage report interrupt card", () => {
 
     render(<Harness />);
 
-    fireEvent.click(screen.getByRole("button", { name: /确认生成报告/ }));
+    expect(screen.getByRole("alertdialog", { name: "扫描已完成，是否根据本次扫描事实生成完整报告？" })).toBeInTheDocument();
+    const generateButton = screen.getByRole("button", { name: /确认生成报告/ });
+    expect(generateButton).toHaveFocus();
+    fireEvent.click(generateButton);
     await waitFor(() => expect(resume).toHaveBeenCalledWith(expect.objectContaining({
       thread_id: "report-thread-1",
       interrupt_id: "int-1",
@@ -101,6 +104,7 @@ describe("ChatMessage report interrupt card", () => {
     })));
 
     const downloadButton = await screen.findByRole("button", { name: /demo_20260804\.pdf/ });
+    expect(screen.getByRole("region", { name: "可下载的报告文件" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "MD" })).not.toBeInTheDocument();
 
     // 点击后走 api.raw 取内容并交给原生保存面板（可选路径、可重命名）。
@@ -202,6 +206,7 @@ describe("ChatMessage user attachment chip", () => {
     useAppStore.setState({
       userId: "tester",
       settings: {
+        preferences: { language: "zh-Hans" },
         profile: {
           display_name: "测试用户",
           email: "tester@example.com",
@@ -257,5 +262,25 @@ describe("ChatMessage user attachment chip", () => {
     render(<ChatMessage turn={turn} />);
 
     expect(document.querySelector(".user-attachment-chip")).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatMessage actions", () => {
+  afterEach(cleanup);
+
+  it("names icon-only actions and only renders regenerate when it has a handler", () => {
+    const onRegenerate = vi.fn();
+    render(<ChatMessage turn={{ ...baseTurn, result: undefined, content: "回答内容" }} onRegenerate={onRegenerate} />);
+
+    expect(screen.getByRole("button", { name: "复制" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
+    expect(onRegenerate).toHaveBeenCalledOnce();
+  });
+
+  it("announces compact errors without showing an unusable retry action", () => {
+    render(<ChatMessage compact turn={{ ...baseTurn, result: undefined, content: "请求失败", state: "error" }} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("处理请求时发生错误");
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
   });
 });

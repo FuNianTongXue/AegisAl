@@ -95,6 +95,49 @@ def _artifact() -> dict:
     }
 
 
+def _translation_agent_audit(**overrides: object) -> dict:
+    audit = {
+        "server": "SecFlow Translation MCP",
+        "tool": "translate_json_payload",
+        "transport": "stdio",
+        "status": "completed",
+        "translation_status": "translated",
+        "target_language": "zh-Hans",
+        "unresolved_fields": 0,
+        "offline": True,
+        "network_used": False,
+        "requires_api_key": False,
+        "model_used": False,
+        "offline_model_used": True,
+        "resource_verified": True,
+        "offline_contract_valid": True,
+        "runtime_contract_valid": True,
+        "provider_calls": 0,
+        "billable_tokens": 0,
+        "token_usage": 0,
+        "input_sha256": "1" * 64,
+        "output_sha256": "2" * 64,
+        "model_sha256": "3" * 64,
+    }
+    audit.update(overrides)
+    return audit
+
+
+def _catalog_mcp_call(*, tool_id: str, arguments: dict, **_kwargs) -> dict:
+    if tool_id == "mcp__d3_sankey__build_component_sankey":
+        return {"nodes": [], "links": []}
+    if tool_id == "mcp__excel__export_component_vulnerability_catalog":
+        return {"file_name": _artifact()["file_name"], "test_arguments": arguments}
+    raise AssertionError(f"Unexpected MCP tool: {tool_id}")
+
+
+def _mcp_arguments(mock, tool_id: str) -> dict:
+    for call in mock.call_args_list:
+        if call.kwargs.get("tool_id") == tool_id:
+            return dict(call.kwargs.get("arguments") or {})
+    raise AssertionError(f"MCP tool was not called: {tool_id}")
+
+
 class AlwaysUsableTrial:
     @staticmethod
     def status() -> dict:
@@ -313,7 +356,7 @@ class ComponentCatalogServiceTests(unittest.TestCase):
         self.assertIn("高危", shared_strings)
         self.assertNotIn(">HIGH<", shared_strings)
 
-    def test_report_translation_is_written_back_and_reused_by_next_query(self) -> None:
+    def test_report_summary_writeback_stays_hidden_until_catalog_translation_is_complete(self) -> None:
         with TemporaryDirectory() as directory:
             service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
             source = _record(
@@ -345,9 +388,11 @@ class ComponentCatalogServiceTests(unittest.TestCase):
                         "id": source["id"],
                         "source_summary": source["summary"],
                         "summary_zh": "该组件存在高危漏洞，攻击者可能触发远程代码执行。",
+                        "translation_audit": _translation_agent_audit(),
                     }
                 ]
             )
+            stored = service._catalog.find_by_identifier(source["id"])[0]  # noqa: SLF001
             result = service.query_component_vulnerability_catalog(
                 "2026-07-01",
                 "2026-07-28",
@@ -355,8 +400,55 @@ class ComponentCatalogServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(persisted, 1)
-        self.assertEqual(result["records"][0]["summary"], "该组件存在高危漏洞，攻击者可能触发远程代码执行。")
-        self.assertEqual(result["catalog_translation"]["status"], "completed")
+        self.assertEqual(
+            stored["catalog_translation"]["translation_agent"],
+            _translation_agent_audit(),
+        )
+        self.assertEqual(result["records"][0]["summary"], "")
+        self.assertEqual(result["catalog_translation"]["status"], "pending")
+
+    def test_report_summary_writeback_rejects_missing_or_unsafe_translation_audit(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
+            source = _record(
+                "CVE-2026-7100",
+                "2026-07-24T00:00:00+00:00",
+                components=[{"ecosystem": "npm", "name": "audit-demo", "affected": ["< 2"], "fixed": ["2"]}],
+            )
+            prepared = {
+                **source,
+                "title_original": source["title"],
+                "summary_original": source["summary"],
+                "catalog_translation": {
+                    "version": 3,
+                    "target_language": "zh-Hans",
+                    "status": "pending",
+                    "source_title": source["title"],
+                    "source_summary": source["summary"],
+                },
+            }
+            with patch(
+                "app.intelligence.translate_records_for_storage",
+                return_value=([prepared], {"pending_records": 1}),
+            ):
+                service._catalog.upsert([source])  # noqa: SLF001
+
+            base = {
+                "id": source["id"],
+                "source_summary": source["summary"],
+                "summary_zh": "该组件存在高危漏洞。",
+            }
+            missing = service.persist_component_summary_translations([base])
+            unsafe = service.persist_component_summary_translations(
+                [{**base, "translation_audit": _translation_agent_audit(network_used=True)}]
+            )
+            token_billed = service.persist_component_summary_translations(
+                [{**base, "translation_audit": _translation_agent_audit(token_usage=1)}]
+            )
+            stored = service._catalog.find_by_identifier(source["id"])[0]  # noqa: SLF001
+
+        self.assertEqual((missing, unsafe, token_billed), (0, 0, 0))
+        self.assertNotIn("summary_zh", stored)
 
 
 class ComponentCatalogSubgraphTests(unittest.TestCase):
@@ -374,8 +466,8 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()) as query,
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
-            patch("app.langgraph.component_catalog_graph.invoke_catalog_excel_mcp", return_value=_artifact()) as excel,
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call),
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()) as excel,
         ):
             started = graph.start(self.payload)
             generated = graph.resume(
@@ -426,9 +518,9 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         catalog["records"][0]["summary"] = "演示包存在高危缓冲区溢出漏洞。"
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=catalog),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call) as mcp,
             patch("app.mcp.translation.invoke_translation_mcp") as translate,
-            patch("app.langgraph.component_catalog_graph.invoke_catalog_excel_mcp", return_value=_artifact()) as excel,
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()) as excel,
         ):
             started = graph.start({**self.payload, "response_language": "zh-Hans"})
             generated = graph.resume(
@@ -440,7 +532,9 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
 
         self.assertEqual(generated["interrupt"]["kind"], "component_excel_download_confirmation")
         translate.assert_not_called()
-        excel_records = excel.call_args[0][0]["records"]
+        excel_records = _mcp_arguments(
+            mcp, "mcp__excel__export_component_vulnerability_catalog"
+        )["records"]
         self.assertEqual(excel_records[0]["summary"], "演示包存在高危缓冲区溢出漏洞。")
         self.assertEqual(excel_records[0]["id"], "CVE-2026-7001")
         translation_traces = [item for item in generated["trace"] if item["node"] == "component_catalog.translation_cache"]
@@ -450,9 +544,9 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call) as mcp,
             patch("app.mcp.translation.invoke_translation_mcp") as translate,
-            patch("app.langgraph.component_catalog_graph.invoke_catalog_excel_mcp", return_value=_artifact()) as excel,
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()) as excel,
         ):
             started = graph.start({**self.payload, "response_language": "zh-Hans"})
             generated = graph.resume(
@@ -464,19 +558,21 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
 
         self.assertEqual(generated["interrupt"]["kind"], "component_excel_download_confirmation")
         translate.assert_not_called()
-        excel_records = excel.call_args[0][0]["records"]
+        excel_records = _mcp_arguments(
+            mcp, "mcp__excel__export_component_vulnerability_catalog"
+        )["records"]
         self.assertEqual(excel_records[0]["summary"], "CVE-2026-7001 summary")
         warning = [item for item in generated["trace"] if item["node"] == "component_catalog.translation_cache"]
         self.assertEqual(warning[0]["status"], "warning")
-        self.assertIn("未重复调用翻译模型", warning[0]["message"])
+        self.assertIn("未重复执行离线翻译", warning[0]["message"])
 
     def test_excel_skips_translation_for_non_chinese_language(self) -> None:
         graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call),
             patch("app.mcp.translation.invoke_translation_mcp") as translate,
-            patch("app.langgraph.component_catalog_graph.invoke_catalog_excel_mcp", return_value=_artifact()),
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()),
         ):
             started = graph.start({**self.payload, "response_language": "en"})
             graph.resume(
@@ -498,9 +594,9 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=catalog),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call) as mcp,
             patch("app.mcp.translation.invoke_translation_mcp") as translate,
-            patch("app.langgraph.component_catalog_graph.invoke_catalog_excel_mcp", return_value=_artifact()) as excel,
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()) as excel,
         ):
             started = graph.start({**self.payload, "response_language": "zh-Hans"})
             generated = graph.resume(
@@ -511,7 +607,9 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
             )
 
         translate.assert_not_called()
-        excel_records = excel.call_args[0][0]["records"]
+        excel_records = _mcp_arguments(
+            mcp, "mcp__excel__export_component_vulnerability_catalog"
+        )["records"]
         self.assertEqual(len(excel_records), 25)
         self.assertTrue(all(str(item["summary"]).endswith("summary") for item in excel_records))
         translation_traces = [item for item in generated["trace"] if item["node"] == "component_catalog.translation_cache"]
@@ -522,7 +620,7 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         generation_graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call),
         ):
             started = generation_graph.start(self.payload)
             cancelled = generation_graph.resume(
@@ -537,8 +635,8 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         download_graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
-            patch("app.langgraph.component_catalog_graph.invoke_catalog_excel_mcp", return_value=_artifact()),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call),
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()),
         ):
             started = download_graph.start(self.payload)
             generated = download_graph.resume(
@@ -555,7 +653,7 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         graph = ComponentVulnerabilityCatalogSubgraph()
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call),
         ):
             started = graph.start(self.payload)
             with self.assertRaises(KeyError):
@@ -569,7 +667,7 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
     def test_generic_resume_api_routes_component_catalog_thread(self) -> None:
         with (
             patch("app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog", return_value=_catalog_result()),
-            patch("app.langgraph.component_catalog_graph.invoke_sankey_mcp", return_value={"nodes": [], "links": []}),
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call),
         ):
             started = component_vulnerability_catalog_subgraph.start(self.payload)
             with (

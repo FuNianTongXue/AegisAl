@@ -50,10 +50,10 @@ export function Topbar({ onRefresh }: { onRefresh: () => void }) {
           </details>
         </div>
         <div className="topbar-actions">
-          <span className={`connection-state connection-state-icon ${connected ? "online" : "offline"}`} title={connected ? t("{count} 个 Worker 正常", { count: state.health?.task_execution.running_workers || 0 }) : t("正在连接本机服务")}>{connected ? <Wifi size={14} /> : <WifiOff size={14} />}</span>
-          <button title={t("帮助与命令")} onClick={() => state.set({ commandOpen: true })}><CircleHelp size={17} /></button>
-          <button title={t("刷新本机服务")} onClick={onRefresh}><RefreshCcw size={16} /></button>
-          <button title={t("Agent 执行面板")} className={state.inspectorOpen ? "active" : ""} onClick={() => state.set({ inspectorOpen: !state.inspectorOpen })}><PanelRight size={17} /></button>
+          <span className={`connection-state connection-state-icon ${connected ? "online" : "offline"}`} role="status" aria-live="polite" aria-label={connected ? t("{count} 个 Worker 正常", { count: state.health?.task_execution.running_workers || 0 }) : t("正在连接本机服务")} title={connected ? t("{count} 个 Worker 正常", { count: state.health?.task_execution.running_workers || 0 }) : t("正在连接本机服务")}>{connected ? <Wifi size={14} aria-hidden="true" /> : <WifiOff size={14} aria-hidden="true" />}</span>
+          <button aria-label={t("帮助与命令")} title={t("帮助与命令")} onClick={() => state.set({ commandOpen: true })}><CircleHelp size={17} /></button>
+          <button aria-label={t("刷新本机服务")} title={t("刷新本机服务")} onClick={onRefresh}><RefreshCcw size={16} /></button>
+          <button aria-label={t("Agent 执行面板")} aria-pressed={state.inspectorOpen} title={t("Agent 执行面板")} className={state.inspectorOpen ? "active" : ""} onClick={() => state.set({ inspectorOpen: !state.inspectorOpen })}><PanelRight size={17} /></button>
         </div>
       </header>
     );
@@ -67,9 +67,9 @@ export function Topbar({ onRefresh }: { onRefresh: () => void }) {
       </div>
       <div className="topbar-actions">
         <button className="command-trigger" onClick={() => state.set({ commandOpen: true })}><Search size={14} /><span>{t("搜索或执行命令")}</span><kbd><Command size={11} /> K</kbd></button>
-        <span className={`connection-state ${connected ? "online" : "offline"}`} title={connected ? t("本机服务正常") : t("正在连接本机服务")}>{connected ? <Wifi size={14} /> : <WifiOff size={14} />}{state.health?.task_execution.running_workers || 0} Worker</span>
-        <button title={t("刷新")} onClick={onRefresh}><RefreshCcw size={16} /></button>
-        <button title={t("执行面板")} className={state.inspectorOpen ? "active" : ""} onClick={() => state.set({ inspectorOpen: !state.inspectorOpen })}><PanelRight size={16} /></button>
+        <span className={`connection-state ${connected ? "online" : "offline"}`} role="status" aria-live="polite" aria-label={connected ? t("本机服务正常") : t("正在连接本机服务")} title={connected ? t("本机服务正常") : t("正在连接本机服务")}>{connected ? <Wifi size={14} aria-hidden="true" /> : <WifiOff size={14} aria-hidden="true" />}{state.health?.task_execution.running_workers || 0} Worker</span>
+        <button aria-label={t("刷新")} title={t("刷新")} onClick={onRefresh}><RefreshCcw size={16} /></button>
+        <button aria-label={t("执行面板")} aria-pressed={state.inspectorOpen} title={t("执行面板")} className={state.inspectorOpen ? "active" : ""} onClick={() => state.set({ inspectorOpen: !state.inspectorOpen })}><PanelRight size={16} /></button>
       </div>
     </header>
   );

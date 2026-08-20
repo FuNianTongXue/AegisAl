@@ -1,5 +1,5 @@
 import { Bot, Bug, FileCheck2, FolderSearch2, PackageSearch, Shield, Sparkles, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { useActiveTaskStream, waitForBackendReady } from "../hooks/useBackend";
 import { useI18n } from "../i18n";
@@ -22,6 +22,7 @@ const PROJECT_RISK =
 const REPORT_WORD = /(报告|report)/i;
 /** References to an already-completed scan whose facts a report request builds on. */
 const COMPLETED_SCAN_REF = /(刚才|上次|上一次|已完成|本次|结果)/;
+const TURN_BATCH_SIZE = 60;
 
 export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
   const state = useAppStore();
@@ -31,7 +32,52 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
   const controller = useRef<AbortController | null>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const conversation = useRef<HTMLDivElement>(null);
+  const conversationLog = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
+  const prependAnchor = useRef<{ element: Element; top: number } | null>(null);
+  const [visibleTurnCount, setVisibleTurnCount] = useState(TURN_BATCH_SIZE);
+  const firstVisibleTurnIndex = Math.max(0, state.turns.length - visibleTurnCount);
+  const visibleTurns = state.turns.slice(firstVisibleTurnIndex);
+  const latestAssistant = [...state.turns].reverse().find((turn) => turn.role === "assistant");
+  const assistantStatus = latestAssistant?.state === "streaming"
+    ? t("正在生成回答…")
+    : latestAssistant?.state === "error"
+      ? t("回答生成失败，可以重试。")
+      : latestAssistant?.result?.interrupt
+        ? t("需要确认后继续。")
+        : latestAssistant
+          ? t("回答已生成。")
+          : "";
+
+  useEffect(() => {
+    setVisibleTurnCount(TURN_BATCH_SIZE);
+    prependAnchor.current = null;
+    nearBottom.current = true;
+    conversationLog.current?.setAttribute("aria-live", "polite");
+  }, [state.activeSessionId, state.activeTaskId]);
+
+  useEffect(() => {
+    if (state.turns.length) return;
+    setVisibleTurnCount(TURN_BATCH_SIZE);
+    prependAnchor.current = null;
+    nearBottom.current = true;
+    conversationLog.current?.setAttribute("aria-live", "polite");
+  }, [state.turns.length]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    const target = scroll.current;
+    if (anchor && target && anchor.element.isConnected) {
+      target.scrollTop += anchor.element.getBoundingClientRect().top - anchor.top;
+    }
+    prependAnchor.current = null;
+    const log = conversationLog.current;
+    if (!log || log.getAttribute("aria-live") !== "off") return;
+    const frame = window.requestAnimationFrame(() => {
+      if (log.isConnected) log.setAttribute("aria-live", "polite");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [visibleTurnCount]);
 
   useActiveTaskStream(useCallback((task: AgentTask) => {
     // Match by turn id (legacy `task:<id>`) or by the attached task so live
@@ -307,6 +353,16 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
     setBusy(false);
   };
 
+  const showEarlierTurns = () => {
+    const firstVisibleTurn = conversation.current?.querySelector(".chat-turn");
+    prependAnchor.current = firstVisibleTurn
+      ? { element: firstVisibleTurn, top: firstVisibleTurn.getBoundingClientRect().top }
+      : null;
+    nearBottom.current = false;
+    conversationLog.current?.setAttribute("aria-live", "off");
+    setVisibleTurnCount((current) => Math.min(state.turns.length, current + TURN_BATCH_SIZE));
+  };
+
   return (
     <section
       className="assistant-workspace"
@@ -321,20 +377,54 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
           nearBottom.current = target.scrollHeight - target.scrollTop - target.clientHeight < 180;
         }}
       >
-        <div className="conversation-column" ref={conversation}>
-          {!state.turns.length && !pendingQuestion ? (
-            <AssistantEmptyState onPrompt={(prompt, intentHint) => void send(prompt, null, intentHint)} />
+        <div
+          className="conversation-column"
+          ref={conversation}
+        >
+          {firstVisibleTurnIndex ? (
+            <button type="button" className="secondary" style={LOAD_EARLIER_BUTTON_STYLE} onClick={showEarlierTurns}>
+              {t("显示更早消息")}
+            </button>
           ) : null}
-          {state.turns.map((turn) => <ChatMessage key={turn.id} turn={turn} showExecutionDetails={false} onRegenerate={turn.role === "assistant" ? () => { const previous = [...state.turns].reverse().find((item) => item.role === "user"); if (previous) void send(previous.content, null); } : undefined} />)}
-          {pendingQuestion ? (
-            <ScanTypeConfirm
-              question={pendingQuestion}
-              onConfirm={confirmScanType}
-              onCancel={cancelScanTypeConfirm}
-            />
-          ) : null}
+          <div
+            ref={conversationLog}
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions"
+            aria-label={t("安全分析对话")}
+          >
+            {!state.turns.length && !pendingQuestion ? (
+              <AssistantEmptyState
+                onPrompt={(prompt, intentHint) => void send(
+                  prompt,
+                  useAppStore.getState().composerAttachment,
+                  intentHint,
+                )}
+              />
+            ) : null}
+            {visibleTurns.map((turn, index) => {
+              const absoluteIndex = firstVisibleTurnIndex + index;
+              const previous = turn.role === "assistant" ? previousUserTurn(state.turns, absoluteIndex) : undefined;
+              return (
+                <ChatMessage
+                  key={turn.id}
+                  turn={turn}
+                  showExecutionDetails={false}
+                  onRegenerate={previous ? () => void send(previous.content, null) : undefined}
+                />
+              );
+            })}
+            {pendingQuestion ? (
+              <ScanTypeConfirm
+                question={pendingQuestion}
+                onConfirm={confirmScanType}
+                onCancel={cancelScanTypeConfirm}
+              />
+            ) : null}
+          </div>
         </div>
       </div>
+      <div role="status" aria-live="polite" aria-atomic="true" style={VISUALLY_HIDDEN_STYLE}>{assistantStatus}</div>
       {state.turns.length && !pendingQuestion ? (
         <div className="composer-suggestions">
           <button type="button" disabled={busy} onClick={() => void send(t("完整扫描这个项目并汇总风险"), null)}><Shield size={14} /><span>{t("完整扫描这个项目并汇总风险")}</span></button>
@@ -361,6 +451,13 @@ function upsertTrace(items: TraceItem[], next: TraceItem) {
   return [...items.filter((item) => (item.id || item.node) !== identity), next];
 }
 
+function previousUserTurn(turns: ChatTurn[], assistantIndex: number) {
+  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+    if (turns[index]?.role === "user") return turns[index];
+  }
+  return undefined;
+}
+
 /** Builds the immediate "objective submitted" timeline step for non-streaming actions. */
 function submitTraceItem(status: "running" | "completed", startedAt: string | undefined, message: string): TraceItem {
   return {
@@ -383,26 +480,44 @@ function ScanTypeConfirm({
   onCancel: () => void;
 }) {
   const { t } = useI18n();
+  const headingId = useId();
+  const questionId = useId();
+  const firstAction = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    firstAction.current?.focus();
+    return () => {
+      if (previouslyFocused.current?.isConnected) previouslyFocused.current.focus();
+    };
+  }, []);
 
   return (
-    <div className="scan-type-confirm">
+    <div
+      className="scan-type-confirm"
+      role="alertdialog"
+      aria-live="assertive"
+      aria-labelledby={headingId}
+      aria-describedby={questionId}
+    >
       <div className="scan-type-confirm-header">
-        <span>{t("请选择本次扫描的类型：")}</span>
-        <button className="scan-type-cancel-icon" onClick={onCancel} title={t("取消")}>
+        <span id={headingId}>{t("请选择本次扫描的类型：")}</span>
+        <button type="button" className="scan-type-cancel-icon" onClick={onCancel} title={t("取消")} aria-label={t("取消")}>
           <X size={16} />
         </button>
       </div>
-      <p className="scan-type-question">{question}</p>
+      <p id={questionId} className="scan-type-question">{question}</p>
       <div className="scan-type-options">
-        <button className="scan-type-btn scan-type-code" onClick={() => onConfirm("code")}>
+        <button ref={firstAction} type="button" className="scan-type-btn scan-type-code" onClick={() => onConfirm("code")}>
           <Shield size={16} />
           <span>{t("代码扫描")}</span>
         </button>
-        <button className="scan-type-btn scan-type-sbom" onClick={() => onConfirm("sbom")}>
+        <button type="button" className="scan-type-btn scan-type-sbom" onClick={() => onConfirm("sbom")}>
           <PackageSearch size={16} />
           <span>{t("SBOM扫描")}</span>
         </button>
-        <button className="scan-type-btn scan-type-full" onClick={() => onConfirm("full")}>
+        <button type="button" className="scan-type-btn scan-type-full" onClick={() => onConfirm("full")}>
           <Sparkles size={16} />
           <span>{t("完整扫描")}</span>
         </button>
@@ -410,6 +525,27 @@ function ScanTypeConfirm({
     </div>
   );
 }
+
+const VISUALLY_HIDDEN_STYLE = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0, 0, 0, 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+} as const;
+
+const LOAD_EARLIER_BUTTON_STYLE = {
+  display: "block",
+  minHeight: 32,
+  margin: "0 auto 24px",
+  padding: "0 12px",
+  borderRadius: 5,
+  cursor: "pointer",
+} as const;
 
 function AssistantEmptyState({
   onPrompt,

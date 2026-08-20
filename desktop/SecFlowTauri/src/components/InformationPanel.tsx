@@ -9,10 +9,10 @@ import {
   SquarePen,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { clientLocaleTag, type ClientLocale, useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { useI18n } from "../i18n";
 import { useAppStore } from "../store/appStore";
 import type { ChatTurn, InformationItem, TraceItem } from "../types";
 import { ChatMessage } from "./ChatMessage";
@@ -20,6 +20,7 @@ import { InformationCenterMark } from "./InformationCenterMark";
 
 type PanelMode = "consultation" | "feed";
 type InformationPanelVariant = "floating" | "window";
+const TURN_BATCH_SIZE = 60;
 
 export function InformationPanel({
   open,
@@ -31,7 +32,7 @@ export function InformationPanel({
   variant?: InformationPanelVariant;
 }) {
   const userId = useAppStore((state) => state.userId);
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const [mode, setMode] = useState<PanelMode>("consultation");
   const [sessionId, setSessionId] = useState(createConsultationSession);
   const sessionIdRef = useRef(sessionId);
@@ -42,11 +43,16 @@ export function InformationPanel({
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [feedError, setFeedError] = useState("");
+  const [announcement, setAnnouncement] = useState("");
   const controller = useRef<AbortController | null>(null);
   const activeTurnId = useRef("");
   const scroll = useRef<HTMLDivElement>(null);
   const conversation = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
+  const prependAnchor = useRef<{ element: Element; top: number } | null>(null);
+  const [visibleTurnCount, setVisibleTurnCount] = useState(TURN_BATCH_SIZE);
+  const firstVisibleTurnIndex = Math.max(0, turns.length - visibleTurnCount);
+  const visibleTurns = turns.slice(firstVisibleTurnIndex);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -58,14 +64,29 @@ export function InformationPanel({
   }, [userId]);
 
   useEffect(() => {
-    if (!open || mode !== "feed" || items.length) return;
+    if (!open || mode !== "feed") return;
+    let cancelled = false;
     setLoading(true);
     setFeedError("");
-    void api.information()
-      .then((result) => setItems(sortItems(result.items)))
-      .catch((error) => setFeedError(String(error)))
-      .finally(() => setLoading(false));
-  }, [items.length, mode, open]);
+    setItems([]);
+    void (async () => {
+      try {
+        let result = await api.information(false, locale);
+        if (!cancelled) setItems(sortItems(result.items));
+        if (result.refreshing) {
+          result = await api.refreshInformation(locale);
+          if (!cancelled) setItems(sortItems(result.items));
+        }
+      } catch (error) {
+        if (!cancelled) setFeedError(String(error));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [locale, mode, open]);
 
   useEffect(() => {
     if (!open || mode !== "consultation" || !nearBottom.current) return;
@@ -84,6 +105,15 @@ export function InformationPanel({
     observer.observe(target);
     return () => observer.disconnect();
   }, [mode, open]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    const target = scroll.current;
+    if (anchor && target && anchor.element.isConnected) {
+      target.scrollTop += anchor.element.getBoundingClientRect().top - anchor.top;
+    }
+    prependAnchor.current = null;
+  }, [visibleTurnCount]);
 
   if (!open) return null;
 
@@ -118,6 +148,7 @@ export function InformationPanel({
       { id: assistantId, role: "assistant", content: "", createdAt: new Date().toISOString(), state: "streaming", trace: [] },
     ]);
     setBusy(true);
+    setAnnouncement(t("正在生成咨询回答…"));
     controller.current = activeController;
     activeTurnId.current = assistantId;
 
@@ -158,6 +189,7 @@ export function InformationPanel({
         trace: result.trace || trace,
         state: "completed",
       });
+      setAnnouncement(t("咨询回答已完成。"));
       if (result.session_id) setSessionId(result.session_id);
     } catch (error) {
       if (!activeController.signal.aborted) {
@@ -166,6 +198,7 @@ export function InformationPanel({
           trace: [...trace],
           state: "error",
         });
+        setAnnouncement(t("咨询请求失败，请检查连接后重试。"));
       }
     } finally {
       if (flushTimer) window.clearTimeout(flushTimer);
@@ -184,6 +217,7 @@ export function InformationPanel({
         : turn));
     }
     setBusy(false);
+    setAnnouncement(t("已停止本次咨询。"));
   };
 
   const startNewConsultation = () => {
@@ -192,6 +226,8 @@ export function InformationPanel({
     activeTurnId.current = "";
     setBusy(false);
     setTurns([]);
+    setVisibleTurnCount(TURN_BATCH_SIZE);
+    prependAnchor.current = null;
     setValue("");
     const previousSession = sessionIdRef.current;
     void api.clearShortTermSession(previousSession, userId).catch(() => undefined);
@@ -201,11 +237,20 @@ export function InformationPanel({
     nearBottom.current = true;
   };
 
+  const showEarlierTurns = () => {
+    const firstVisibleTurn = conversation.current?.querySelector(".chat-turn");
+    prependAnchor.current = firstVisibleTurn
+      ? { element: firstVisibleTurn, top: firstVisibleTurn.getBoundingClientRect().top }
+      : null;
+    nearBottom.current = false;
+    setVisibleTurnCount((current) => Math.min(turns.length, current + TURN_BATCH_SIZE));
+  };
+
   const refresh = async () => {
     setRefreshing(true);
     setFeedError("");
     try {
-      const result = await api.refreshInformation();
+      const result = await api.refreshInformation(locale);
       setItems(sortItems(result.items));
     } catch (error) {
       setFeedError(String(error));
@@ -217,7 +262,7 @@ export function InformationPanel({
   return (
     <aside id="information-panel" className={`information-panel ${variant === "window" ? "windowed" : ""}`} aria-label="独立信息咨询">
       <header>
-        <span><MessageSquareText size={16} /><strong>信息中心</strong></span>
+        <span><MessageSquareText size={16} aria-hidden="true" /><h2 id="information-panel-title">信息中心</h2></span>
         <div>
           {mode === "consultation" ? (
             <button title="新建独立咨询" aria-label="新建独立咨询" onClick={startNewConsultation}><SquarePen size={15} /></button>
@@ -227,31 +272,40 @@ export function InformationPanel({
           <button title="关闭" aria-label="关闭" onClick={onClose}><X size={16} /></button>
         </div>
       </header>
-      <div className="information-tabs" role="tablist" aria-label="信息中心视图">
-        <button role="tab" aria-selected={mode === "consultation"} className={mode === "consultation" ? "active" : ""} onClick={() => setMode("consultation")}><MessageSquareText size={14} />咨询</button>
-        <button role="tab" aria-selected={mode === "feed"} className={mode === "feed" ? "active" : ""} onClick={() => setMode("feed")}><Newspaper size={14} />资讯</button>
+      <div className="information-tabs" role="tablist" aria-label="信息中心视图" onKeyDown={(event) => { if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return; event.preventDefault(); const next = mode === "consultation" ? "feed" : "consultation"; setMode(next); document.getElementById(`information-tab-${next}`)?.focus(); }}>
+        <button id="information-tab-consultation" role="tab" aria-controls="information-consultation-panel" aria-selected={mode === "consultation"} tabIndex={mode === "consultation" ? 0 : -1} className={mode === "consultation" ? "active" : ""} onClick={() => setMode("consultation")}><MessageSquareText size={14} aria-hidden="true" />咨询</button>
+        <button id="information-tab-feed" role="tab" aria-controls="information-feed-panel" aria-selected={mode === "feed"} tabIndex={mode === "feed" ? 0 : -1} className={mode === "feed" ? "active" : ""} onClick={() => setMode("feed")}><Newspaper size={14} aria-hidden="true" />资讯</button>
       </div>
+      <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
       {mode === "consultation" ? (
-        <div className="consultation-view">
+        <div id="information-consultation-panel" className="consultation-view" role="tabpanel" aria-labelledby="information-tab-consultation">
           <div
             className="consultation-scroll"
             ref={scroll}
-            aria-live="polite"
             onScroll={(event) => {
               const target = event.currentTarget;
               nearBottom.current = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
             }}
           >
             <div className="consultation-conversation" ref={conversation}>
-              {!turns.length ? <ConsultationEmpty onPrompt={(prompt) => void send(prompt)} /> : turns.map((turn) => <ChatMessage key={turn.id} turn={turn} compact autoExpandThinking={false} />)}
+              {firstVisibleTurnIndex ? (
+                <button type="button" className="secondary" style={LOAD_EARLIER_BUTTON_STYLE} onClick={showEarlierTurns}>
+                  {t("显示更早消息")}
+                </button>
+              ) : null}
+              <div role="log" aria-live="off" aria-label="咨询对话记录">
+                {!turns.length ? <ConsultationEmpty onPrompt={(prompt) => void send(prompt)} /> : visibleTurns.map((turn) => <ChatMessage key={turn.id} turn={turn} compact autoExpandThinking={false} />)}
+              </div>
             </div>
           </div>
           <div className="consultation-composer">
             <textarea
               rows={2}
               value={value}
-              placeholder="询问漏洞、告警或处置建议"
+              placeholder="例如：分析这条安全告警并给出处置建议…"
               aria-label="独立咨询问题"
+              name="information_question"
+              autoComplete="off"
               disabled={busy}
               onChange={(event) => setValue(event.target.value)}
               onKeyDown={(event) => {
@@ -270,13 +324,18 @@ export function InformationPanel({
           </div>
         </div>
       ) : (
-        <div className="information-feed">
+        <div id="information-feed-panel" className="information-feed" role="tabpanel" aria-labelledby="information-tab-feed">
           {loading && !items.length ? <InformationSkeleton /> : null}
-          {feedError && !items.length ? <p className="information-error">资讯加载失败：{feedError}</p> : null}
+          {feedError && !items.length ? <div className="information-error" role="alert"><span>资讯加载失败：{feedError}</span><button className="secondary" onClick={() => void refresh()}>重新加载</button></div> : null}
           {items.slice(0, 20).map((item, index) => (
             <a className="information-entry" style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }} key={item.id} href={item.url} target="_blank" rel="noreferrer">
               <InformationImage item={item} />
-              <span><strong>{item.title}</strong><small>{item.source_name || "安全情报"} · {formatTime(item.published_at)}</small></span>
+              <span>
+                <strong>{item.title}</strong>
+                <small>
+                  {item.source_name || "安全情报"} · {formatTime(item.published_at, locale)}
+                </small>
+              </span>
               <ExternalLink size={12} />
             </a>
           ))}
@@ -285,6 +344,15 @@ export function InformationPanel({
     </aside>
   );
 }
+
+const LOAD_EARLIER_BUTTON_STYLE = {
+  display: "block",
+  minHeight: 30,
+  margin: "0 auto 16px",
+  padding: "0 10px",
+  borderRadius: 5,
+  cursor: "pointer",
+} as const;
 
 function ConsultationEmpty({ onPrompt }: { onPrompt: (prompt: string) => void }) {
   const prompts = ["分析这条安全告警", "查询近期高危漏洞", "给出处置优先级建议"];
@@ -307,6 +375,8 @@ function InformationImage({ item }: { item: InformationItem }) {
         className="information-image"
         src={api.informationImageUrl(item.id)}
         alt=""
+        width={46}
+        height={46}
         loading="lazy"
         onError={() => setStage(item.source_id ? "source" : "fallback")}
       />
@@ -318,6 +388,8 @@ function InformationImage({ item }: { item: InformationItem }) {
         className="information-image source-image"
         src={api.informationSourceImageUrl(item.source_id)}
         alt=""
+        width={46}
+        height={46}
         loading="lazy"
         onError={() => setStage("fallback")}
       />
@@ -340,7 +412,12 @@ function createConsultationSession() {
 }
 
 const sortItems = (items: InformationItem[]) => [...items].sort((left, right) => new Date(right.published_at || 0).getTime() - new Date(left.published_at || 0).getTime());
-const formatTime = (value?: string) => value ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value)) : "刚刚";
+const formatTime = (value: string | undefined, locale: ClientLocale) => {
+  if (!value) return "刚刚";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "-";
+  return new Intl.DateTimeFormat(clientLocaleTag(locale), { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
+};
 
 function isRecentHighVulnerabilityLookup(question: string) {
   const text = question.trim().toLowerCase();

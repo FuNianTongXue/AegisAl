@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../lib/api";
@@ -11,6 +11,8 @@ describe("backend cold-start bootstrap", () => {
   beforeEach(() => {
     useAppStore.setState({
       userId: "default",
+      bootstrapReady: false,
+      bootstrapError: undefined,
       health: undefined,
       settings: undefined,
       llm: undefined,
@@ -55,5 +57,26 @@ describe("backend cold-start bootstrap", () => {
     await vi.advanceTimersByTimeAsync(50);
     await expect(first).resolves.toMatchObject({ ok: true });
     expect(health).toHaveBeenCalledTimes(2);
+  });
+
+  it("publishes a startup error and succeeds when the user retries", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(api, "health").mockResolvedValue({ ok: true } as never);
+    vi.spyOn(api, "settings")
+      .mockRejectedValueOnce(new Error("设置服务不可用"))
+      .mockResolvedValue({ profile: { updated_at: "2026-08-06T08:00:00Z" } } as never);
+    vi.spyOn(api, "llmConfig").mockResolvedValue({ model: "deepseek-chat", configured: true } as never);
+    vi.spyOn(api, "tasks").mockResolvedValue([]);
+    vi.spyOn(api, "conversations").mockResolvedValue([]);
+
+    const { result } = renderHook(() => useBackendBootstrap());
+
+    await waitFor(() => expect(useAppStore.getState().bootstrapError).toBe("设置服务不可用"));
+    expect(useAppStore.getState().bootstrapReady).toBe(false);
+
+    await act(async () => { await result.current(); });
+
+    await waitFor(() => expect(useAppStore.getState().bootstrapReady).toBe(true));
+    expect(useAppStore.getState().bootstrapError).toBeUndefined();
   });
 });

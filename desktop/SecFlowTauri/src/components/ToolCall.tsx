@@ -34,7 +34,7 @@ export function ToolCall({ item }: { item: TraceItem }) {
 }
 
 function JsonBlock({ label, value }: { label: string; value: unknown }) {
-  return <div><label>{label}</label><pre>{JSON.stringify(value, null, 2)}</pre></div>;
+  return <div><strong className="tool-json-heading">{label}</strong><pre>{JSON.stringify(value, null, 2)}</pre></div>;
 }
 
 const stateLabel = (state: string) => state === "error" ? "执行失败" : state === "running" ? "运行中" : "已完成";

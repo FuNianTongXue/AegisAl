@@ -11,16 +11,11 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from app.collectors import collector_graph, collector_service
-from app.mcp.component_query import artifact_store as component_artifact_store, component_mcp_specs
-from app.mcp.code_scan import code_scan_mcp_spec
-from app.mcp.license_scan import license_scan_mcp_spec
-from app.mcp.sbom import artifact_store as sbom_artifact_store, sbom_mcp_specs
-from app.mcp.translation import translation_mcp_spec
+from app.assistant_artifacts import component_artifact_store, sbom_artifact_store
 from app.langgraph.assistant_graph import knowledge_graph, runtime_status
 from app.information import information_service, load_information_image, load_information_source_image
 from app.llm import list_llm_models, llm_public_config, save_llm_config, test_llm_config
@@ -61,7 +56,8 @@ from app.models import (
 )
 from app.privacy import public_answer_payload, sanitize_public_text
 from app.capabilities import built_in_capability_catalog
-from app.mcp.report_charts import report_mcp_specs
+from app.composition import secflow_runtime, shutdown_secflow_runtime
+from app.mcp.protocol import MCP_PLUGIN_ID, MCP_SERVER_REGISTRY, MCPServerDefinition
 from app.langgraph.report_graph import report_capability_subgraph, report_outcome_answer
 from app.langgraph.component_catalog_graph import (
     component_catalog_outcome_answer,
@@ -99,9 +95,21 @@ from app.trial import trial_manager
 from app.subscriptions import SubscriptionServiceError, subscription_service
 
 
-APP_DIR = Path(__file__).resolve().parents[2]
-STATIC_DIR = APP_DIR / "static"
 MACOS_API_CONTRACT_VERSION = "2026-07-subscriptions-v1"
+MCP_LOCAL_TRANSPORT = "stdio"
+MCP_LOCAL_ISOLATION = "host-managed-child-process"
+COMPONENT_MCP_SERVER_IDS = ("component-detail", "excel", "d3-sankey")
+REPORT_MCP_SERVER_IDS = (
+    "translation",
+    "report-template",
+    "report-chart",
+    "report-sarif",
+    "report-mermaid",
+    "report-markdown",
+    "report-word",
+    "report-excel",
+    "report-pdf",
+)
 
 app = FastAPI(
     title="SecFlow Knowledge Security Assistant",
@@ -121,9 +129,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Accept", "Content-Type", "Last-Event-ID", "X-Request-ID"],
 )
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
 @app.middleware("http")
 async def enforce_trial_period(request: Request, call_next):
     request_id = str(request.headers.get("X-Request-ID") or uuid4())[:120]
@@ -147,6 +152,7 @@ async def enforce_trial_period(request: Request, call_next):
 
 @app.on_event("startup")
 def startup_batch_jobs() -> None:
+    secflow_runtime()
     report_store.sanitize_existing_reports()
     task_agent_service.start()
     if os.getenv("SECFLOW_DISABLE_BATCH_SCHEDULER", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -156,22 +162,39 @@ def startup_batch_jobs() -> None:
 
 @app.on_event("shutdown")
 def shutdown_batch_jobs() -> None:
-    intelligence_service.stop_batch_scheduler()
-    task_agent_service.shutdown()
+    try:
+        intelligence_service.stop_batch_scheduler()
+    finally:
+        try:
+            task_agent_service.shutdown()
+        finally:
+            shutdown_secflow_runtime()
 
 
 def ok(data=None, message: str = "ok") -> ApiResponse:
     return ApiResponse(status="success", message=message, data=data)
 
 
+def _registered_mcp_server_specs(server_ids: tuple[str, ...]) -> list[dict[str, object]]:
+    runtime = secflow_runtime()
+    with runtime.pin(MCP_PLUGIN_ID) as snapshot:
+        registry = snapshot.registries.get(MCP_SERVER_REGISTRY, {})
+        specs: list[dict[str, object]] = []
+        for server_id in server_ids:
+            entry = registry.get(server_id)
+            if entry is None or not isinstance(entry.value, MCPServerDefinition):
+                raise RuntimeError(f"Registered MCP server is unavailable: {server_id}")
+            specs.append(entry.value.as_dict())
+        return specs
+
+
 @app.get("/")
 def root():
-    return RedirectResponse(url="/ui")
-
-
-@app.get("/ui")
-def ui():
-    return FileResponse(STATIC_DIR / "index.html")
+    return {
+        "service": "secflow-knowledge-security-assistant",
+        "client": "SecFlow Tauri Desktop",
+        "api_docs": "/docs",
+    }
 
 
 @app.get("/health")
@@ -374,15 +397,88 @@ def collect(collector_id: str):
 
 
 @app.get("/api/vulnerabilities", response_model=ApiResponse)
-def vulnerabilities():
-    snapshot = collector_service.snapshot()
-    return ok({"records": snapshot["records"], "stats": snapshot["stats"]}, "Vulnerability records loaded.")
+def vulnerabilities(
+    query: str = Query(default="", max_length=160),
+    response_language: str = Query(default="zh-Hans", max_length=24),
+):
+    try:
+        clean_query = " ".join(query.split()) if isinstance(query, str) else ""
+        if clean_query:
+            result = intelligence_service.query(
+                clean_query,
+                limit=50,
+                response_language=response_language,
+            )
+            records = list(result.get("records") or [])
+            severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+            for record in records:
+                severity = str(record.get("severity") or "").upper()
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
+            translation = dict(result.get("catalog_translation") or {})
+            ready_count = int(translation.get("ready_records") or 0)
+            total_count = len(records)
+            translation_progress = 100 if not total_count else int((ready_count / total_count) * 100)
+            return ok(
+                {
+                    "records": records,
+                    "stats": {
+                        "total": total_count,
+                        "critical": severity_counts["CRITICAL"],
+                        "high": severity_counts["HIGH"],
+                        "medium": severity_counts["MEDIUM"],
+                        "low": severity_counts["LOW"],
+                    },
+                    "query": clean_query,
+                    "response_language": response_language,
+                    "catalog_translation": translation,
+                    "translation_status": str(translation.get("status") or "pending"),
+                    "translation_progress": translation_progress,
+                    "translation_count": total_count,
+                    "translation_ready_count": ready_count,
+                },
+                "Matching vulnerability records loaded.",
+            )
+        snapshot = intelligence_service.dashboard(response_language=response_language)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    severity = dict(snapshot.get("severity") or {})
+    return ok(
+        {
+            "records": list(snapshot.get("recent_records") or []),
+            "stats": {
+                "total": int(snapshot.get("vulnerability_count") or 0),
+                "critical": int(severity.get("CRITICAL") or 0),
+                "high": int(severity.get("HIGH") or 0),
+                "medium": int(severity.get("MEDIUM") or 0),
+                "low": int(severity.get("LOW") or 0),
+            },
+            "response_language": str(snapshot.get("response_language") or response_language),
+            "catalog_translation": dict(snapshot.get("catalog_translation") or {}),
+            "translation_status": str(snapshot.get("translation_status") or "pending"),
+            "translation_progress": int(snapshot.get("translation_progress") or 0),
+            "translation_count": int(snapshot.get("translation_count") or 0),
+            "translation_ready_count": int(snapshot.get("translation_ready_count") or 0),
+        },
+        "Localized vulnerability records loaded.",
+    )
 
 
 @app.get("/api/dashboard", response_model=ApiResponse)
-def dashboard(start_date: date | None = None, end_date: date | None = None):
+def dashboard(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    response_language: str = Query(default="zh-Hans", max_length=24),
+):
     try:
-        return ok(intelligence_service.dashboard(start_date=start_date, end_date=end_date), "Dashboard batch snapshot loaded.")
+        return ok(
+            intelligence_service.dashboard(
+                start_date=start_date,
+                end_date=end_date,
+                response_language=response_language,
+            ),
+            "Dashboard batch snapshot loaded.",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -417,22 +513,38 @@ def information(
     sort: str = "latest",
     limit: int = 80,
     refresh: bool = False,
+    response_language: str = Query(default="zh-Hans", max_length=24),
 ):
-    return ok(
-        information_service.snapshot(
-            query=query,
-            category=category,
-            sort=sort,
-            limit=max(1, min(limit, 200)),
-            refresh=refresh,
-        ),
-        "Public security information loaded.",
-    )
+    try:
+        return ok(
+            information_service.snapshot(
+                query=query,
+                category=category,
+                sort=sort,
+                limit=max(1, min(limit, 200)),
+                refresh=refresh,
+                response_language=response_language,
+            ),
+            "Public security information loaded from source feeds.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/information/refresh", response_model=ApiResponse)
-def refresh_information():
-    return ok(information_service.request_refresh(force=True), "Public security information refresh started.")
+def refresh_information(
+    response_language: str = Query(default="zh-Hans", max_length=24),
+):
+    try:
+        return ok(
+            information_service.request_refresh(
+                force=True,
+                response_language=response_language,
+            ),
+            "Public security information refresh started.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/information/images/{item_id}")
@@ -568,7 +680,11 @@ def export_component_vulnerabilities(payload: ComponentVulnerabilityRequest):
 @app.get("/api/mcp/tools/component-query", response_model=ApiResponse)
 async def component_query_mcp_tools():
     return ok(
-        {"transport": "in-process+stdio", "servers": await component_mcp_specs()},
+        {
+            "transport": MCP_LOCAL_TRANSPORT,
+            "isolation": MCP_LOCAL_ISOLATION,
+            "servers": _registered_mcp_server_specs(COMPONENT_MCP_SERVER_IDS),
+        },
         "Component query MCP tools loaded.",
     )
 
@@ -576,15 +692,23 @@ async def component_query_mcp_tools():
 @app.get("/api/mcp/tools/code-scan", response_model=ApiResponse)
 async def code_scan_mcp_tools():
     return ok(
-        {"transport": "sse", "server": await code_scan_mcp_spec()},
-        "Independent Code Scan MCP SSE tools loaded.",
+        {
+            "transport": MCP_LOCAL_TRANSPORT,
+            "isolation": MCP_LOCAL_ISOLATION,
+            "server": _registered_mcp_server_specs(("code-scan",))[0],
+        },
+        "Independent Code Scan MCP stdio tools loaded.",
     )
 
 
 @app.get("/api/mcp/tools/license-scan", response_model=ApiResponse)
 async def license_scan_mcp_tools():
     return ok(
-        {"transport": "in-process+stdio", "server": await license_scan_mcp_spec()},
+        {
+            "transport": MCP_LOCAL_TRANSPORT,
+            "isolation": MCP_LOCAL_ISOLATION,
+            "server": _registered_mcp_server_specs(("license-scan",))[0],
+        },
         "Independent License MCP tools loaded.",
     )
 
@@ -592,7 +716,11 @@ async def license_scan_mcp_tools():
 @app.get("/api/mcp/tools/project-sbom", response_model=ApiResponse)
 async def project_sbom_mcp_tools():
     return ok(
-        {"transport": "in-process+stdio", "servers": await sbom_mcp_specs()},
+        {
+            "transport": MCP_LOCAL_TRANSPORT,
+            "isolation": MCP_LOCAL_ISOLATION,
+            "servers": _registered_mcp_server_specs(("sbom-excel",)),
+        },
         "Project SBOM MCP tools loaded.",
     )
 
@@ -600,7 +728,11 @@ async def project_sbom_mcp_tools():
 @app.get("/api/mcp/tools/translation", response_model=ApiResponse)
 async def translation_mcp_tools():
     return ok(
-        {"transport": "in-process+stdio", "server": await translation_mcp_spec()},
+        {
+            "transport": MCP_LOCAL_TRANSPORT,
+            "isolation": MCP_LOCAL_ISOLATION,
+            "server": _registered_mcp_server_specs(("translation",))[0],
+        },
         "Translation MCP tools loaded.",
     )
 
@@ -610,7 +742,11 @@ async def translation_mcp_tools():
 @app.get("/api/mcp/tools/reports", response_model=ApiResponse)
 async def report_chart_mcp_tools():
     return ok(
-        {"transport": "in-process+stdio", "servers": await report_mcp_specs()},
+        {
+            "transport": MCP_LOCAL_TRANSPORT,
+            "isolation": MCP_LOCAL_ISOLATION,
+            "servers": _registered_mcp_server_specs(REPORT_MCP_SERVER_IDS),
+        },
         "Report template, chart, Mermaid, Markdown, Word, Excel, and PDF MCP tools loaded.",
     )
 
@@ -621,19 +757,31 @@ async def system_capabilities():
 
 
 @app.get("/api/assistant/artifacts/{artifact_id}")
-def download_assistant_artifact(artifact_id: str):
+def download_assistant_artifact(
+    artifact_id: str,
+    user_id: str = Query(default="default", min_length=1, max_length=120),
+):
     try:
-        path = component_artifact_store.resolve(artifact_id)
-        file_name = f"SecFlow-{artifact_id}.xlsx"
+        path = component_artifact_store.resolve(artifact_id, user_id=user_id)
+        file_name = str(
+            component_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
+            or "SecFlow-component-vulnerabilities.xlsx"
+        )
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except KeyError:
         try:
-            path = sbom_artifact_store.resolve(artifact_id)
-            file_name = f"SecFlow-{artifact_id}.xlsx"
+            path = sbom_artifact_store.resolve(artifact_id, user_id=user_id)
+            file_name = str(
+                sbom_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
+                or "SecFlow-project-SBOM.xlsx"
+            )
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         except KeyError as exc:
             try:
-                path, file_name, media_type = report_artifact_store.resolve(artifact_id)
+                path, file_name, media_type = report_artifact_store.resolve(
+                    artifact_id,
+                    user_id=user_id,
+                )
             except KeyError:
                 raise HTTPException(status_code=404, detail=f"Unknown assistant artifact: {artifact_id}") from exc
     return FileResponse(
@@ -698,16 +846,12 @@ async def ask_stream(payload: AskRequest):
     async def stream():
         queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
-        emitted_content = [False]
 
         def emit_trace(item: dict) -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, ("trace", item))
+            del item
 
         def emit_content(delta: str) -> None:
-            if not delta:
-                return
-            emitted_content[0] = True
-            loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
+            del delta
 
         def run_graph() -> None:
             try:
@@ -718,9 +862,16 @@ async def ask_stream(payload: AskRequest):
                     content_sink=emit_content,
                     allow_workspace_recovery=True,
                 )
-                if not emitted_content[0]:
-                    for delta in _assistant_content_chunks(str(result.get("summary") or "")):
-                        loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
+                # Agent/model deltas are untrusted until the final translation
+                # and publication policy has accepted the complete result.
+                # Emit only the final public payload; no-op callbacks keep graph
+                # integrations compatible without retaining unbounded content.
+                final_trace = result.get("trace") if isinstance(result.get("trace"), list) else []
+                for item in final_trace:
+                    if isinstance(item, dict):
+                        loop.call_soon_threadsafe(queue.put_nowait, ("trace", dict(item)))
+                for delta in _assistant_content_chunks(str(result.get("summary") or "")):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
                 loop.call_soon_threadsafe(queue.put_nowait, ("result", result))
             except Exception as exc:  # noqa: BLE001 - stream failures must be delivered to the client.
                 message = sanitize_public_text(str(exc)).strip() or "Assistant response generation failed."

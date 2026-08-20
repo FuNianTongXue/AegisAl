@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.mcp.artifacts import MCPArtifactReference, stage_output_artifact
 
 
 class PDFReportOutput(BaseModel):
     schema_version: int = 1
     renderer: Literal["reportlab"] = "reportlab"
-    artifact_base64: str
+    artifacts: list[MCPArtifactReference] = Field(default_factory=list)
     media_type: Literal["application/pdf"] = "application/pdf"
     file_extension: Literal["pdf"] = "pdf"
     input_sha256: str
@@ -39,6 +40,8 @@ report_pdf_mcp = FastMCP(
 def render_pdf_report(
     report_document: dict[str, Any],
     mermaid: dict[str, Any] | None = None,
+    *,
+    output_dir: str,
 ) -> PDFReportOutput:
     from app.reports import render_report_pdf_file, validate_report_document_json
 
@@ -51,10 +54,19 @@ def render_pdf_report(
         raise RuntimeError("PDF MCP produced an invalid PDF header")
     source = document.get("source") if isinstance(document.get("source"), dict) else {}
     input_sha256 = str((source.get("audit") or {}).get("payload_sha256") or "")
+    digest = hashlib.sha256(payload).hexdigest()
+    artifacts = [
+        stage_output_artifact(
+            output_dir,
+            file_name="SecFlow-security-report.pdf",
+            payload=payload,
+            media_type="application/pdf",
+        )
+    ]
     return PDFReportOutput(
-        artifact_base64=base64.b64encode(payload).decode("ascii"),
+        artifacts=artifacts,
         input_sha256=input_sha256,
-        output_sha256=hashlib.sha256(payload).hexdigest(),
+        output_sha256=digest,
         size=len(payload),
     )
 

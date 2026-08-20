@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import unittest
 from unittest.mock import patch
 
@@ -12,7 +11,6 @@ from app.collectors import (
 )
 from app.graph import (
     ASSISTANT_IDENTITY,
-    VULNERABILITY_CARD_PROMPT,
     KnowledgeSecurityGraph,
     build_vulnerability_card,
     empty_knowledge_graph,
@@ -415,12 +413,13 @@ class KnowledgeAnswerPrivacyTests(unittest.TestCase):
                 ],
             }
         )
-        self.assertIn("高危漏洞", card["漏洞描述"])
-        self.assertIn("CVSS 评分为 8.8", card["漏洞描述"])
-        self.assertIn("已知影响范围", card["漏洞描述"])
+        self.assertRegex(card["漏洞描述"], r"[\u3400-\u9fff]")
         self.assertNotIn("Example remote code execution", card["漏洞描述"])
+        self.assertEqual(card["CVSS评分"], 8.8)
+        self.assertEqual(card["严重等级"], "高危")
+        self.assertIn("Maven / demo", card["组件版本范围"])
 
-    def test_vulnerability_lookup_reuses_single_model_call_for_chinese_card(self) -> None:
+    def test_vulnerability_lookup_uses_offline_translation_without_chat_model(self) -> None:
         graph = KnowledgeSecurityGraph()
         record = {
             "id": "CVE-2026-55576",
@@ -438,36 +437,20 @@ class KnowledgeAnswerPrivacyTests(unittest.TestCase):
             "intent": "vulnerability_lookup",
             "records": [record],
             "trace": [],
-            "llm_result": {
-                "status": "success",
-                "answer": json.dumps(
-                    {
-                        "漏洞编号": "CVE-2026-55576",
-                        "漏洞名称": "工作流表达式注入漏洞",
-                        "漏洞描述": "攻击者可控的拉取请求标题能够进入 shell 命令。",
-                        "CVSS评分": 8.8,
-                        "严重等级": "高危",
-                        "组件版本范围": "未明确",
-                        "涉及版本": "未明确",
-                        "修复版本": "未明确",
-                        "修复方案": "采用已确认的安全提交。",
-                        "缓释措施": "限制外部拉取请求触发高权限工作流。",
-                        "代码片段": "未明确",
-                        "修复代码片段": "未明确",
-                        "参考链接": "https://example.test/CVE-2026-55576",
-                    },
-                    ensure_ascii=False,
-                ),
-            },
+            "llm_result": {},
         }
 
-        messages = graph._build_messages(state)
-        translated = graph._translate_vulnerability_card(state)
+        with patch(
+            "app.langgraph.assistant_graph.active_model_from_env",
+            side_effect=AssertionError("vulnerability localization must not call a chat model"),
+        ):
+            skipped = graph._call_llm(state)
+        translated = graph._translate_vulnerability_card(skipped)
 
-        self.assertEqual(messages[0]["content"], VULNERABILITY_CARD_PROMPT)
-        self.assertIn("A pull request title can reach a shell command", messages[1]["content"])
-        self.assertIn("攻击者可控的拉取请求标题", translated["vulnerability_card"]["漏洞描述"])
-        self.assertIn("复用本次模型结果", translated["trace"][-1]["message"])
+        self.assertEqual(skipped["llm_result"]["status"], "skipped")
+        self.assertRegex(translated["vulnerability_card"]["漏洞描述"], r"[\u3400-\u9fff]")
+        self.assertNotIn("A pull request title", translated["vulnerability_card"]["漏洞描述"])
+        self.assertIn("Translation MCP", translated["trace"][-1]["message"])
 
     def test_vulnerability_card_does_not_invent_code_snippet(self) -> None:
         card = build_vulnerability_card(

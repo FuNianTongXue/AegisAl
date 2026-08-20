@@ -136,10 +136,10 @@ export function InitialSetupView() {
               <form onSubmit={(event) => { event.preventDefault(); void saveProfile(); }}>
                 <div className="initial-setup-heading"><UserRound /><div><h2>配置个人信息</h2><p>用于头像、任务记录和安全工作区身份显示。</p></div></div>
                 <div className="settings-form-grid">
-                  <label>显示名称<input required maxLength={80} value={profile.display_name} onChange={(event) => updateProfile("display_name", event.target.value)} /></label>
-                  <label>邮箱<input required maxLength={160} type="email" value={profile.email} onChange={(event) => updateProfile("email", event.target.value)} /></label>
-                  <label>部门<input maxLength={120} value={profile.department} onChange={(event) => updateProfile("department", event.target.value)} /></label>
-                  <label>角色<select value={profile.role} onChange={(event) => updateProfile("role", event.target.value)}><option value="">请选择角色</option>{roles.map((role) => <option value={role} key={role}>{role}</option>)}</select></label>
+                  <label>显示名称<input required maxLength={80} name="display_name" autoComplete="name" value={profile.display_name} onChange={(event) => updateProfile("display_name", event.target.value)} /></label>
+                  <label>邮箱<input required maxLength={160} name="email" type="email" autoComplete="email" spellCheck={false} value={profile.email} onChange={(event) => updateProfile("email", event.target.value)} /></label>
+                  <label>部门<input maxLength={120} name="department" autoComplete="organization" value={profile.department} onChange={(event) => updateProfile("department", event.target.value)} /></label>
+                  <label>角色<select name="role" autoComplete="off" value={profile.role} onChange={(event) => updateProfile("role", event.target.value)}><option value="">请选择角色</option>{roles.map((role) => <option value={role} key={role}>{role}</option>)}</select></label>
                 </div>
                 <footer><span aria-live="polite">{status}</span><button className="primary" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <ArrowRight />}保存并继续</button></footer>
               </form>
@@ -157,8 +157,8 @@ export function InitialSetupView() {
                   </section>
                 </div>
                 <div className="settings-form-grid initial-credential-grid">
-                  <label>Base URL<input required value={config.endpoint} onChange={(event) => updateConfig({ endpoint: event.target.value })} /></label>
-                  <label>API Key<input required={selectedProvider !== "ollama" && !config.api_key_configured} type="password" value={config.api_key || ""} placeholder={selectedProvider === "ollama" ? "本地 Ollama 无需密钥" : config.api_key_configured ? "已配置，留空保持不变" : "输入模型厂商 API Key"} onChange={(event) => updateConfig({ api_key: event.target.value })} /></label>
+                  <label>Base URL<input required name="model_endpoint" type="url" inputMode="url" autoComplete="off" spellCheck={false} value={config.endpoint} placeholder="例如 https://api.example.com/v1…" onChange={(event) => updateConfig({ endpoint: event.target.value })} /></label>
+                  <label>API Key<input required={selectedProvider !== "ollama" && !config.api_key_configured} name="model_api_key" type="password" autoComplete="off" spellCheck={false} value={config.api_key || ""} placeholder={selectedProvider === "ollama" ? "本地 Ollama 无需密钥…" : config.api_key_configured ? "已配置，留空保持不变…" : "输入模型厂商 API Key…"} onChange={(event) => updateConfig({ api_key: event.target.value })} /></label>
                 </div>
                 <footer>
                   <button className="ghost" type="button" onClick={() => { setStep(1); setStatus(""); }} disabled={busy}><ArrowLeft />返回</button>

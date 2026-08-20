@@ -18,7 +18,9 @@ import type {
   TraceItem,
   TrialStatus,
   UserProfile,
+  VulnerabilityContentLanguage,
   VulnerabilityRecord,
+  VulnerabilityTranslationStatus,
   WorkspaceActionResult,
 } from "../types";
 
@@ -272,22 +274,36 @@ export class SecFlowApi {
     );
   }
 
-  async dashboard() {
-    return normalizeDashboard(await this.request<Record<string, unknown>>("/api/dashboard"));
+  async dashboard(responseLanguage = "zh-Hans") {
+    return normalizeDashboard(
+      await this.request<Record<string, unknown>>("/api/dashboard", {}, { response_language: responseLanguage }),
+      responseLanguage,
+    );
   }
 
   intelligenceSources() {
     return this.request<IntelligenceSource[]>("/api/intelligence/sources");
   }
 
-  async vulnerabilities() {
-    const result = await this.request<VulnerabilityRecord[] | { records?: VulnerabilityRecord[] }>("/api/vulnerabilities");
+  async vulnerabilities(responseLanguage = "zh-Hans", query = "") {
+    const result = await this.request<VulnerabilityRecord[] | { records?: VulnerabilityRecord[] }>(
+      "/api/vulnerabilities",
+      {},
+      { response_language: responseLanguage, query: query.trim() || undefined },
+    );
     const records = Array.isArray(result) ? result : result.records || [];
-    return records.map(normalizeVulnerability);
+    return records.map((record) => normalizeVulnerability(record, responseLanguage));
   }
 
-  async information(refresh = false) {
-    return normalizeInformation(await this.request<InformationSnapshot>("/api/information", {}, { refresh }));
+  async information(refresh = false, responseLanguage = "zh-Hans") {
+    return normalizeInformation(
+      await this.request<InformationSnapshot>(
+        "/api/information",
+        {},
+        { refresh, response_language: responseLanguage },
+      ),
+      responseLanguage,
+    );
   }
 
   informationImageUrl(itemId: string) {
@@ -298,14 +314,33 @@ export class SecFlowApi {
     return this.url(`/api/information/source-images/${encodeURIComponent(sourceId)}`).toString();
   }
 
-  async refreshInformation() {
+  async refreshInformation(responseLanguage = "zh-Hans") {
     const requested = normalizeInformation(
-      await this.request<InformationSnapshot>("/api/information/refresh", { method: "POST" }),
+      await this.request<InformationSnapshot>(
+        "/api/information/refresh",
+        { method: "POST" },
+        { response_language: responseLanguage },
+      ),
+      responseLanguage,
     );
-    let latest = normalizeInformation(await this.request<InformationSnapshot>("/api/information"));
+    let latest = normalizeInformation(
+      await this.request<InformationSnapshot>(
+        "/api/information",
+        {},
+        { response_language: responseLanguage },
+      ),
+      responseLanguage,
+    );
     for (let attempt = 0; attempt < 20 && latest.refreshing; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 500));
-      latest = normalizeInformation(await this.request<InformationSnapshot>("/api/information"));
+      latest = normalizeInformation(
+        await this.request<InformationSnapshot>(
+          "/api/information",
+          {},
+          { response_language: responseLanguage },
+        ),
+        responseLanguage,
+      );
     }
     return latest.items.length ? latest : requested;
   }
@@ -515,9 +550,46 @@ function normalizeAskResult(value: AskResult): AskResult {
   return { ...value, answer: summary, summary };
 }
 
-function normalizeDashboard(value: Record<string, unknown>): DashboardSnapshot {
+function normalizeDashboard(value: Record<string, unknown>, requestedLanguage: string): DashboardSnapshot {
   const severity = asRecord(value.severity);
-  const records = (Array.isArray(value.recent_records) ? value.recent_records : []).map(normalizeVulnerability);
+  const requestedResponseLanguage = normalizeContentLanguage(requestedLanguage);
+  const declaredResponseLanguage = normalizeContentLanguage(value.response_language);
+  const responseLanguage = requestedResponseLanguage === "unknown"
+    ? declaredResponseLanguage
+    : requestedResponseLanguage;
+  const responseLanguageMatches = declaredResponseLanguage === "unknown"
+    || declaredResponseLanguage === responseLanguage;
+  const records = (Array.isArray(value.recent_records) ? value.recent_records : [])
+    .map((record) => normalizeVulnerability(record as VulnerabilityRecord, responseLanguage));
+  const translation = asRecord(value.catalog_translation || value.translation);
+  const translationCount = safeCount(
+    translation.total_count
+      ?? translation.record_count
+      ?? value.translation_count
+      ?? value.catalog_count
+      ?? value.vulnerability_count,
+  );
+  const translationReadyCount = safeCount(
+    value.translation_ready_count
+      ?? value.translated_count
+      ?? translation.ready_count
+      ?? translation.ready_records,
+  );
+  const translationProgress = safeProgress(
+    value.translation_progress
+      ?? translation.progress,
+    translationReadyCount,
+    translationCount,
+  );
+  const reportedTranslationStatus = normalizeTranslationStatus(
+    value.translation_status
+      ?? value.catalog_translation_status
+      ?? translation.status,
+    responseLanguage === "en" ? "not_required" : "pending",
+  );
+  const translationStatus = responseLanguageMatches
+    ? reportedTranslationStatus
+    : responseLanguage === "en" ? "not_required" : "pending";
   const trendValue = Array.isArray(value.recent_update_trend)
     ? value.recent_update_trend
     : Array.isArray(value.trend) ? value.trend : [];
@@ -546,17 +618,41 @@ function normalizeDashboard(value: Record<string, unknown>): DashboardSnapshot {
     catalog_progress: Number(value.catalog_progress || 0),
     catalog_count: Number(value.catalog_count || value.vulnerability_count || records.length),
     catalog_error: String(value.catalog_error || ""),
+    response_language: responseLanguage,
+    translation_status: translationStatus,
+    translation_progress: translationStatus === "translated" || translationStatus === "not_required"
+      ? Math.max(translationProgress, 100)
+      : translationProgress,
+    translation_count: translationCount,
+    translation_ready_count: translationReadyCount,
+    translation_error: safeStatusMessage(value.translation_error ?? translation.error),
   };
 }
 
-function normalizeVulnerability(value: VulnerabilityRecord): VulnerabilityRecord {
+function normalizeVulnerability(value: VulnerabilityRecord, requestedLanguage = "zh-Hans"): VulnerabilityRecord {
   const raw = asRecord(value);
   const components = Array.isArray(raw.components) ? raw.components.map(asRecord) : [];
+  const language = normalizeContentLanguage(requestedLanguage);
+  const audit = asRecord(raw.catalog_translation || raw.translation);
+  const translationStatus = normalizeTranslationStatus(
+    raw.translation_status ?? audit.status,
+    language === "en" ? "original" : "unknown",
+  );
+  const candidateTitle = localizedRecordText(raw, "title", language);
+  const candidateSummary = localizedRecordText(raw, "summary", language)
+    || localizedRecordText(raw, "description", language);
+  const contentLanguage = normalizeContentLanguage(raw.content_language);
+  const normalizedStatus = inferTranslationStatus(translationStatus, contentLanguage, language);
+  const publishable = language === "en"
+    || (contentLanguage === language && ["translated", "passthrough"].includes(normalizedStatus));
+  const localizedTitle = publishable ? candidateTitle : "";
+  const localizedSummary = publishable ? candidateSummary : "";
   return {
     ...value,
     id: String(raw.id || "UNKNOWN"),
-    title: String(raw.title || raw.id || "未命名漏洞"),
-    description: String(raw.description || raw.summary || ""),
+    title: localizedTitle,
+    description: localizedSummary,
+    summary: localizedSummary,
     severity: String(raw.severity || "UNKNOWN"),
     cvss: raw.cvss == null && raw.cvss_score == null ? undefined : Number(raw.cvss ?? raw.cvss_score),
     source: String(raw.source || "公开情报"),
@@ -566,13 +662,127 @@ function normalizeVulnerability(value: VulnerabilityRecord): VulnerabilityRecord
     references: Array.isArray(raw.references)
       ? raw.references.map(String)
       : Array.isArray(raw.reference_links) ? raw.reference_links.map(String) : [],
+    content_language: contentLanguage,
+    translation_status: normalizedStatus,
   };
 }
 
-function normalizeInformation(value: InformationSnapshot): InformationSnapshot {
+function localizedRecordText(
+  value: Record<string, unknown>,
+  field: "title" | "summary" | "description",
+  language: VulnerabilityContentLanguage,
+) {
+  if (language === "en") {
+    return firstText(value[`${field}_original`], value[field]);
+  }
+  if (language === "zh-Hant") {
+    const candidates = [
+      value[`${field}_zh_hant`],
+      value[`${field}_zh_Hant`],
+      value[`${field}_hant`],
+      value[field],
+    ];
+    return firstCjkText(...candidates) || firstText(...candidates);
+  }
+  return firstCjkText(value[`${field}_zh`], value[field]) || firstText(value[`${field}_zh`], value[field]);
+}
+
+function firstText(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function firstCjkText(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && containsCjk(value)) return value.trim();
+  }
+  return "";
+}
+
+function normalizeContentLanguage(value: unknown): VulnerabilityContentLanguage {
+  const normalized = String(value || "").trim().toLowerCase().replaceAll("_", "-");
+  if (normalized === "en" || normalized.startsWith("en-")) return "en";
+  if (["zh-hant", "zh-tw", "zh-hk", "zh-mo"].includes(normalized)) return "zh-Hant";
+  if (normalized === "zh" || normalized === "zh-cn" || normalized === "zh-sg" || normalized === "zh-hans") return "zh-Hans";
+  if (normalized === "mixed" || normalized === "multilingual") return "mixed";
+  return "unknown";
+}
+
+function normalizeTranslationStatus(
+  value: unknown,
+  fallback: VulnerabilityTranslationStatus,
+): VulnerabilityTranslationStatus {
+  const normalized = String(value || "").trim().toLowerCase().replaceAll("-", "_");
+  if (["translated", "completed", "complete", "ready", "stored", "success"].includes(normalized)) return "translated";
+  if (["translating", "running", "processing", "in_progress", "building"].includes(normalized)) return "translating";
+  if (["pending", "queued", "deferred"].includes(normalized)) return "pending";
+  if (["retrying", "retry", "backoff"].includes(normalized)) return "retrying";
+  if (["failed", "error", "fallback", "unavailable"].includes(normalized)) return "failed";
+  if (["passthrough", "pass_through"].includes(normalized)) return "passthrough";
+  if (["original", "source"].includes(normalized)) return "original";
+  if (["not_required", "not_applicable", "disabled"].includes(normalized)) return "not_required";
+  return fallback;
+}
+
+function inferTranslationStatus(
+  status: VulnerabilityTranslationStatus,
+  contentLanguage: VulnerabilityContentLanguage,
+  requestedLanguage: VulnerabilityContentLanguage,
+) {
+  if (requestedLanguage !== "en" && contentLanguage !== requestedLanguage) {
+    if (["translated", "passthrough", "not_required", "original"].includes(status)) return "pending";
+  }
+  if (status !== "unknown") return status;
+  if (requestedLanguage === "en") return "original";
+  if (contentLanguage === requestedLanguage) {
+    return "translated";
+  }
+  return "pending";
+}
+
+function safeCount(value: unknown) {
+  const count = Number(value ?? 0);
+  return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+}
+
+function safeProgress(value: unknown, ready: number, total: number) {
+  const explicit = Number(value);
+  const progress = Number.isFinite(explicit) && value !== undefined && value !== null
+    ? explicit
+    : total > 0 ? ready / total * 100 : 0;
+  return Math.max(0, Math.min(100, Math.round(progress)));
+}
+
+function safeStatusMessage(value: unknown) {
+  return typeof value === "string" ? value.trim().slice(0, 300) : "";
+}
+
+const containsCjk = (value: string) => /[\u3400-\u9fff]/u.test(value);
+
+function normalizeInformation(value: InformationSnapshot, requestedLanguage = "zh-Hans"): InformationSnapshot {
+  const responseLanguage = normalizeInformationLanguage(requestedLanguage);
   return {
     ...value,
-    items: Array.isArray(value?.items) ? value.items : [],
+    response_language: responseLanguage,
+    items: Array.isArray(value?.items)
+      ? value.items.map(normalizeInformationItem)
+      : [],
     sources: Array.isArray(value?.sources) ? value.sources : [],
   };
+}
+
+function normalizeInformationItem(
+  item: InformationSnapshot["items"][number],
+): InformationSnapshot["items"][number] {
+  const title = typeof item?.title === "string" ? item.title.trim() : "";
+  const summary = typeof item?.summary === "string" ? item.summary.trim() : "";
+  return { ...item, title, summary };
+}
+
+function normalizeInformationLanguage(value: string): "zh-Hans" | "zh-Hant" | "en" {
+  if (value === "zh-Hant") return "zh-Hant";
+  if (value === "en") return "en";
+  return "zh-Hans";
 }

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree
 
+from app.mcp.protocol import call_mcp_tool as protocol_call_mcp_tool
 from app.semgrep_tool import (
     DEFAULT_SEMGREP_RULES,
     SemgrepTool,
@@ -1351,9 +1352,18 @@ flowchart LR
             self.assertFalse(second_path.exists())
 
     def test_unavailable_pdf_is_not_advertised_as_a_complete_artifact(self) -> None:
+        def fail_pdf_mcp(*, agent_id, tool_id, arguments):
+            if tool_id == "mcp__report_pdf__render_pdf_report":
+                raise RuntimeError("PDF backend unavailable")
+            return protocol_call_mcp_tool(
+                agent_id=agent_id,
+                tool_id=tool_id,
+                arguments=arguments,
+            )
+
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ, {"SECFLOW_STORAGE_MASTER_KEY": "unit-test-report-key"}
-        ), patch("app.reports._write_pdf_report", side_effect=RuntimeError("PDF backend unavailable")):
+        ), patch("app.mcp.protocol.call_mcp_tool", side_effect=fail_pdf_mcp):
             store = ReportStore(Path(temp_dir))
             saved = store.save_markdown(
                 "报告",

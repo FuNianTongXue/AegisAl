@@ -2,35 +2,34 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import math
 import re
 from pathlib import Path
-from threading import RLock
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
-from app.intelligence import intelligence_service, localized_vulnerability_summary
+from app.assistant_artifacts import (
+    AssistantArtifact,
+    XLSX_MEDIA_TYPE,
+)
+from app.catalog_translation import CATALOG_TRANSLATION_VERSION
+from app.intelligence import intelligence_service
+from app.mcp.artifacts import stage_output_artifact
 from app.privacy import sanitize_public_text, severity_cn
-from app.storage import DATA_DIR, now_iso
+from app.storage import now_iso
 
 
-_ARTIFACT_ID = re.compile(r"^component-xlsx-[0-9]{14}-[a-f0-9]{12}$")
-_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+def __getattr__(name: str) -> Any:
+    """Lazy compatibility only; MCP execution never imports Host artifact stores."""
 
+    if name in {"ComponentArtifactStore", "artifact_store"}:
+        from app.assistant_artifacts import ComponentArtifactStore, component_artifact_store
 
-class AssistantArtifact(BaseModel):
-    id: str
-    kind: Literal["excel"] = "excel"
-    file_name: str
-    media_type: str = _XLSX_MEDIA_TYPE
-    download_path: str
-    sha256: str
-    size: int
-    generated_at: str
+        return ComponentArtifactStore if name == "ComponentArtifactStore" else component_artifact_store
+    raise AttributeError(name)
 
 
 class SankeyNode(BaseModel):
@@ -125,59 +124,6 @@ class ComponentDetailPayload(BaseModel):
     generated_at: str
 
 
-class ComponentArtifactStore:
-    def __init__(self, root: Path | None = None, *, retain: int = 100) -> None:
-        self.root = root or (DATA_DIR / "assistant_artifacts")
-        self.retain = max(10, min(int(retain), 500))
-        self._lock = RLock()
-
-    def save(self, content: bytes, *, file_name: str, generated_at: str) -> AssistantArtifact:
-        if not content.startswith(b"PK\x03\x04"):
-            raise ValueError("Excel MCP 未生成有效的 XLSX 工作簿")
-        digest = hashlib.sha256(content).hexdigest()
-        timestamp = re.sub(r"\D", "", generated_at)[:14]
-        if len(timestamp) != 14:
-            timestamp = re.sub(r"\D", "", now_iso())[:14]
-        artifact_id = f"component-xlsx-{timestamp}-{digest[:12]}"
-        safe_name = _safe_excel_name(file_name)
-        path = self.root / f"{artifact_id}.xlsx"
-        temporary = self.root / f".{artifact_id}.tmp"
-        with self._lock:
-            self.root.mkdir(parents=True, exist_ok=True)
-            temporary.write_bytes(content)
-            temporary.chmod(0o600)
-            temporary.replace(path)
-            self._prune()
-        return AssistantArtifact(
-            id=artifact_id,
-            file_name=safe_name,
-            download_path=f"/api/assistant/artifacts/{artifact_id}",
-            sha256=digest,
-            size=len(content),
-            generated_at=generated_at,
-        )
-
-    def resolve(self, artifact_id: str) -> Path:
-        clean_id = str(artifact_id or "").strip()
-        if not _ARTIFACT_ID.fullmatch(clean_id):
-            raise KeyError(artifact_id)
-        path = self.root / f"{clean_id}.xlsx"
-        if not path.is_file() or path.parent.resolve() != self.root.resolve():
-            raise KeyError(artifact_id)
-        return path
-
-    def _prune(self) -> None:
-        files = sorted(
-            (path for path in self.root.glob("component-xlsx-*.xlsx") if path.is_file()),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        for path in files[self.retain :]:
-            path.unlink(missing_ok=True)
-
-
-artifact_store = ComponentArtifactStore()
-
 excel_mcp = FastMCP(
     "SecFlow Excel MCP",
     instructions="Generate auditable XLSX artifacts for verified component vulnerability queries.",
@@ -193,6 +139,21 @@ detail_mcp = FastMCP(
         "Never infer missing versions, CVSS metrics, exploit status, or references."
     ),
 )
+
+
+_CJK_TEXT = re.compile(r"[\u3400-\u9fff]")
+_MACHINE_DETAIL_TITLE = re.compile(
+    r"^(?:CVE-\d{4}-\d{4,8}|GHSA-[A-Za-z0-9-]+|[A-Za-z0-9_.@/+:-]+)$",
+    flags=re.IGNORECASE,
+)
+_DESCRIPTION_UNAVAILABLE = {
+    "zh-Hans": "中文漏洞描述暂不可用。请根据漏洞编号、影响版本和修复版本核验风险。",
+    "zh-Hant": "中文漏洞描述暫不可用。請根據漏洞編號、影響版本和修復版本核驗風險。",
+    "en": (
+        "The vulnerability description is unavailable. Verify the identifier, "
+        "affected versions, and fixed versions."
+    ),
+}
 
 
 @detail_mcp.tool(
@@ -238,6 +199,8 @@ def export_component_vulnerabilities(
     include_realtime: bool = False,
     records: list[dict[str, Any]] | None = None,
     generated_at: str = "",
+    *,
+    output_dir: str,
 ) -> AssistantArtifact:
     if records is not None:
         from app.vulnerability_export import build_component_vulnerability_workbook
@@ -268,10 +231,11 @@ def export_component_vulnerabilities(
         _safe_file_part(part)
         for part in ("SecFlow", metadata.get("ecosystem") or "auto", metadata["name"], metadata["version"], "vulnerabilities")
     )
-    return artifact_store.save(
+    return _component_excel_output(
         content,
         file_name=f"{stem[:180]}.xlsx",
         generated_at=str(metadata.get("generated_at") or now_iso()),
+        output_dir=output_dir,
     )
 
 
@@ -286,6 +250,8 @@ def export_component_vulnerability_catalog(
     end_date: str,
     filters: dict[str, Any] | None = None,
     generated_at: str = "",
+    *,
+    output_dir: str,
 ) -> AssistantArtifact:
     content, metadata = intelligence_service.export_component_vulnerability_catalog(
         records,
@@ -298,10 +264,33 @@ def export_component_vulnerability_catalog(
         _safe_file_part(part)
         for part in ("SecFlow", "component-vulnerabilities", metadata["start_date"], "to", metadata["end_date"])
     )
-    return artifact_store.save(
+    return _component_excel_output(
         content,
         file_name=f"{stem[:180]}.xlsx",
         generated_at=str(metadata.get("generated_at") or now_iso()),
+        output_dir=output_dir,
+    )
+
+
+def _component_excel_output(
+    content: bytes,
+    *,
+    file_name: str,
+    generated_at: str,
+    output_dir: str,
+) -> AssistantArtifact:
+    reference = stage_output_artifact(
+        output_dir,
+        file_name=file_name,
+        payload=content,
+        media_type=XLSX_MEDIA_TYPE,
+    )
+    return AssistantArtifact(
+        file_name=file_name,
+        sha256=reference.sha256,
+        size=len(content),
+        generated_at=generated_at,
+        artifacts=[reference.model_dump(mode="json")],
     )
 
 
@@ -450,10 +439,10 @@ def _component_vulnerability_detail(
     record_id = str(record.get("id") or "UNKNOWN").strip().upper()
     return ComponentVulnerabilityDetail(
         id=record_id,
-        title=sanitize_public_text(record.get("title") or record_id).strip() or record_id,
+        title=_component_localized_title(record, response_language, record_id),
         severity=severity,
         severity_label=severity_cn(severity),
-        description=localized_vulnerability_summary(record, response_language),
+        description=_component_localized_description(record, response_language),
         vulnerability_type="、".join(_unique_text(record.get("cwes") or [])) or "未明确",
         aliases=_unique_text(record.get("aliases") or []),
         cwes=_unique_text(record.get("cwes") or []),
@@ -475,6 +464,105 @@ def _component_vulnerability_detail(
             metrics=cvss_metrics,
         ),
     )
+
+
+def _component_localized_title(
+    record: dict[str, Any],
+    language: str,
+    record_id: str,
+) -> str:
+    target = _component_response_language(language)
+    if target == "en":
+        title = _component_original_text(record, "title", target)
+    else:
+        field = "title_zh_hant" if target == "zh-Hant" else "title_zh"
+        title = _component_accepted_translation(record, field, target)
+        if title and not _CJK_TEXT.search(title) and not _MACHINE_DETAIL_TITLE.fullmatch(title):
+            title = ""
+        if not title:
+            machine_title = str(record.get("title_original") or record.get("title") or "").strip()
+            if _MACHINE_DETAIL_TITLE.fullmatch(machine_title):
+                title = machine_title
+    return sanitize_public_text(title or record_id).strip() or record_id
+
+
+def _component_localized_description(record: dict[str, Any], language: str) -> str:
+    """Project accepted catalog text without crossing back into the Host agent runtime."""
+
+    target = _component_response_language(language)
+    if target == "en":
+        summary = _component_original_text(record, "summary", target)
+        if summary and not _CJK_TEXT.search(summary):
+            return sanitize_public_text(summary).strip()
+        return _DESCRIPTION_UNAVAILABLE[target]
+
+    field = "summary_zh_hant" if target == "zh-Hant" else "summary_zh"
+    summary = _component_accepted_translation(record, field, target)
+    if summary and _CJK_TEXT.search(summary):
+        return sanitize_public_text(summary).strip()
+    return _DESCRIPTION_UNAVAILABLE[target]
+
+
+def _component_original_text(record: dict[str, Any], field: str, target: str) -> str:
+    content_language = str(record.get("content_language") or "").strip()
+    if content_language:
+        if _component_declared_language(content_language) != target:
+            return ""
+        if str(record.get("translation_status") or "").strip() not in {
+            "original",
+            "passthrough",
+            "translated",
+        }:
+            return ""
+        return str(record.get(field) or "").strip()
+    return str(record.get(f"{field}_original") or record.get(field) or "").strip()
+
+
+def _component_accepted_translation(record: dict[str, Any], field: str, target: str) -> str:
+    content_language = str(record.get("content_language") or "").strip()
+    if content_language:
+        if (
+            _component_declared_language(content_language) == target
+            and str(record.get("translation_status") or "").strip() == "translated"
+        ):
+            public_field = "title" if field.startswith("title_") else "summary"
+            return str(record.get(public_field) or "").strip()
+        return ""
+
+    audit = record.get("catalog_translation")
+    if not isinstance(audit, dict):
+        return ""
+    try:
+        catalog_version = int(audit.get("version") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if catalog_version < CATALOG_TRANSLATION_VERSION:
+        return ""
+    if str(audit.get("target_language") or "").strip() != "zh-Hans":
+        return ""
+    if str(audit.get("status") or "").strip() not in {"translated", "passthrough"}:
+        return ""
+    if target == "zh-Hant" and str(audit.get("traditional_status") or "").strip() not in {
+        "translated",
+        "passthrough",
+    }:
+        return ""
+    return str(record.get(field) or "").strip()
+
+
+def _component_response_language(value: Any) -> str:
+    return _component_declared_language(value) or "zh-Hans"
+
+
+def _component_declared_language(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    if normalized in {"en", "en-us", "en-gb"}:
+        return "en"
+    if normalized in {"zh-tw", "zh-hk", "zh-mo", "zh-hant"}:
+        return "zh-Hant"
+    if normalized in {"zh", "zh-cn", "zh-sg", "zh-hans"}:
+        return "zh-Hans"
+    return ""
 
 
 def _component_workbook_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

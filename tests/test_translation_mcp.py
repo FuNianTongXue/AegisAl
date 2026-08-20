@@ -1,25 +1,74 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import re
 import unittest
 from unittest.mock import patch
 
 from app.langgraph.assistant_graph import KnowledgeSecurityGraph
 from app.langgraph.report_graph import ReportCapabilitySubgraph
+from app.mcp.offline_translation import OfflineTranslationUnavailable
 from app.mcp.translation import _translation_cache, translate_json_payload, translation_mcp_spec
 from app.reports import build_scan_result_json, validate_scan_result_json
 
 
-class TranslationMCPTests(unittest.TestCase):
+def _complete_local_translation(texts, *, target_language: str) -> list[str]:
+    sentence = "這是完整的繁體中文翻譯。" if target_language == "zh-Hant" else "这是完整的简体中文翻译。"
+    anchors = (
+        ("execute arbitrary code", "執行任意程式碼" if target_language == "zh-Hant" else "执行任意代码"),
+        ("arbitrary code execution", "執行任意程式碼" if target_language == "zh-Hant" else "执行任意代码"),
+        ("remote code execution", "遠端程式碼執行" if target_language == "zh-Hant" else "远程代码执行"),
+        ("buffer overflow", "緩衝區溢位" if target_language == "zh-Hant" else "缓冲区溢出"),
+        ("integer overflow", "整數溢位" if target_language == "zh-Hant" else "整数溢出"),
+        ("denial of service", "拒絕服務" if target_language == "zh-Hant" else "拒绝服务"),
+        ("information disclosure", "資訊洩露" if target_language == "zh-Hant" else "信息泄露"),
+        ("prototype pollution", "原型污染"),
+        ("out-of-bounds read", "越界讀取" if target_language == "zh-Hant" else "越界读取"),
+        ("command injection", "命令注入"),
+        ("sql injection", "SQL 注入"),
+    )
+    translated: list[str] = []
+    for value in texts:
+        source = str(value)
+        boundary = r"\s,;:，；。.!?()\[\]{}"
+        leading = re.match(rf"^[{boundary}]*", source).group(0)
+        trailing = re.search(rf"[{boundary}]*$", source).group(0)
+        sentence_count = max(1, len(re.findall(r"[.!?]+(?:\s|$)", source.strip())))
+        existing_cjk = list(dict.fromkeys(re.findall(r"[\u3400-\u9fff]+", source)))
+        placeholders = list(
+            dict.fromkeys(
+                re.findall(r"X\d+X|https://secflow\.invalid/entity/\d+", source)
+            )
+        )
+        preserved_entities = [
+            entity for entity in ("Nginx", "OpenSSL", "PostgreSQL") if entity in source
+        ]
+        meaning = [translated_term for phrase, translated_term in anchors if phrase in source.casefold()]
+        prefix = " ".join(
+            (*existing_cjk, *placeholders, *preserved_entities, *dict.fromkeys(meaning))
+        )
+        body = " ".join([sentence] * sentence_count)
+        translated.append(f"{leading}{prefix} {body}{trailing}" if prefix else f"{leading}{body}{trailing}")
+    return translated
+
+
+class TranslationMCPContractTests(unittest.TestCase):
     def setUp(self) -> None:
-        # 模块级翻译缓存跨用例隔离：各用例自行控制模型桩的调用预期。
         _translation_cache.clear()
 
-    def test_translates_visible_json_and_preserves_machine_evidence(self) -> None:
+    def assert_free_offline_contract(self, result) -> None:
+        self.assertTrue(result.offline)
+        self.assertFalse(result.network_used)
+        self.assertFalse(result.requires_api_key)
+        self.assertFalse(result.model_used)
+        self.assertEqual(result.provider_calls, 0)
+        self.assertEqual(result.billable_tokens, 0)
+        self.assertEqual(result.token_usage, 0)
+
+    def test_translates_visible_json_without_user_model_or_provider_usage(self) -> None:
         payload = {
             "summary": "Command injection found",
-            "fields": {"Risk": "Needs remediation"},
+            "fields": {"Risk": "needs remediation"},
             "finding": {
                 "id": "CVE-2026-1234",
                 "file_name": "src/app.py",
@@ -30,62 +79,283 @@ class TranslationMCPTests(unittest.TestCase):
             },
         }
 
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=_translated_completion),
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ) as engine:
+            result = translate_json_payload(payload, target_language="zh-Hans")
+
+        self.assertGreater(engine.call_count, 0)
+        self.assertEqual(result.translation_status, "translated")
+        self.assertEqual(result.translated_fields, 3)
+        self.assertRegex(result.payload["summary"], r"[\u3400-\u9fff]")
+        self.assertRegex(result.payload["fields"]["Risk"], r"[\u3400-\u9fff]")
+        self.assertRegex(result.payload["finding"]["title"], r"[\u3400-\u9fff]")
+        for key in ("id", "file_name", "version", "url", "vulnerable_snippet"):
+            self.assertEqual(result.payload["finding"][key], payload["finding"][key])
+        self.assert_free_offline_contract(result)
+
+    def test_preserves_all_security_evidence_segments_exactly(self) -> None:
+        code_block = '```python\nos.system(user_input)\n```'
+        evidence = (
+            "The component Nginx before 1.2.3 has command injection in CVE-2026-1234 and "
+            "GHSA-abcd-efgh-ijkl; see https://example.test/advisory at commit deadbee, "
+            "Unix path /opt/secflow/app.py and Windows path "
+            "C:\\Program Files\\SecFlow\\app.exe; exploit:\n"
+            f"{code_block}"
+        )
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ):
+            result = translate_json_payload({"summary": evidence}, target_language="zh-Hans")
+
+        translated = result.payload["summary"]
+        self.assertEqual(result.translation_status, "translated")
+        for segment in (
+            "Nginx",
+            "1.2.3",
+            "CVE-2026-1234",
+            "GHSA-abcd-efgh-ijkl",
+            "https://example.test/advisory",
+            "deadbee",
+            "/opt/secflow/app.py",
+            "C:\\Program Files\\SecFlow\\app.exe",
+            code_block,
+        ):
+            self.assertIn(segment, translated)
+        self.assert_free_offline_contract(result)
+
+    def test_mixed_chinese_and_english_still_translates_english_prose(self) -> None:
+        source = "已确认 component Nginx issue allows remote attackers to execute arbitrary code."
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ) as engine:
+            result = translate_json_payload({"summary": source}, target_language="zh-Hans")
+
+        self.assertGreater(engine.call_count, 0)
+        self.assertEqual(result.translation_status, "translated")
+        self.assertEqual(result.unresolved_fields, 0)
+        self.assertIn("Nginx", result.payload["summary"])
+        self.assertNotIn("remote attackers", result.payload["summary"])
+
+    def test_truncated_long_translation_is_rejected(self) -> None:
+        source = "Remote attackers can execute arbitrary code. " * 12
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            return_value=["截断译文。"],
+        ) as engine:
+            result = translate_json_payload({"summary": source}, target_language="zh-Hans")
+
+        self.assertGreaterEqual(engine.call_count, 2)
+        self.assertEqual(result.payload["summary"], source)
+        self.assertEqual(result.translation_status, "fallback")
+        self.assertEqual(result.translated_fields, 0)
+        self.assertEqual(result.unresolved_fields, 1)
+
+    def test_complete_long_repeated_translation_is_accepted(self) -> None:
+        source = ("Remote attackers can execute arbitrary code. " * 140).strip()
+        self.assertGreater(len(source), 4_000)
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ):
+            result = translate_json_payload({"summary": source}, target_language="zh-Hans")
+
+        self.assertEqual(result.translation_status, "translated")
+        self.assertEqual(result.candidate_fields, 1)
+        self.assertEqual(result.translated_fields, 1)
+        self.assertEqual(result.unresolved_fields, 0)
+        self.assertNotIn("Remote attackers", result.payload["summary"])
+        self.assertGreaterEqual(result.payload["summary"].count("翻译"), 140)
+
+    def test_simplified_and_traditional_have_separate_results_and_cache_entries(self) -> None:
+        payload = {"summary": "Remote code execution vulnerability."}
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ) as engine:
+            simplified = translate_json_payload(payload, target_language="zh-Hans")
+            traditional = translate_json_payload(payload, target_language="zh-Hant")
+
+        self.assertEqual(engine.call_count, 2)
+        self.assertIn("简体", simplified.payload["summary"])
+        self.assertIn("繁體", traditional.payload["summary"])
+        self.assertNotEqual(simplified.payload["summary"], traditional.payload["summary"])
+        self.assertEqual(traditional.translation_status, "translated")
+
+    def test_chinese_to_english_is_explicitly_unsupported(self) -> None:
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch"
+        ) as engine:
+            result = translate_json_payload(
+                {"summary": "存在远程代码执行漏洞。"},
+                target_language="en",
+            )
+
+        engine.assert_not_called()
+        self.assertEqual(result.translation_status, "unsupported")
+        self.assertEqual(result.unresolved_fields, 1)
+        self.assertTrue(result.errors)
+        self.assert_free_offline_contract(result)
+
+    def test_english_target_passthrough_does_not_load_offline_model(self) -> None:
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch"
+        ) as engine:
+            result = translate_json_payload(
+                {"summary": "Already English."},
+                target_language="en",
+            )
+
+        engine.assert_not_called()
+        self.assertEqual(result.translation_status, "passthrough")
+        self.assertFalse(result.offline_model_used)
+        self.assertFalse(result.resource_verified)
+        self.assertEqual(result.model_sha256, "")
+        self.assert_free_offline_contract(result)
+
+    def test_localized_payload_with_machine_string_value_is_passthrough(self) -> None:
+        payload = {
+            "summary": "请输入组件名称和明确版本。",
+            "fields": {"确认漏洞数量": "0"},
+        }
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=lambda texts, *, target_language: list(texts),
         ):
             result = translate_json_payload(payload, target_language="zh-Hans")
 
-        translated = result.payload
-        self.assertEqual(translated["summary"], "译：Command injection found")
-        self.assertEqual(translated["fields"]["Risk"], "译：Needs remediation")
-        self.assertEqual(translated["finding"]["title"], "译：Command injection")
-        self.assertEqual(translated["finding"]["id"], "CVE-2026-1234")
-        self.assertEqual(translated["finding"]["file_name"], "src/app.py")
-        self.assertEqual(translated["finding"]["version"], "1.2.3")
-        self.assertEqual(translated["finding"]["url"], "https://example.test/CVE-2026-1234")
-        self.assertEqual(translated["finding"]["vulnerable_snippet"], "os.system(command)")
-        self.assertEqual(result.translation_status, "translated")
-        self.assertEqual(result.translated_fields, 3)
+        self.assertEqual(result.payload, payload)
+        self.assertEqual(result.translation_status, "passthrough")
+        self.assertEqual(result.unresolved_fields, 0)
+        self.assert_free_offline_contract(result)
 
-    def test_translation_calls_raise_max_tokens_for_batch_safety(self) -> None:
-        # 聊天配置 2048 会截断批量翻译 JSON；翻译调用必须独立提高输出预算。
-        seen_models = []
+    def test_unsupported_target_returns_auditable_result(self) -> None:
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch"
+        ) as engine:
+            result = translate_json_payload(
+                {"summary": "Command injection found."},
+                target_language="fr",
+            )
 
-        def capturing_completion(model, messages, **_kwargs):
-            seen_models.append(dict(model))
-            return _translated_completion(model, messages)
+        engine.assert_not_called()
+        self.assertEqual(result.translation_status, "unsupported")
+        self.assertEqual(result.target_language, "fr")
+        self.assertTrue(result.errors)
+        self.assert_free_offline_contract(result)
 
-        with (
-            patch(
-                "app.mcp.translation.active_model_from_env",
-                return_value={"id": "model-a", "model": "deepseek-chat", "maxTokens": 2048},
-            ),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=capturing_completion),
+    def test_offline_runtime_unavailable_preserves_original(self) -> None:
+        payload = {"summary": "general advisory text."}
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=OfflineTranslationUnavailable("offline language pack unavailable"),
         ):
-            translate_json_payload({"summary": "Unique maxTokens probe text 甲"}, target_language="zh-Hans")
+            result = translate_json_payload(payload, target_language="zh-Hans")
 
-        self.assertTrue(seen_models)
-        self.assertTrue(all(int(model.get("maxTokens") or 0) >= 8192 for model in seen_models))
+        self.assertEqual(result.payload, payload)
+        self.assertEqual(result.translation_status, "unavailable")
+        self.assertEqual(result.translated_fields, 0)
+        self.assertEqual(result.unresolved_fields, 1)
+        self.assertIn("offline language pack unavailable", result.errors)
+        self.assert_free_offline_contract(result)
 
-    def test_repeated_payloads_reuse_cached_translations(self) -> None:
-        payload = {"summary": "Cache probe unique text 乙"}
+    def test_repeated_payloads_reuse_local_translation_cache(self) -> None:
+        payload = {"summary": "Unique local cache probe text."}
 
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-cache"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=_translated_completion) as completion,
-        ):
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ) as engine:
             first = translate_json_payload(payload, target_language="zh-Hans")
-            calls_after_first = completion.call_count
+            calls_after_first = engine.call_count
             second = translate_json_payload(payload, target_language="zh-Hans")
 
-        self.assertEqual(first.payload["summary"], "译：Cache probe unique text 乙")
-        self.assertEqual(second.payload["summary"], "译：Cache probe unique text 乙")
         self.assertGreater(calls_after_first, 0)
-        self.assertEqual(completion.call_count, calls_after_first)  # 第二次命中缓存，零模型调用
+        self.assertEqual(engine.call_count, calls_after_first)
+        self.assertEqual(first.payload, second.payload)
         self.assertEqual(second.translation_status, "translated")
 
-    def test_report_scan_json_is_rehashed_and_rebuilds_translated_facts(self) -> None:
+    def test_retry_can_be_disabled_for_bulk_translation(self) -> None:
+        def echo(texts, *, target_language: str) -> list[str]:
+            del target_language
+            return list(texts)
+
+        payload = {"summary": "general advisory text."}
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=echo,
+        ) as engine:
+            result = translate_json_payload(
+                payload,
+                target_language="zh-Hans",
+                retry_untranslated_fields=False,
+            )
+
+        self.assertEqual(engine.call_count, 1)
+        self.assertEqual(result.payload, payload)
+        self.assertEqual(result.translation_status, "fallback")
+        self.assertEqual(result.unresolved_fields, 1)
+
+    def test_partial_glossary_translation_with_residual_english_is_rejected(self) -> None:
+        def echo(texts, *, target_language: str) -> list[str]:
+            del target_language
+            return list(texts)
+
+        for source in (
+            "Command injection found.",
+            "Keep command injection.",
+            "Package command injection.",
+            "Command injection Unexpected Behavior.",
+        ):
+            with self.subTest(source=source), patch(
+                "app.mcp.translation.offline_translation_engine.translate_batch",
+                side_effect=echo,
+            ):
+                payload = {"summary": source}
+                result = translate_json_payload(
+                    payload,
+                    target_language="zh-Hans",
+                    retry_untranslated_fields=False,
+                )
+
+                self.assertEqual(result.payload, payload)
+                self.assertEqual(result.translation_status, "fallback")
+                self.assertEqual(result.unresolved_fields, 1)
+
+    def test_protected_chart_payload_is_not_sent_to_offline_engine(self) -> None:
+        payload = {
+            "summary": "Command injection found.",
+            "chart_data": {
+                "risk_bars": [{"label": "AlmaLinux:8", "description": "Do not translate"}]
+            },
+        }
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ) as engine:
+            result = translate_json_payload(payload, target_language="zh-Hans")
+
+        self.assertEqual(result.payload["chart_data"], payload["chart_data"])
+        self.assertEqual(result.candidate_fields, 1)
+        sent_text = " ".join(
+            str(item)
+            for call in engine.call_args_list
+            for item in call.args[0]
+        )
+        self.assertNotIn("Do not translate", sent_text)
+
+    def test_scan_json_is_rehashed_and_facts_are_rebuilt_after_translation(self) -> None:
         scan_json = build_scan_result_json(
             {
                 "question": "Scan this project",
@@ -117,379 +387,27 @@ class TranslationMCPTests(unittest.TestCase):
         )
         original_hash = scan_json["audit"]["payload_sha256"]
 
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=_translated_completion),
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
         ):
-            result = translate_json_payload(scan_json, target_language="zh-Hans", content_scope="report_source")
+            result = translate_json_payload(
+                scan_json,
+                target_language="zh-Hans",
+                content_scope="report_source",
+            )
 
         translated = validate_scan_result_json(result.payload)
         payload_finding = translated["payload"]["static_analysis"]["findings"][0]
         fact_finding = translated["facts"]["code_findings"][0]
         self.assertEqual(translated["language"], "zh-Hans")
         self.assertNotEqual(translated["audit"]["payload_sha256"], original_hash)
-        self.assertEqual(payload_finding["title"], "译：Command injection")
         self.assertEqual(fact_finding["title"], payload_finding["title"])
         self.assertEqual(fact_finding["vulnerable_snippet"], "os.system(command)")
         self.assertEqual(fact_finding["snippet_lines"][0]["text"], "os.system(command)")
         self.assertEqual(translated["counts"]["code_findings"], 1)
 
-    def test_rejects_translated_field_when_a_protected_token_is_removed(self) -> None:
-        def unsafe_completion(_model, messages, **_kwargs):
-            request = json.loads(messages[-1]["content"])
-            return {
-                "status": "success",
-                "answer": json.dumps(
-                    {"items": [{"id": request["items"][0]["id"], "text": "漏洞需要立即修复"}]},
-                    ensure_ascii=False,
-                ),
-            }
-
-        payload = {"summary": "CVE-2026-1234 affects demo 1.2.3; see https://example.test/advisory"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=unsafe_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload, payload)
-        self.assertEqual(result.translated_fields, 0)
-
-    def test_retries_without_json_mode_when_endpoint_rejects_structured_output(self) -> None:
-        calls: list[bool] = []
-
-        def rejecting_completion(_model, messages, **kwargs):
-            json_mode = bool(kwargs.get("json_mode"))
-            calls.append(json_mode)
-            if json_mode:
-                return {"status": "failed", "message": "HTTP 400: response_format is not supported"}
-            request = json.loads(messages[-1]["content"])
-            return {
-                "status": "success",
-                "answer": json.dumps(
-                    {
-                        "items": [
-                            {"id": item["id"], "text": f"译：{item['text']}"}
-                            for item in request["items"]
-                        ]
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=rejecting_completion),
-        ):
-            result = translate_json_payload({"summary": "Command injection found"}, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "译：Command injection found")
-        self.assertEqual(result.translation_status, "translated")
-        self.assertEqual(calls, [True, False])
-
-    def test_plain_text_fallback_translates_fields_left_in_english(self) -> None:
-        def echoing_completion(_model, messages, **_kwargs):
-            user_content = messages[-1]["content"]
-            if user_content.startswith("{"):
-                request = json.loads(user_content)
-                return {
-                    "status": "success",
-                    "answer": json.dumps(
-                        {"items": [{"id": item["id"], "text": item["text"]} for item in request["items"]]},
-                        ensure_ascii=False,
-                    ),
-                }
-            return {"status": "success", "answer": f"译：{user_content}"}
-
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=echoing_completion),
-        ):
-            result = translate_json_payload({"summary": "Command injection found"}, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "译：Command injection found")
-        self.assertEqual(result.translation_status, "translated")
-        self.assertEqual(result.translated_fields, 1)
-
-    def test_bulk_export_can_disable_per_field_retry_amplification(self) -> None:
-        calls = 0
-
-        def echoing_completion(_model, messages, **_kwargs):
-            nonlocal calls
-            calls += 1
-            request = json.loads(messages[-1]["content"])
-            return {
-                "status": "success",
-                "answer": json.dumps(
-                    {"items": [{"id": item["id"], "text": item["text"]} for item in request["items"]]},
-                    ensure_ascii=False,
-                ),
-            }
-
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=echoing_completion),
-        ):
-            result = translate_json_payload(
-                {"summary": "Command injection found"},
-                target_language="zh-Hans",
-                retry_untranslated_fields=False,
-            )
-
-        self.assertEqual(result.payload["summary"], "Command injection found")
-        self.assertEqual(result.batch_count, 1)
-        self.assertEqual(calls, 1)
-
-    def test_chart_payload_is_not_sent_to_translation_model(self) -> None:
-        payload = {
-            "summary": "Command injection found",
-            "chart_data": {"risk_bars": [{"label": "AlmaLinux:8", "description": "Do not translate"}]},
-        }
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=_translated_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["chart_data"], payload["chart_data"])
-        self.assertEqual(result.candidate_fields, 1)
-
-    def test_preserves_original_when_translation_model_completely_fails(self) -> None:
-        payload = {"summary": "Command injection found"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch(
-                "app.mcp.translation.diagnose_chat_completion",
-                return_value={"status": "failed", "message": "HTTP 500"},
-            ),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload, payload)
-        self.assertEqual(result.translation_status, "fallback")
-        self.assertTrue(result.errors)
-
-    def test_translation_accepted_when_inline_code_backticks_are_dropped(self) -> None:
-        # 中文译文常保留标识符但去掉反引号：这种译文不应被保护段校验误杀。
-        def dropping_backticks_completion(_model, messages, **kwargs):
-            if kwargs.get("json_mode"):
-                return {"status": "failed", "message": "force plain fallback"}
-            content = messages[-1]["content"]
-            if content.startswith("{"):
-                return {"status": "failed", "message": "force plain fallback"}
-            return {"status": "success", "answer": "在 1.2.3 中将 email_verified 设为 false 即可修复"}
-
-        payload = {"summary": "Set `email_verified` to false in 1.2.3 to remediate"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=dropping_backticks_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "在 1.2.3 中将 email_verified 设为 false 即可修复")
-        self.assertEqual(result.translated_fields, 1)
-
-    def test_overlong_text_is_split_into_chunks_and_joined(self) -> None:
-        from app.mcp.translation import _LONG_TEXT_CHARS
-
-        long_text = "Paragraph one about the vulnerability. " * 150 + "\n\n" + "Paragraph two with impact details. " * 150
-        self.assertGreater(len(long_text), _LONG_TEXT_CHARS)
-        plain_calls: list[str] = []
-
-        def chunk_completion(_model, messages, **_kwargs):
-            content = messages[-1]["content"]
-            if content.startswith("{"):
-                # 批次模式原样回显，逼迫走逐字段兜底。
-                request = json.loads(content)
-                return {
-                    "status": "success",
-                    "answer": json.dumps(
-                        {"items": [{"id": item["id"], "text": item["text"]} for item in request["items"]]},
-                        ensure_ascii=False,
-                    ),
-                }
-            plain_calls.append(content)
-            return {"status": "success", "answer": f"译：{content[:40]}"}
-
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=chunk_completion),
-        ):
-            result = translate_json_payload({"summary": long_text}, target_language="zh-Hans")
-
-        self.assertGreaterEqual(len(plain_calls), 2)  # 超长文本被切成多块分别翻译
-        self.assertEqual(result.translation_status, "translated")
-        self.assertEqual(result.translated_fields, 1)
-        self.assertIn("译：", result.payload["summary"])
-
-    def test_untranslated_fields_get_a_second_fallback_round(self) -> None:
-        # 首轮兜底失败（返回英文）的字段，第二轮全新尝试应被重新拾取。
-        plain_attempts: list[str] = []
-
-        def flaky_completion(_model, messages, **_kwargs):
-            content = messages[-1]["content"]
-            if content.startswith("{"):
-                request = json.loads(content)
-                return {
-                    "status": "success",
-                    "answer": json.dumps(
-                        {"items": [{"id": item["id"], "text": item["text"]} for item in request["items"]]},
-                        ensure_ascii=False,
-                    ),
-                }
-            plain_attempts.append(content)
-            if len(plain_attempts) == 1:
-                return {"status": "success", "answer": content}  # 第一轮仍回英文
-            return {"status": "success", "answer": f"译：{content}"}
-
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=flaky_completion),
-        ):
-            result = translate_json_payload({"summary": "Second round probe text zebra"}, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "译：Second round probe text zebra")
-        self.assertEqual(result.translated_fields, 1)
-        self.assertEqual(len(plain_attempts), 2)
-
-    def test_soft_slash_phrases_do_not_block_translation(self) -> None:
-        # no-code/low-code 是自然语言斜杠短语而非机器路径：译成中文不应被误判弃译。
-        def soft_path_completion(_model, messages, **_kwargs):
-            request = json.loads(messages[-1]["content"])
-            return {
-                "status": "success",
-                "answer": json.dumps(
-                    {
-                        "items": [
-                            {
-                                "id": request["items"][0]["id"],
-                                "text": "NocoBase 是一个无代码/低代码平台；详见 https://example.test/advisory",
-                            }
-                        ]
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-
-        payload = {"summary": "NocoBase is a no-code/low-code platform; see https://example.test/advisory"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=soft_path_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "NocoBase 是一个无代码/低代码平台；详见 https://example.test/advisory")
-        self.assertEqual(result.translated_fields, 1)
-
-    def test_real_machine_paths_are_still_protected(self) -> None:
-        # @scope/pkg、conf/conf.json 等真机器标识被译文丢弃时仍必须拒收。
-        def dropping_paths_completion(_model, messages, **_kwargs):
-            content = messages[-1]["content"]
-            if content.startswith("{"):
-                request = json.loads(content)
-                return {
-                    "status": "success",
-                    "answer": json.dumps(
-                        {"items": [{"id": item["id"], "text": "在 1.2.3 中通过配置逃逸"} for item in request["items"]]},
-                        ensure_ascii=False,
-                    ),
-                }
-            return {"status": "success", "answer": "在 1.2.3 中通过配置逃逸"}
-
-        payload = {"summary": "Escape via conf/conf.json in @scope/pkg before 1.2.3"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=dropping_paths_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload, payload)
-        self.assertEqual(result.translated_fields, 0)
-
-    def test_fenced_code_blocks_are_masked_translated_and_restored(self) -> None:
-        # PoC 公告：代码块不发给模型，叙述文字译成中文后代码块逐字回填。
-        code_block = "```javascript\nconst payload = \"x) else if a==a (echo y\";\n// VULNERABLE comment stays English\n```"
-        seen_user_texts: list[str] = []
-
-        def poc_completion(_model, messages, **_kwargs):
-            content = messages[-1]["content"]
-            seen_user_texts.append(content)
-            if content.startswith("{"):
-                request = json.loads(content)
-                answers = {}
-                for item in request["items"]:
-                    answers[item["id"]] = "该漏洞允许命令注入。详见 [[SEC-BLOCK-1]] 中的利用方式。"
-                return {"status": "success", "answer": json.dumps({"items": [{"id": k, "text": v} for k, v in answers.items()]}, ensure_ascii=False)}
-            return {"status": "success", "answer": "该漏洞允许命令注入。详见 [[SEC-BLOCK-1]] 中的利用方式。"}
-
-        payload = {"summary": f"Command injection via shell option. Exploit:\n\n{code_block}"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=poc_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        translated = result.payload["summary"]
-        self.assertIn("该漏洞允许命令注入", translated)
-        self.assertIn(code_block, translated)  # 代码块逐字还原，注释不被翻译
-        self.assertNotIn("[[SEC-BLOCK-1]]", translated)
-        self.assertEqual(result.translated_fields, 1)
-        self.assertTrue(all("VULNERABLE comment" not in text for text in seen_user_texts))  # 代码未发给模型
-
-    def test_trailing_sentence_period_does_not_block_version_match(self) -> None:
-        # 版本号段被正则并入句尾英文句号（5.0.0-beta.3.），中文句号结尾不应判失败。
-        def period_completion(_model, messages, **_kwargs):
-            request = json.loads(messages[-1]["content"])
-            return {
-                "status": "success",
-                "answer": json.dumps(
-                    {"items": [{"id": request["items"][0]["id"], "text": "5.0.0-beta.3 之前的版本受影响。请尽快升级。"}]},
-                    ensure_ascii=False,
-                ),
-            }
-
-        payload = {"summary": "Versions before 5.0.0-beta.3. Upgrade immediately"}
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=period_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "5.0.0-beta.3 之前的版本受影响。请尽快升级。")
-        self.assertEqual(result.translated_fields, 1)
-
-    def test_whitespace_only_echo_is_neither_counted_nor_cached(self) -> None:
-        # 模型"回显原文但裁掉尾部空白"不算翻译：不得计数、不得入缓存，
-        # 否则逐字段兜底会被缓存里的英文原文短路，报告永远残留英文。
-        payload = {"summary": "Advisory text with trailing whitespace probe "}
-        plain_calls = 0
-
-        def echo_strip_completion(_model, messages, **_kwargs):
-            nonlocal plain_calls
-            content = messages[-1]["content"]
-            if content.startswith("{"):
-                request = json.loads(content)
-                return {
-                    "status": "success",
-                    "answer": json.dumps(
-                        {"items": [{"id": item["id"], "text": item["text"].strip()} for item in request["items"]]},
-                        ensure_ascii=False,
-                    ),
-                }
-            plain_calls += 1
-            return {"status": "success", "answer": "译：Advisory text with trailing whitespace probe"}
-
-        with (
-            patch("app.mcp.translation.active_model_from_env", return_value={"id": "model-a"}),
-            patch("app.mcp.translation.diagnose_chat_completion", side_effect=echo_strip_completion),
-        ):
-            result = translate_json_payload(payload, target_language="zh-Hans")
-
-        self.assertEqual(result.payload["summary"], "译：Advisory text with trailing whitespace probe")
-        self.assertEqual(result.translated_fields, 1)
-        self.assertEqual(plain_calls, 1)
-
-    def test_graph_specs_place_translation_after_structured_json(self) -> None:
+    def test_graphs_place_translation_after_structured_json(self) -> None:
         assistant = KnowledgeSecurityGraph.graph_spec()
         report = ReportCapabilitySubgraph.graph_spec()
         self.assertIn("translation_agent", {node["id"] for node in assistant["nodes"]})
@@ -503,26 +421,109 @@ class TranslationMCPTests(unittest.TestCase):
             {(edge["source"], edge["target"]) for edge in report["edges"]},
         )
 
-    def test_mcp_catalog_exposes_structured_translation_tool(self) -> None:
+    def test_mcp_catalog_exposes_structured_offline_contract(self) -> None:
         spec = asyncio.run(translation_mcp_spec())
         self.assertEqual(spec["id"], "translation")
         self.assertEqual([tool["name"] for tool in spec["tools"]], ["translate_json_payload"])
+        output_schema = spec["tools"][0]["output_schema"]
+        properties = output_schema["properties"]
+        for field in (
+            "network_used",
+            "requires_api_key",
+            "provider_calls",
+            "billable_tokens",
+            "token_usage",
+            "model_used",
+            "offline_model_used",
+            "resource_verified",
+        ):
+            self.assertIn(field, properties)
 
 
-def _translated_completion(_model, messages, **_kwargs):
-    request = json.loads(messages[-1]["content"])
-    return {
-        "status": "success",
-        "answer": json.dumps(
-            {
-                "items": [
-                    {"id": item["id"], "text": f"译：{item['text']}"}
-                    for item in request["items"]
-                ]
-            },
-            ensure_ascii=False,
-        ),
-    }
+class BundledTranslationModelSmokeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _translation_cache.clear()
+
+    def test_real_model_translates_pure_english_to_simplified_and_traditional(self) -> None:
+        payload = {
+            "summary": "Remote code execution vulnerability allows arbitrary code execution."
+        }
+
+        simplified = translate_json_payload(payload, target_language="zh-Hans")
+        traditional = translate_json_payload(payload, target_language="zh-Hant")
+
+        self.assertEqual(simplified.translation_status, "translated")
+        self.assertEqual(traditional.translation_status, "translated")
+        self.assertRegex(simplified.payload["summary"], r"[\u3400-\u9fff]")
+        self.assertRegex(traditional.payload["summary"], r"[\u3400-\u9fff]")
+        self.assertNotIn("Remote code execution", simplified.payload["summary"])
+        self.assertNotEqual(simplified.payload["summary"], traditional.payload["summary"])
+        for result in (simplified, traditional):
+            self.assertTrue(result.resource_verified)
+            self.assertTrue(result.offline_model_used)
+            self.assertEqual(len(result.model_sha256), 64)
+            self.assertFalse(result.network_used)
+            self.assertFalse(result.requires_api_key)
+            self.assertEqual(result.provider_calls, 0)
+            self.assertEqual(result.billable_tokens, 0)
+            self.assertEqual(result.token_usage, 0)
+
+    def test_real_model_translates_mixed_chinese_and_preserves_nginx(self) -> None:
+        source = "该 Nginx issue allows remote attackers to execute arbitrary code."
+
+        result = translate_json_payload({"summary": source}, target_language="zh-Hans")
+
+        self.assertEqual(result.translation_status, "translated")
+        self.assertEqual(result.unresolved_fields, 0)
+        self.assertIn("Nginx", result.payload["summary"])
+        self.assertNotIn("remote attackers", result.payload["summary"])
+        self.assertNotIn("execute arbitrary code", result.payload["summary"])
+
+    def test_real_model_preserves_security_advisory_evidence(self) -> None:
+        source = (
+            "Nginx before 1.2.3 is vulnerable; see CVE-2026-1234 at "
+            "https://example.test/advisory and commit deadbee."
+        )
+
+        result = translate_json_payload({"summary": source}, target_language="zh-Hans")
+
+        self.assertEqual(result.translation_status, "translated")
+        for segment in (
+            "Nginx",
+            "1.2.3",
+            "CVE-2026-1234",
+            "https://example.test/advisory",
+            "deadbee",
+        ):
+            self.assertIn(segment, result.payload["summary"])
+        self.assertIn("受影响版本早于 1.2.3", result.payload["summary"])
+        self.assertIn("提交 deadbee", result.payload["summary"])
+
+    def test_real_model_preserves_core_security_meaning(self) -> None:
+        cases = (
+            (
+                "Remote attackers can execute arbitrary code in Nginx before 1.2.3.",
+                "执行任意代码",
+                {"Nginx"},
+            ),
+            ("Buffer overflow allows remote attackers to execute code.", "缓冲区溢出", set()),
+            ("Integer overflow causes memory corruption.", "整数溢出", set()),
+            ("Denial of service vulnerability in Nginx.", "拒绝服务", {"Nginx"}),
+            ("Information disclosure affects OpenSSL.", "信息泄露", {"OpenSSL"}),
+            ("Prototype pollution allows attackers to modify objects.", "原型污染", set()),
+            ("Out-of-bounds read in Nginx.", "越界读取", {"Nginx"}),
+        )
+
+        for source, expected_term, allowed_latin in cases:
+            with self.subTest(source=source):
+                _translation_cache.clear()
+                result = translate_json_payload({"summary": source}, target_language="zh-Hans")
+                translated = result.payload["summary"]
+
+                self.assertEqual(result.translation_status, "translated")
+                self.assertIn(expected_term, translated)
+                latin_words = set(re.findall(r"[A-Za-z]{2,}", translated))
+                self.assertLessEqual(latin_words, allowed_latin)
 
 
 if __name__ == "__main__":

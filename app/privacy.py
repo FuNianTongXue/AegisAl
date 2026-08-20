@@ -128,7 +128,11 @@ def _sanitize(value: Any, path: tuple[str, ...] = ()) -> Any:
         for key, item in value.items():
             key_text = str(key)
             item_path = (*path, key_text)
-            if _is_private_key(key_text) and not _is_knowledge_graph_edge_source(item_path):
+            if (
+                _is_private_key(key_text)
+                and not _is_knowledge_graph_edge_source(item_path)
+                and not _is_translation_attestation_source(item_path)
+            ):
                 continue
             cleaned[key_text] = _sanitize(item, item_path)
         return cleaned
@@ -151,6 +155,10 @@ def _is_private_key(key: str) -> bool:
 
 def _is_knowledge_graph_edge_source(path: tuple[str, ...]) -> bool:
     return path == ("knowledge_graph", "edges", "[]", "source")
+
+
+def _is_translation_attestation_source(path: tuple[str, ...]) -> bool:
+    return path == ("translation", "source")
 
 
 def _public_reference_links_text(value: str) -> str:

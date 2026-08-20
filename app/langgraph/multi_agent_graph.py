@@ -10,15 +10,22 @@ except Exception:  # pragma: no cover - packaged fallback
     StateGraph = None
 
 from app.agent.assistant_intent import heuristic_intent_plan
-from app.agent.contracts import AgentExecution, AgentHandoff, AgentManifest
-from app.agent.specialist_agents import (
-    AssistantAgentContext,
-    CodeScanAgent,
-    GraphSpecialistAgent,
-    ProjectContextAgent,
-    SBOMAgent,
+from app.agent.contracts import AgentExecution, AgentHandoff
+from app.agent.plugins import (
+    AGENT_MANIFESTS,
+    AGENT_REGISTRY,
+    AgentRegistry,
 )
-from app.agent.translation_agent import translation_agent
+from app.agent.specialist_agents import AssistantAgentContext
+from app.agent.translation_policy import (
+    fail_closed_translation_payload,
+    failed_translation_audit,
+    issue_stored_translation_attestation,
+    stored_translation_attestation_is_publishable,
+    translation_audit_is_publishable,
+    translation_unavailable_message,
+)
+from app.composition import secflow_runtime
 from app.dependencies import BUILD_MANIFEST_SOURCE_TYPES, CODE_EXTENSIONS, attachment_kind
 from app.langgraph.report_graph import looks_like_report_request
 from app.privacy import public_answer_payload, sanitize_public_text
@@ -52,106 +59,34 @@ class MultiAgentState(TypedDict, total=False):
     content_sink: Any
     allow_workspace_recovery: bool
     allow_task_creation: bool
-
-
-SUPERVISOR_MANIFEST = AgentManifest(
-    agent_id="supervisor_agent",
-    label="Supervisor Agent",
-    description="理解用户目标、制定能力计划并向最小权限专业 Agent 交接。",
-    capabilities=("semantic_planning", "agent_handoff", "termination"),
-    tool_allowlist=("plan_assistant_intent", "handoff"),
-)
-PROJECT_CONTEXT_MANIFEST = AgentManifest(
-    agent_id="project_context_agent",
-    label="Project Context Agent",
-    description="恢复并验证当前用户授权的本机源码工作区。",
-    capabilities=("workspace_recovery", "project_memory"),
-    tool_allowlist=("encrypted_project_links", "agent_task_store"),
-)
-CODE_SCAN_MANIFEST = AgentManifest(
-    agent_id="code_scan_agent",
-    label="Code Scan Agent",
-    description="创建完整项目扫描任务并调用扫描任务图和 Code Scan MCP。",
-    capabilities=("project_scan", "project_rescan", "scan_result_follow_up"),
-    tool_allowlist=("task_agent_graph", "code_scan_sse_mcp"),
-    can_start_tasks=True,
-)
-COMPONENT_MANIFEST = AgentManifest(
-    agent_id="component_agent",
-    label="Component Intelligence Agent",
-    description="核验单组件版本或生成时间范围组件漏洞目录。",
-    capabilities=("component_vulnerability_query", "component_vulnerability_catalog"),
-    tool_allowlist=("component_detail_mcp", "component_excel_mcp", "d3_sankey_mcp"),
-)
-SBOM_MANIFEST = AgentManifest(
-    agent_id="sbom_agent",
-    label="SBOM Agent",
-    description="生成项目 SBOM、识别许可证并匹配依赖组件漏洞。",
-    capabilities=("project_sbom_export", "license_inventory"),
-    tool_allowlist=("sbom_graph", "license_scan_mcp", "sbom_excel_mcp"),
-)
-INTELLIGENCE_MANIFEST = AgentManifest(
-    agent_id="intelligence_agent",
-    label="Vulnerability Intelligence Agent",
-    description="查询并整理漏洞事实、年份范围和安全知识。",
-    capabilities=("vulnerability_lookup", "vulnerability_year_lookup", "security_knowledge"),
-    tool_allowlist=("intelligence_query", "knowledge_graph"),
-)
-REPORT_MANIFEST = AgentManifest(
-    agent_id="report_agent",
-    label="Report Agent",
-    description="从固定扫描 JSON 生成人工确认的多格式报告。",
-    capabilities=("report_generate", "report_download"),
-    tool_allowlist=("report_graph", "chart_mcp", "mermaid_mcp", "markdown_mcp", "word_mcp", "pdf_mcp"),
-)
-CONVERSATION_MANIFEST = AgentManifest(
-    agent_id="conversation_agent",
-    label="Security Conversation Agent",
-    description="处理无需执行项目工具的安全问答、澄清和身份说明。",
-    capabilities=("llm_direct", "identity", "clarification"),
-    tool_allowlist=("configured_llm", "long_term_memory"),
-)
-RESULT_AGGREGATOR_MANIFEST = AgentManifest(
-    agent_id="result_aggregator_agent",
-    label="Result Aggregator Agent",
-    description="合并专业 Agent 结果、审计交接并生成统一客户响应。",
-    capabilities=("result_merge", "audit_finalize"),
-    tool_allowlist=("public_payload_filter",),
-)
-TRANSLATION_MANIFEST = AgentManifest(
-    agent_id="translation_agent",
-    label="Translation Agent",
-    description="将专业 Agent 的结构化 JSON 交给翻译 MCP，生成客户端目标语言回复。",
-    capabilities=("json_translation", "response_localization"),
-    tool_allowlist=("translation_mcp",),
-)
-
-AGENT_MANIFESTS = (
-    SUPERVISOR_MANIFEST,
-    PROJECT_CONTEXT_MANIFEST,
-    CODE_SCAN_MANIFEST,
-    COMPONENT_MANIFEST,
-    SBOM_MANIFEST,
-    INTELLIGENCE_MANIFEST,
-    REPORT_MANIFEST,
-    CONVERSATION_MANIFEST,
-    RESULT_AGGREGATOR_MANIFEST,
-    TRANSLATION_MANIFEST,
-)
+    stored_translation_verified: bool
 
 
 class AssistantMultiAgentSupervisor:
     """Supervisor-and-specialists orchestration over existing capability subgraphs."""
 
-    def __init__(self) -> None:
-        self._project_context_agent = ProjectContextAgent(PROJECT_CONTEXT_MANIFEST)
+    def __init__(self, agent_registry: AgentRegistry | None = None) -> None:
+        self._agent_registry = agent_registry
+        self._agents: dict[str, Any] = {}
+        self._definitions = ()
+        self._manifests = AGENT_MANIFESTS
+        self._project_context_agent: Any = None
+        self._result_aggregator_agent: Any = None
+        self._translation_agent: Any = None
+        self._graph = None
+        if agent_registry is not None:
+            self._configure(agent_registry)
+
+    def _configure(self, registry: AgentRegistry) -> None:
+        self._definitions = registry.definitions()
+        self._manifests = tuple(definition.manifest for definition in self._definitions)
+        self._project_context_agent = registry.instantiate("project_context_agent")
+        self._result_aggregator_agent = registry.instantiate("result_aggregator_agent")
+        self._translation_agent = registry.instantiate("translation_agent")
         self._agents = {
-            "code_scan_agent": CodeScanAgent(CODE_SCAN_MANIFEST),
-            "component_agent": GraphSpecialistAgent(COMPONENT_MANIFEST),
-            "sbom_agent": SBOMAgent(SBOM_MANIFEST),
-            "intelligence_agent": GraphSpecialistAgent(INTELLIGENCE_MANIFEST),
-            "report_agent": GraphSpecialistAgent(REPORT_MANIFEST, force_intent="report_operation"),
-            "conversation_agent": GraphSpecialistAgent(CONVERSATION_MANIFEST),
+            definition.agent_id: definition.instantiate()
+            for definition in self._definitions
+            if definition.role == "specialist"
         }
         self._graph = self._build_graph()
 
@@ -177,6 +112,29 @@ class AssistantMultiAgentSupervisor:
         allow_workspace_recovery: bool = False,
         allow_task_creation: bool = False,
     ) -> dict[str, Any]:
+        if self._agent_registry is None:
+            with secflow_runtime().pin() as snapshot:
+                registry = AgentRegistry(snapshot.registries.get(AGENT_REGISTRY, {}))
+                return AssistantMultiAgentSupervisor(registry).invoke(
+                    question=question,
+                    top_k=top_k,
+                    user_id=user_id,
+                    session_id=session_id,
+                    response_language=response_language,
+                    attachments=attachments,
+                    runtime_graph=runtime_graph,
+                    memory=memory,
+                    planner=planner,
+                    event_sink=event_sink,
+                    content_sink=content_sink,
+                    workspace_path=workspace_path,
+                    task_context=task_context,
+                    active_task=active_task,
+                    intent_plan=intent_plan,
+                    task_service=task_service,
+                    allow_workspace_recovery=allow_workspace_recovery,
+                    allow_task_creation=allow_task_creation,
+                )
         state: MultiAgentState = {
             "question": question,
             "top_k": top_k,
@@ -203,6 +161,7 @@ class AssistantMultiAgentSupervisor:
             "content_sink": content_sink,
             "allow_workspace_recovery": bool(allow_workspace_recovery),
             "allow_task_creation": bool(allow_task_creation),
+            "stored_translation_verified": False,
         }
         if self._graph is not None:
             final = self._graph.invoke(state)
@@ -211,6 +170,13 @@ class AssistantMultiAgentSupervisor:
         return public_answer_payload(dict(final.get("answer") or {}))
 
     def graph_spec(self, *, knowledge_graph: Any = None, task_graph: Any = None) -> dict[str, Any]:
+        if self._agent_registry is None:
+            with secflow_runtime().pin() as snapshot:
+                registry = AgentRegistry(snapshot.registries.get(AGENT_REGISTRY, {}))
+                return AssistantMultiAgentSupervisor(registry).graph_spec(
+                    knowledge_graph=knowledge_graph,
+                    task_graph=task_graph,
+                )
         subgraphs: list[dict[str, Any]] = []
         if knowledge_graph is not None:
             subgraphs.append(knowledge_graph.graph_spec())
@@ -220,39 +186,31 @@ class AssistantMultiAgentSupervisor:
             "name": "SecFlow Multi-Agent Supervisor",
             "architecture": "supervisor-specialists",
             "schema_version": "secflow.multi-agent/v1",
-            "agents": [manifest.as_dict() for manifest in AGENT_MANIFESTS],
+            "agents": [
+                definition.as_dict()
+                for definition in self._definitions
+            ],
             "nodes": [
                 {"id": manifest.agent_id, "label": manifest.label, "type": "agent"}
-                for manifest in AGENT_MANIFESTS
+                for manifest in self._manifests
             ]
             + [{"id": "final_output", "label": "已本地化输出", "type": "output"}],
             "edges": [
                 {"source": "supervisor_agent", "target": target, "label": "语义交接"}
-                for target in (
-                    "project_context_agent",
-                    "code_scan_agent",
-                    "component_agent",
-                    "sbom_agent",
-                    "intelligence_agent",
-                    "report_agent",
-                    "conversation_agent",
-                )
+                for target in ("project_context_agent", *self._agents)
             ]
             + [
-                {"source": "project_context_agent", "target": "code_scan_agent", "label": "源码已验证"},
-                {"source": "project_context_agent", "target": "sbom_agent", "label": "源码已验证"},
+                {
+                    "source": "project_context_agent",
+                    "target": definition.agent_id,
+                    "label": "源码已验证",
+                }
+                for definition in self._definitions
+                if definition.role == "specialist" and definition.requires_workspace
             ]
             + [
                 {"source": target, "target": "result_aggregator_agent", "label": "结构化结果"}
-                for target in (
-                    "project_context_agent",
-                    "code_scan_agent",
-                    "component_agent",
-                    "sbom_agent",
-                    "intelligence_agent",
-                    "report_agent",
-                    "conversation_agent",
-                )
+                for target in ("project_context_agent", *self._agents)
             ]
             + [
                 {"source": "result_aggregator_agent", "target": "translation_agent", "label": "统一 JSON 翻译"},
@@ -290,8 +248,11 @@ class AssistantMultiAgentSupervisor:
             "project_context_agent",
             lambda state: state["target_agent"],
             {
-                "code_scan_agent": "code_scan_agent",
-                "sbom_agent": "sbom_agent",
+                **{
+                    definition.agent_id: definition.agent_id
+                    for definition in self._definitions
+                    if definition.role == "specialist" and definition.requires_workspace
+                },
                 "result_aggregator_agent": "result_aggregator_agent",
             },
         )
@@ -388,8 +349,13 @@ class AssistantMultiAgentSupervisor:
             self._handoff(state, execution.agent_id, "result_aggregator_agent", "需要用户补充源码范围。")
             return state
         state["workspace_path"] = str(resolution.get("workspace_path") or "")
-        state["target_agent"] = execution.next_agent
-        self._handoff(state, execution.agent_id, execution.next_agent, "源码工作区验证通过。")
+        state["target_agent"] = self._target_agent(state)
+        self._handoff(
+            state,
+            execution.agent_id,
+            state["target_agent"],
+            "源码工作区验证通过。",
+        )
         return state
 
     def _specialist_node(self, agent_id: str):
@@ -407,8 +373,12 @@ class AssistantMultiAgentSupervisor:
 
     def _result_aggregator(self, state: MultiAgentState) -> MultiAgentState:
         self._visit(state, "result_aggregator_agent")
-        answer = public_answer_payload(dict(state.get("answer") or {}))
-        if not self._translation_audit_is_stored(answer, state.get("response_language", "zh-Hans")):
+        answer = self._result_aggregator_agent.aggregate(dict(state.get("answer") or {}))
+        target_language = str(state.get("response_language") or "zh-Hans")
+        stored_audit = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
+        stored_translation_verified = self._translation_audit_is_stored(answer, target_language)
+        state["stored_translation_verified"] = stored_translation_verified
+        if not stored_translation_verified:
             self._handoff(
                 state,
                 "result_aggregator_agent",
@@ -436,16 +406,18 @@ class AssistantMultiAgentSupervisor:
         self._trace(state, "result_aggregator_agent", "已完成结构化结果合并与审计。")
         # Include the final aggregator event after it has been emitted.
         answer["trace"] = [*state.get("trace", []), *answer_trace]
+        if stored_translation_verified:
+            answer["translation"] = issue_stored_translation_attestation(
+                answer,
+                target_language=target_language,
+                record_count=int(stored_audit["record_count"]),
+                source=str(stored_audit.get("source") or "vulnerability-catalog"),
+            )
         return state
 
     @staticmethod
     def _translation_audit_is_stored(answer: dict[str, Any], target_language: Any) -> bool:
-        audit = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
-        return (
-            audit.get("status") == "completed"
-            and audit.get("target_language") == str(target_language or "zh-Hans")
-            and audit.get("storage_stage") == "before-persist"
-        )
+        return stored_translation_attestation_is_publishable(answer, target_language)
 
     @classmethod
     def _answer_uses_stored_translation(cls, state: MultiAgentState) -> bool:
@@ -458,73 +430,94 @@ class AssistantMultiAgentSupervisor:
         self._visit(state, "translation_agent")
         answer = dict(state.get("answer") or {})
         existing_trace = list(answer.get("trace") or [])
-        existing = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
         target_language = str(state.get("response_language") or "zh-Hans")
-        if existing.get("status") == "completed" and existing.get("target_language") == target_language:
-            self._trace(state, "translation_agent", "已复用问答子图完成的 Translation MCP JSON 翻译。")
-        else:
-            try:
-                result = translation_agent.translate_json(
+        translation_blocked = False
+        try:
+            result = self._translation_agent.translate_json(
+                answer,
+                target_language=target_language,
+                user_id=str(state.get("user_id") or "default"),
+                session_id=str(state.get("session_id") or "default"),
+                content_scope="multi_agent_response",
+            )
+            audit = dict(result.audit)
+            translation_completed = translation_audit_is_publishable(audit)
+            if translation_completed:
+                answer = public_answer_payload(result.payload)
+                answer["translation"] = audit
+            else:
+                translation_blocked = True
+                existing_trace = []
+                state["trace"] = []
+                answer = public_answer_payload(
+                    fail_closed_translation_payload(
+                        result.payload,
+                        target_language=target_language,
+                        audit=audit,
+                    )
+                )
+            state["answer"] = answer
+            self._trace(
+                state,
+                "translation_agent",
+                (
+                    "Translation Agent 已调用翻译 MCP 处理汇总 JSON："
+                    f"目标语言 {result.audit['target_language']}，"
+                    f"翻译 {result.audit['translated_fields']} 个字段。"
+                ) if translation_completed else translation_unavailable_message(target_language),
+                "completed" if translation_completed else "warning",
+                presentation=tool_call_presentation(
+                    "translate_json_payload",
+                    state="completed" if translation_completed else "error",
+                    title="Translation MCP",
+                    input_summary={
+                        "content_scope": "multi_agent_response",
+                        "target_language": result.audit["target_language"],
+                        "candidate_fields": result.audit["candidate_fields"],
+                    },
+                    output={
+                        "translated_fields": result.audit["translated_fields"],
+                        "translation_status": result.audit["translation_status"],
+                        "output_sha256": result.audit["output_sha256"],
+                    },
+                    error="" if translation_completed else "翻译结果不完整，未标记为已完成。",
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - do not discard a verified specialist result.
+            translation_blocked = True
+            existing_trace = []
+            state["trace"] = []
+            message = sanitize_public_text(str(exc)).strip() or "翻译 MCP 未返回可用结果"
+            answer = public_answer_payload(
+                fail_closed_translation_payload(
                     answer,
                     target_language=target_language,
-                    user_id=str(state.get("user_id") or "default"),
-                    session_id=str(state.get("session_id") or "default"),
-                    content_scope="multi_agent_response",
+                    audit=failed_translation_audit(target_language, message),
                 )
-                answer = public_answer_payload(result.payload)
-                answer["translation"] = dict(result.audit)
-                state["answer"] = answer
-                self._trace(
-                    state,
-                    "translation_agent",
-                    (
-                        "Translation Agent 已调用翻译 MCP 处理汇总 JSON："
-                        f"目标语言 {result.audit['target_language']}，"
-                        f"翻译 {result.audit['translated_fields']} 个字段。"
-                    ),
-                    presentation=tool_call_presentation(
-                        "translate_json_payload",
-                        state="completed",
-                        title="Translation MCP",
-                        input_summary={
-                            "content_scope": "multi_agent_response",
-                            "target_language": result.audit["target_language"],
-                            "candidate_fields": result.audit["candidate_fields"],
-                        },
-                        output={
-                            "translated_fields": result.audit["translated_fields"],
-                            "translation_status": result.audit["translation_status"],
-                            "output_sha256": result.audit["output_sha256"],
-                        },
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001 - do not discard a verified specialist result.
-                message = sanitize_public_text(str(exc)).strip() or "翻译 MCP 未返回可用结果"
-                answer["translation"] = {
-                    "server": "SecFlow Translation MCP",
-                    "tool": "translate_json_payload",
-                    "status": "failed",
-                    "target_language": target_language,
-                    "error": message,
-                }
-                state["answer"] = public_answer_payload(answer)
-                self._trace(
-                    state,
-                    "translation_agent",
-                    f"Translation Agent 调用失败，已保留专业 Agent 结构化结果：{message}",
-                    "warning",
-                    presentation=tool_call_presentation(
-                        "translate_json_payload",
-                        state="error",
-                        title="Translation MCP",
-                        input_summary={"content_scope": "multi_agent_response"},
-                        error=message,
-                    ),
-                )
+            )
+            state["answer"] = answer
+            self._trace(
+                state,
+                "translation_agent",
+                translation_unavailable_message(target_language),
+                "warning",
+                presentation=tool_call_presentation(
+                    "translate_json_payload",
+                    state="error",
+                    title="Translation MCP",
+                    input_summary={"content_scope": "multi_agent_response"},
+                    error=message,
+                ),
+            )
         answer = dict(state.get("answer") or answer)
-        orchestration = answer.get("orchestration") if isinstance(answer.get("orchestration"), dict) else {}
+        orchestration = (
+            {}
+            if translation_blocked
+            else answer.get("orchestration") if isinstance(answer.get("orchestration"), dict) else {}
+        )
         orchestration["visited_agents"] = list(state.get("visited_agents") or [])
-        orchestration["handoffs"] = list(state.get("handoffs") or [])
+        if not translation_blocked:
+            orchestration["handoffs"] = list(state.get("handoffs") or [])
         orchestration["translation_agent"] = "translation_agent"
         answer["orchestration"] = orchestration
         answer["trace"] = _merge_trace_items(existing_trace, list(state.get("trace") or []))
@@ -544,25 +537,20 @@ class AssistantMultiAgentSupervisor:
         intent = str((state.get("intent_plan") or {}).get("intent") or "llm_direct")
         workspace = bool(state.get("workspace_path"))
         direct_source = self._has_direct_source_attachment(state.get("attachments") or [])
-        if intent in {"project_scan", "project_rescan"}:
-            if not workspace and not direct_source and state.get("allow_workspace_recovery"):
-                return "project_context_agent"
-            return "code_scan_agent"
-        if intent == "scan_result_follow_up":
-            return "code_scan_agent"
-        if intent == "project_sbom_export":
-            if not workspace and state.get("allow_workspace_recovery"):
-                return "project_context_agent"
-            return "sbom_agent"
-        if intent == "sbom_result_follow_up":
-            return "sbom_agent"
-        if intent in {"component_vulnerability_query", "component_vulnerability_catalog"}:
-            return "component_agent"
-        if intent == "report_operation":
-            return "report_agent"
-        if intent in {"vulnerability_lookup", "vulnerability_year_lookup"}:
-            return "intelligence_agent"
-        return "conversation_agent"
+        definition = self._agent_registry.route(intent) if self._agent_registry is not None else None
+        if definition is None:
+            definition = self._agent_registry.definition("conversation_agent")
+        needs_workspace_now = intent in {"project_scan", "project_rescan", "project_sbom_export"}
+        direct_workspace = definition.agent_id == "code_scan_agent" and direct_source
+        if (
+            definition.requires_workspace
+            and needs_workspace_now
+            and not workspace
+            and not direct_workspace
+            and state.get("allow_workspace_recovery")
+        ):
+            return "project_context_agent"
+        return definition.agent_id
 
     def _context(self, state: MultiAgentState) -> AssistantAgentContext:
         return AssistantAgentContext(
@@ -600,9 +588,8 @@ class AssistantMultiAgentSupervisor:
                 return True
         return False
 
-    @staticmethod
-    def _agent_completion_message(agent_id: str, execution: AgentExecution) -> str:
-        labels = {manifest.agent_id: manifest.label for manifest in AGENT_MANIFESTS}
+    def _agent_completion_message(self, agent_id: str, execution: AgentExecution) -> str:
+        labels = {manifest.agent_id: manifest.label for manifest in self._manifests}
         if execution.status == "waiting":
             return f"{labels.get(agent_id, agent_id)} 已进入人工确认阶段。"
         if execution.status == "failed":

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +16,15 @@ except Exception:  # noqa: BLE001
 from app.dependencies import scan_dependency_attachments
 from app.agent.assistant_intent import plan_assistant_intent
 from app.agent.translation_agent import translation_agent
+from app.agent.translation_policy import (
+    catalog_translation_status_is_complete,
+    fail_closed_translation_payload,
+    failed_translation_audit,
+    issue_stored_translation_attestation,
+    public_catalog_records_are_ready,
+    translation_audit_is_publishable,
+    translation_unavailable_message,
+)
 from app.catalog_translation import record_summary_for_language
 from app.langgraph.component_catalog_graph import (
     component_catalog_outcome_answer,
@@ -46,7 +54,7 @@ def _is_information_session(session_id: Any) -> bool:
 
 SYSTEM_PROMPT_TEMPLATE = """你是小安，定位是用户的信息安全专家助手。
 当用户询问你是谁、你的名字或身份时，必须回答“我是小安，您的信息安全专家助手。”，不要使用模型名称、平台名称或其他身份。
-请使用{language_name}回答，语气专业、简洁、可落地。
+请使用{language_name}原创回答用户问题，语气专业、简洁、可落地。你只负责安全分析与内容生成，不承担跨语言翻译；上下文中与目标语言不一致的已有内容由 Translation Agent 和离线 Translation MCP 处理。
 系统当前日期为 {current_date}，当前时间为 {current_time}，时区为 Asia/Shanghai（中国标准时间）。用户询问“今天”“当前日期”或相对日期时，必须严格以这里提供的日期时间为准，不得使用模型自身日期或其他时区猜测。
 先根据用户措辞、会话上下文、附件和可用能力理解实际目标，再规划是否检索、扫描、分析、制图或生成报告；不要仅凭关键词把意图固定到某个节点。
 如果问题包含 CVE 或 GHSA 编号，优先结合实时漏洞接口查询结果回答，并说明影响、利用条件、组件版本范围、涉及版本、修复版本、修复建议和缓释措施。
@@ -55,7 +63,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是小安，定位是用户的信息安全专家�
 只有用户明确询问某个组件的具体安装版本是否受影响时，才使用单组件版本核验能力。
 单组件版本核验必须调用 Component Detail MCP，将已核验事实转换为组件、漏洞标题、严重度、发布日期、中文描述、影响包与版本、修复版本、CVSS 向量细项和公开参考链接的结构化页面模型。MCP 未返回的字段必须显示“未明确”，禁止模型补造。
 组件漏洞目录必须先展示固定查询结果，并分别在生成 Excel 前和选择下载位置前等待用户确认。
-当用户为授权项目请求软件物料、依赖资产、供应链组件清单或 SBOM Excel 时，使用项目 SBOM 能力；先生成 CycloneDX 兼容 JSON，再询问是否匹配组件漏洞情报，并分别在生成 Excel 和下载前等待确认。SBOM 漏洞匹配结果中的漏洞描述必须转换为完整简体中文，同时保留 CVE/GHSA、组件名、版本号和 URL 原文。不要要求用户必须使用固定关键词。
+当用户为授权项目请求软件物料、依赖资产、供应链组件清单或 SBOM Excel 时，使用项目 SBOM 能力；先生成 CycloneDX 兼容 JSON，再询问是否匹配组件漏洞情报，并分别在生成 Excel 和下载前等待确认。SBOM 漏洞匹配结果中的漏洞描述由 Translation Agent 和离线 Translation MCP 转换为完整简体中文，同时保留 CVE/GHSA、组件名、版本号和 URL 原文；模型不得执行该翻译。不要要求用户必须使用固定关键词。
 用户说下载到桌面、下载目录或文稿目录时，只输出系统目录语义，不得猜测或生成当前用户的绝对路径；原生客户端负责解析。
 只有 Excel/报告工具已经返回真实制品，且原生客户端确认写盘成功后，才能声称文件“已生成”“已下载”或“已保存”。不得根据用户给出的文件名和目录编造成功状态；没有真实制品或下载结果时，必须继续走对应 Interrupt，或明确说明尚未生成/尚未保存。
 扫描报告生成必须消费已校验的扫描 JSON，并分别调用 Mermaid MCP、Markdown MCP、Word MCP 和 PDF MCP；DOCX、PDF、MD 不得由同一个通用格式函数伪装生成。格式转换不得重新扫描、重新查询漏洞情报或改写扫描事实。生成前和下载前都必须等待用户确认。
@@ -70,12 +78,12 @@ SYSTEM_PROMPT_TEMPLATE = """你是小安，定位是用户的信息安全专家�
 """
 
 
-VULNERABILITY_CARD_PROMPT_TEMPLATE = """你是安全漏洞多语言整理子节点。请根据给定事实和分析结果输出严格 JSON，不要输出 Markdown 或解释。
+VULNERABILITY_CARD_PROMPT_TEMPLATE = """你是安全漏洞结构化整理子节点。请根据给定事实和分析结果输出严格 JSON，不要输出 Markdown 或解释。
 必须包含且只包含这些中文键名：漏洞编号、漏洞名称、漏洞描述、CVSS评分、严重等级、组件版本范围、涉及版本、修复版本、修复方案、缓释措施、代码片段、修复代码片段、参考链接。
-键名必须保持中文不变，这是前端字段协议；所有字段值必须使用{language_name}，漏洞编号、产品名、包名、版本号、URL 和代码保持原文。
+键名必须保持中文不变，这是前端字段协议；只整理输入中已使用{language_name}的字段值，漏洞编号、产品名、包名、版本号、URL 和代码保持原文。
 漏洞描述必须完整保留输入中的 description 事实，不得用省略号截断，不得只输出摘要。
-如果 description 与{language_name}不一致，必须完整翻译为{language_name}；禁止照抄不同语言原文。
-涉及版本只能翻译和整理输入中的 affected_versions，不能把 * 改成所有版本。
+不得执行跨语言翻译。如果 description 与{language_name}不一致，将该字段标记为译文不可用，由 Translation Agent 和离线 Translation MCP 处理。
+涉及版本只能整理输入中的 affected_versions，不能把 * 改成所有版本。
 组件版本范围只能整理输入中的 components、affected_versions 和 fixed_versions。
 修复版本只能使用输入中的 fixed_versions；如果没有明确修复版本，使用{language_name}表达“未明确”。
 代码片段只能使用输入中的 code_snippets；如果没有 code_snippets，使用{language_name}说明未找到可核验代码片段。
@@ -241,11 +249,20 @@ class KnowledgeSecurityGraph:
         final = self._graph.invoke(state)
         return self._final_answer(final)
 
-    @staticmethod
-    def _final_answer(state: AssistantState) -> dict[str, Any]:
+    @classmethod
+    def _final_answer(cls, state: AssistantState) -> dict[str, Any]:
         answer = dict(state["answer"])
         answer["trace"] = state.get("trace", [])
-        return public_answer_payload(answer)
+        answer = public_answer_payload(answer)
+        if cls._can_use_catalog_translation(state):
+            record_count = cls._stored_catalog_record_count(state)
+            answer["translation"] = issue_stored_translation_attestation(
+                answer,
+                target_language=state.get("response_language", "zh-Hans"),
+                record_count=record_count,
+                source="vulnerability-catalog",
+            )
+        return answer
 
     @staticmethod
     def graph_spec() -> dict[str, Any]:
@@ -498,8 +515,9 @@ class KnowledgeSecurityGraph:
                 state["records"] = result.get("records", [])
                 state["knowledge_graph"] = result.get("graph", {})
                 state["evidence_sources"] = public_evidence_sources(result.get("source_status"))
-                state["catalog_translation_ready"] = (
-                    str((result.get("catalog_translation") or {}).get("status") or "") == "completed"
+                state["catalog_translation_ready"] = catalog_translation_status_is_complete(
+                    result.get("catalog_translation"),
+                    state.get("response_language", "zh-Hans"),
                 )
                 status = "completed" if state["records"] else "warning"
                 return add_trace(
@@ -528,8 +546,9 @@ class KnowledgeSecurityGraph:
             state["records"] = result.get("records", [])
             state["knowledge_graph"] = result.get("graph", {})
             state["evidence_sources"] = public_evidence_sources(result.get("source_status"))
-            state["catalog_translation_ready"] = (
-                str((result.get("catalog_translation") or {}).get("status") or "") == "completed"
+            state["catalog_translation_ready"] = catalog_translation_status_is_complete(
+                result.get("catalog_translation"),
+                state.get("response_language", "zh-Hans"),
             )
             status = "completed" if result.get("records") else "warning"
             return add_trace(
@@ -644,17 +663,21 @@ class KnowledgeSecurityGraph:
                 "问题缺少有效语义，已跳过模型调用。",
                 status="warning",
             )
-        if state.get("intent") == "dependency_vulnerability_report":
+        if state.get("intent") in {
+            "vulnerability_lookup",
+            "vulnerability_year_lookup",
+            "dependency_vulnerability_report",
+        }:
             state["llm_result"] = {
                 "status": "skipped",
-                "message": "附件依赖报告已使用可核验漏洞事实与静态代码路径生成。",
+                "message": "漏洞内容已使用可核验事实、本地模板与 Translation MCP 生成。",
                 "latency_ms": 0,
                 "answer": "",
             }
             return add_trace(
                 state,
                 "call_llm",
-                "附件依赖报告优先使用后端事实模板生成，跳过模型等待。",
+                "漏洞展示由可核验事实和离线翻译生成，未调用用户模型。",
             )
 
         model = active_model_from_env(state.get("user_id", "default"))
@@ -716,65 +739,12 @@ class KnowledgeSecurityGraph:
             language,
             user_id=state.get("user_id", "default"),
         )
-        llm_result = state.get("llm_result") or {}
-        if state.get("intent") == "vulnerability_lookup" and llm_result.get("status") == "success":
-            parsed = parse_json_object(str(llm_result.get("answer") or ""))
-            if parsed and (normalize_response_language(language) != "zh-Hans" or _contains_cjk(parsed.get("漏洞描述"))):
-                state["vulnerability_card"] = merge_translated_card(parsed, fallback, record, language)
-                return add_trace(
-                    state,
-                    "translate_vulnerability_card",
-                    "已复用本次模型结果完成中文结构化漏洞卡片整理。",
-                )
-            state["vulnerability_card"] = fallback
-            return add_trace(
-                state,
-                "translate_vulnerability_card",
-                "模型结果不是有效的中文结构化卡片，已使用后端事实模板生成漏洞卡片。",
-                status="warning",
-            )
-        model = active_model_from_env(state.get("user_id", "default"))
-        if not model:
-            state["vulnerability_card"] = fallback
-            return add_trace(state, "translate_vulnerability_card", "已按本地规则生成中文结构化漏洞卡片。")
-        if not _llm_card_translation_enabled():
-            state["vulnerability_card"] = fallback
-            return add_trace(
-                state,
-                "translate_vulnerability_card",
-                "已使用后端事实模板生成结构化漏洞卡片，跳过二次模型整理以提升响应速度。",
-            )
-
-        facts = record_for_card_prompt(
-            record,
-            language,
-            user_id=state.get("user_id", "default"),
+        state["vulnerability_card"] = fallback
+        return add_trace(
+            state,
+            "translate_vulnerability_card",
+            "已使用 Translation MCP 译文和后端事实模板生成结构化漏洞卡片。",
         )
-        analysis = str((state.get("llm_result") or {}).get("answer") or "")
-        messages = [
-            {"role": "system", "content": vulnerability_card_prompt(state.get("response_language", "zh-Hans"))},
-            {
-                "role": "user",
-                "content": "漏洞事实：\n"
-                + json.dumps(facts, ensure_ascii=False)
-                + "\n\n安全分析：\n"
-                + analysis,
-            },
-        ]
-        result = diagnose_chat_completion(
-            model,
-            messages,
-            user_id=state.get("user_id", "default"),
-            session_id=state.get("session_id", "default"),
-            source="vulnerability_card_translation",
-        )
-        if result.get("status") != "success":
-            state["vulnerability_card"] = fallback
-            return add_trace(state, "translate_vulnerability_card", "中文整理未返回有效内容，已使用事实模板。", status="warning")
-
-        parsed = parse_json_object(str(result.get("answer") or ""))
-        state["vulnerability_card"] = merge_translated_card(parsed, fallback, record, language)
-        return add_trace(state, "translate_vulnerability_card", "已完成中文翻译、版本约束校验和结构化卡片整理。")
 
     def _compose_answer(self, state: AssistantState) -> AssistantState:
         language = state.get("response_language", "zh-Hans")
@@ -802,7 +772,7 @@ class KnowledgeSecurityGraph:
             static_analysis = state.get("static_analysis", {})
             fields["依赖漏洞数量"] = str(len(records))
             fields["代码漏洞数量"] = str(static_analysis.get("finding_count") or len(static_analysis.get("findings") or []))
-            fields["扫描策略"] = "解析 pom.xml、Gradle 构建文件与代码 import/require，按依赖包和版本匹配漏洞事实，并关联 source/sink 路径"
+            fields["扫描策略"] = "解析 pom.xml、Gradle 构建文件与代码中的导入或引用语句，按依赖包和版本匹配漏洞事实，并关联污点源与汇路径"
         if state.get("intent") == "component_vulnerability_query":
             component = state.get("component_result", {}).get("component") or state.get("component_query", {})
             fields["组件名称"] = str(component.get("name") or "")
@@ -869,10 +839,6 @@ class KnowledgeSecurityGraph:
             "trace": state.get("trace", []),
             "generated_at": now_iso(),
         }
-        if self._can_use_catalog_translation(state):
-            audit = self._stored_catalog_translation_audit(len(records))
-            answer["translation"] = audit
-            state["translation"] = dict(audit)
         component_detail = dict(state.get("component_detail") or {})
         if component_detail:
             answer["component_detail"] = component_detail
@@ -897,20 +863,35 @@ class KnowledgeSecurityGraph:
                 content_scope="assistant_response",
             )
             audit = dict(result.audit)
-            translated = public_answer_payload(result.payload)
-            translated["translation"] = audit
-            state["answer"] = translated
             state["translation"] = audit
+            translation_completed = translation_audit_is_publishable(audit)
+            if translation_completed:
+                translated = public_answer_payload(result.payload)
+                translated["translation"] = audit
+                state["answer"] = translated
+            else:
+                state["answer"] = public_answer_payload(
+                    fail_closed_translation_payload(
+                        result.payload,
+                        target_language=state.get("response_language") or "zh-Hans",
+                        audit=audit,
+                    )
+                )
+                state["translation"] = dict(state["answer"]["translation"])
+                state["trace"] = []
             return add_trace(
                 state,
                 "translation_agent",
                 (
                     "Translation Agent 已调用翻译 MCP 处理回复 JSON："
                     f"目标语言 {audit['target_language']}，翻译 {audit['translated_fields']} 个字段。"
+                ) if translation_completed else translation_unavailable_message(
+                    state.get("response_language") or "zh-Hans"
                 ),
+                status="completed" if translation_completed else "warning",
                 presentation=tool_call_presentation(
                     "translate_json_payload",
-                    state="completed",
+                    state="completed" if translation_completed else "error",
                     title="Translation MCP",
                     input_summary={
                         "content_scope": "assistant_response",
@@ -922,23 +903,25 @@ class KnowledgeSecurityGraph:
                         "translation_status": audit["translation_status"],
                         "output_sha256": audit["output_sha256"],
                     },
+                    error="" if translation_completed else "翻译结果不完整，未标记为已完成。",
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - preserve the verified response on translation outages.
             message = sanitize_public_text(str(exc)).strip() or "翻译 MCP 未返回可用结果"
-            state["translation"] = {
-                "server": "SecFlow Translation MCP",
-                "tool": "translate_json_payload",
-                "status": "failed",
-                "target_language": str(state.get("response_language") or "zh-Hans"),
-                "error": message,
-            }
-            answer["translation"] = dict(state["translation"])
-            state["answer"] = public_answer_payload(answer)
+            target_language = str(state.get("response_language") or "zh-Hans")
+            state["translation"] = failed_translation_audit(target_language, message)
+            state["answer"] = public_answer_payload(
+                fail_closed_translation_payload(
+                    answer,
+                    target_language=target_language,
+                    audit=state["translation"],
+                )
+            )
+            state["trace"] = []
             return add_trace(
                 state,
                 "translation_agent",
-                f"Translation Agent 调用失败，已保留原始结构化回复：{message}",
+                translation_unavailable_message(target_language),
                 status="warning",
                 presentation=tool_call_presentation(
                     "translate_json_payload",
@@ -1072,15 +1055,12 @@ class KnowledgeSecurityGraph:
         catalog_translation = (
             outcome.get("catalog_translation") if isinstance(outcome.get("catalog_translation"), dict) else {}
         )
-        state["catalog_translation_ready"] = (
-            str(catalog_translation.get("status") or "") == "completed"
+        state["catalog_translation_ready"] = catalog_translation_status_is_complete(
+            catalog_translation,
+            state.get("response_language", "zh-Hans"),
         )
         answer = public_answer_payload(component_catalog_outcome_answer(outcome))
-        if self._can_use_catalog_translation(state) and not isinstance(answer.get("translation"), dict):
-            audit = self._stored_catalog_translation_audit(int(catalog_translation.get("record_count") or 0))
-            answer["translation"] = audit
-            state["translation"] = dict(audit)
-        elif isinstance(answer.get("translation"), dict):
+        if isinstance(answer.get("translation"), dict):
             state["translation"] = dict(answer["translation"])
         state["answer"] = answer
         return add_trace(
@@ -1277,31 +1257,36 @@ class KnowledgeSecurityGraph:
         if normalize_response_language(state.get("response_language", "zh-Hans")) != "zh-Hans":
             return False
         if state.get("intent") == "component_vulnerability_catalog":
-            # This answer is composed locally from Chinese product strings and
-            # machine identifiers. Missing description translations are marked
-            # explicitly and must not trigger a 100+ KB whole-payload model pass.
-            return bool(state.get("catalog_operation"))
+            operation = state.get("catalog_operation")
+            status = operation.get("catalog_translation") if isinstance(operation, dict) else None
+            return bool(operation) and catalog_translation_status_is_complete(
+                status,
+                state.get("response_language", "zh-Hans"),
+            )
         if not state.get("catalog_translation_ready"):
             return False
-        return state.get("intent") in {
+        return (
+            state.get("intent") in {
             "vulnerability_lookup",
             "vulnerability_year_lookup",
             "dependency_vulnerability_report",
             "component_vulnerability_query",
-        } and bool(state.get("records"))
+            }
+            and bool(state.get("records"))
+            and public_catalog_records_are_ready(
+                state.get("records"),
+                state.get("response_language", "zh-Hans"),
+            )
+        )
 
     @staticmethod
-    def _stored_catalog_translation_audit(record_count: int) -> dict[str, Any]:
-        return {
-            "server": "SecFlow Vulnerability Catalog",
-            "tool": "translate_before_persist",
-            "transport": "local-catalog",
-            "status": "completed",
-            "translation_status": "stored",
-            "target_language": "zh-Hans",
-            "storage_stage": "before-persist",
-            "record_count": int(record_count),
-        }
+    def _stored_catalog_record_count(state: AssistantState) -> int:
+        if state.get("intent") == "component_vulnerability_catalog":
+            operation = state.get("catalog_operation")
+            status = operation.get("catalog_translation") if isinstance(operation, dict) else {}
+            count = status.get("record_count") if isinstance(status, dict) else 0
+            return count if type(count) is int and count >= 0 else 0
+        return len(state.get("records") or [])
 
     @classmethod
     def _route_after_compose(cls, state: AssistantState) -> str:
@@ -1311,18 +1296,6 @@ class KnowledgeSecurityGraph:
 
     def _build_messages(self, state: AssistantState) -> list[dict[str, str]]:
         records = state.get("records", [])
-        if state.get("intent") == "vulnerability_lookup" and records:
-            facts = record_for_card_prompt(records[0], state.get("response_language", "zh-Hans"))
-            facts["description"] = record_summary_for_language(
-                records[0], state.get("response_language", "zh-Hans")
-            ).strip()
-            return [
-                {"role": "system", "content": vulnerability_card_prompt(state.get("response_language", "zh-Hans"))},
-                {
-                    "role": "user",
-                    "content": "漏洞事实：\n" + json.dumps(facts, ensure_ascii=False),
-                },
-            ]
         memory_context = state.get("memory_context", {})
         context_parts: list[str] = []
         if memory_context.get("promptContext"):
@@ -1405,15 +1378,6 @@ def add_trace(
         except Exception:  # noqa: BLE001 - progress delivery must never break the graph.
             pass
     return state
-
-
-def _llm_card_translation_enabled() -> bool:
-    return str(os.getenv("SECFLOW_ENABLE_LLM_CARD_TRANSLATION", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 LANGUAGE_NAMES = {
@@ -1982,8 +1946,14 @@ def build_dependency_vulnerability_answer(
                 file_name = finding.get("file") or sink.get("file") or tr(language, "unknown")
                 risk_line = finding.get("risk_line") or sink.get("line") or 0
                 lines.append(f"{index}. {finding.get('title') or tr(language, 'static_finding')} | {file_name}:{risk_line} | {finding.get('record_id') or tr(language, 'not_specified')}")
-                lines.append(f"   {tr(language, 'risk_code')}: {finding.get('vulnerable_snippet') or sink.get('snippet') or tr(language, 'not_specified')}")
-                lines.append(f"   {tr(language, 'fixed_code')}: {finding.get('fixed_snippet') or tr(language, 'no_verified_fix_code')}")
+                lines.append(
+                    f"   {tr(language, 'risk_code')}:\n```text\n"
+                    f"{finding.get('vulnerable_snippet') or sink.get('snippet') or tr(language, 'not_specified')}\n```"
+                )
+                lines.append(
+                    f"   {tr(language, 'fixed_code')}:\n```text\n"
+                    f"{finding.get('fixed_snippet') or tr(language, 'no_verified_fix_code')}\n```"
+                )
                 lines.append(f"   {tr(language, 'fix_advice')}: {finding.get('remediation') or tr(language, 'fix_limit_exposure')}")
                 lines.append(f"   {tr(language, 'cfg')}: {finding.get('cfg') or tr(language, 'not_specified')}")
                 lines.append(f"   {tr(language, 'dfg')}: {finding.get('dfg') or tr(language, 'not_specified')}")
@@ -2052,8 +2022,14 @@ def build_dependency_vulnerability_answer(
             file_name = finding.get("file") or sink.get("file") or "未知文件"
             risk_line = finding.get("risk_line") or sink.get("line") or 0
             lines.append(f"{index}. {finding.get('title') or '静态分析发现'}｜{file_name}:{risk_line}｜关联依赖漏洞 {finding.get('record_id') or '未明确'}")
-            lines.append(f"   风险代码：{finding.get('vulnerable_snippet') or sink.get('snippet') or '未返回'}")
-            lines.append(f"   修复后代码：{finding.get('fixed_snippet') or '未生成可核验的修复代码'}")
+            lines.append(
+                f"   风险代码：\n```text\n"
+                f"{finding.get('vulnerable_snippet') or sink.get('snippet') or '未返回'}\n```"
+            )
+            lines.append(
+                f"   修复后代码：\n```text\n"
+                f"{finding.get('fixed_snippet') or '未生成可核验的修复代码'}\n```"
+            )
             lines.append(f"   修复建议：{finding.get('remediation') or '校验外部输入并收敛危险调用。'}")
             lines.append(f"   CFG：{finding.get('cfg') or '未明确'}")
             lines.append(f"   DFG：{finding.get('dfg') or '未明确'}")
@@ -2605,12 +2581,17 @@ def localized_vulnerability_description(
     user_id: str = "default",
 ) -> str:
     language = normalize_response_language(language)
-    summary = record_summary_for_language(record, language).strip()
-    if language == "en" and summary and not _contains_cjk(summary):
-        return sanitize_public_text(summary)
-    if language == "zh-Hans" and summary and _contains_cjk(summary):
-        return sanitize_public_text(summary)
-    translated = _translate_card_description(summary, language, user_id=user_id) if summary else ""
+    original = str(record.get("summary_original") or record.get("summary") or "").strip()
+    simplified = str(record.get("summary_zh") or "").strip()
+    traditional = str(record.get("summary_zh_hant") or "").strip()
+    if language == "en" and original and not _contains_cjk(original):
+        return sanitize_public_text(original)
+    if language == "zh-Hans" and simplified and _contains_cjk(simplified):
+        return sanitize_public_text(simplified)
+    if language == "zh-Hant" and traditional and _contains_cjk(traditional):
+        return sanitize_public_text(traditional)
+    source = simplified if language == "zh-Hant" and simplified else original
+    translated = _translate_card_description(source, language, user_id=user_id) if source else ""
     if translated:
         return translated
     return _fallback_card_description(record, language)
@@ -2622,31 +2603,25 @@ def _translate_card_description(
     *,
     user_id: str = "default",
 ) -> str:
-    if not _llm_description_translation_enabled():
+    source = str(summary or "").strip()
+    if not source:
         return ""
-    model = active_model_from_env(user_id)
-    if not model:
+    try:
+        result = translation_agent.translate_json(
+            {"description": source},
+            target_language=language,
+            user_id=user_id,
+            session_id="vulnerability-card",
+            content_scope="vulnerability_description",
+        )
+    except Exception:  # noqa: BLE001 - preserve verified facts with a local fallback.
         return ""
-    result = diagnose_chat_completion(
-        model,
-        [
-            {
-                "role": "system",
-                "content": (
-                    f"你是安全漏洞信息翻译助手。请把漏洞描述翻译为{language_name(language)}。"
-                    "保留 CVE、GHSA、产品名、包名、函数名、版本号和技术术语；"
-                    "不要添加情报来源、链接、额外解释或攻击利用步骤；只输出译文正文。"
-                ),
-            },
-            {"role": "user", "content": summary[:1800]},
-        ],
-        user_id=user_id,
-        source="vulnerability_description_translation",
-    )
-    if result.get("status") != "success":
+    if result.audit.get("status") != "completed" or int(result.audit.get("unresolved_fields") or 0):
         return ""
-    translated = sanitize_public_text(str(result.get("answer") or "").strip())
-    return translated if normalize_response_language(language) != "zh-Hans" or _contains_cjk(translated) else ""
+    translated = sanitize_public_text(str(result.payload.get("description") or "").strip())
+    if normalize_response_language(language) in {"zh-Hans", "zh-Hant"} and not _contains_cjk(translated):
+        return ""
+    return translated
 
 
 def _fallback_card_description(record: dict[str, Any], language: str = "zh-Hans") -> str:
@@ -2739,15 +2714,6 @@ def _fallback_card_description(record: dict[str, Any], language: str = "zh-Hans"
 
 def _contains_cjk(text: Any) -> bool:
     return bool(re.search(r"[\u3400-\u9fff]", str(text or "")))
-
-
-def _llm_description_translation_enabled() -> bool:
-    return str(os.getenv("SECFLOW_ENABLE_LLM_DESCRIPTION_TRANSLATION", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def build_empty_vulnerability_card(vulnerability_id: str, language: str = "zh-Hans") -> dict[str, Any]:

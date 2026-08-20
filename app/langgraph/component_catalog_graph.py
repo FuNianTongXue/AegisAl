@@ -11,7 +11,12 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.assistant_intent import assistant_intent_skill_metadata
+from app.agent.translation_policy import (
+    catalog_translation_status_is_complete,
+    issue_stored_translation_attestation,
+)
 from app.catalog_snapshot import component_catalog_snapshot_store
+from app.composition import invoke_generation_pinned_graph
 from app.intelligence import intelligence_service
 from app.langgraph.checkpoints import (
     authorize_pending_interrupt,
@@ -21,8 +26,8 @@ from app.langgraph.checkpoints import (
     register_event_sink,
     unregister_event_sink,
 )
-from app.mcp.component_query import invoke_catalog_excel_mcp, invoke_sankey_mcp
-from app.privacy import sanitize_public_text, severity_cn
+from app.mcp.protocol import call_mcp_tool, publish_mcp_workbook
+from app.privacy import public_answer_payload, sanitize_public_text, severity_cn
 from app.storage import now_iso
 from app.trace_ui import tool_call_presentation
 
@@ -31,6 +36,7 @@ _CATALOG_PREVIEW_RECORD_LIMIT = 8
 
 
 class ComponentCatalogState(TypedDict, total=False):
+    plugin_state: dict[str, Any]
     question: str
     user_id: str
     session_id: str
@@ -84,7 +90,11 @@ class ComponentVulnerabilityCatalogSubgraph:
             self._owners[clean_thread_id] = (user_id, session_id)
         register_event_sink(clean_thread_id, event_sink)
         try:
-            result = self.graph.invoke(seed, self._config(clean_thread_id))
+            result = invoke_generation_pinned_graph(
+                self.graph,
+                seed,
+                self._config(clean_thread_id),
+            )
         finally:
             unregister_event_sink(clean_thread_id)
         return self._public_result(clean_thread_id, result)
@@ -116,7 +126,11 @@ class ComponentVulnerabilityCatalogSubgraph:
             if str(decision).strip().lower() in {"confirm", "confirmed", "yes", "true"}
             else "cancel"
         }
-        result = self.graph.invoke(Command(resume=resume_value), self._config(clean_thread_id))
+        result = invoke_generation_pinned_graph(
+            self.graph,
+            Command(resume=resume_value),
+            self._config(clean_thread_id),
+        )
         public = self._public_result(clean_thread_id, result)
         if public["status"] != "interrupted":
             with self._lock:
@@ -263,7 +277,11 @@ class ComponentVulnerabilityCatalogSubgraph:
     def _build_sankey(state: ComponentCatalogState) -> ComponentCatalogState:
         result = dict(state.get("catalog_result") or {})
         try:
-            sankey = invoke_sankey_mcp({"graph": dict(result.get("graph") or {})})
+            sankey = call_mcp_tool(
+                agent_id="component_agent",
+                tool_id="mcp__d3_sankey__build_component_sankey",
+                arguments={"graph": dict(result.get("graph") or {})},
+            )
             state["chart_data"] = _catalog_chart_data(
                 result,
                 sankey,
@@ -315,13 +333,8 @@ class ComponentVulnerabilityCatalogSubgraph:
         except (KeyError, OSError, ValueError):
             state["error"] = "组件漏洞固定结果已过期，请重新执行查询后再生成 Excel。"
             return _trace(state, "component_catalog.snapshot", state["error"], "warning")
-        # Translation is an ingestion concern.  The former implementation
-        # synchronously sent every untranslated description through the model
-        # here; a 4,000-record export could therefore make hundreds of LLM
-        # calls and leave the confirmation request apparently stuck.  Export
-        # now consumes the immutable catalog snapshot exactly as stored.  Any
-        # pending rows retain their verified original text while the catalog's
-        # background write-through translation continues independently.
+        # Translation is an ingestion concern. Export consumes the immutable
+        # catalog snapshot while the local offline worker backfills pending rows.
         if str(state.get("response_language") or "").lower().startswith("zh"):
             pending_translations = sum(
                 1
@@ -335,7 +348,7 @@ class ComponentVulnerabilityCatalogSubgraph:
                     "component_catalog.translation_cache",
                     (
                         f"已直接复用情报库译文；{pending_translations} 条描述仍在后台补译，"
-                        "本次 Excel 保留核验原文，未重复调用翻译模型。"
+                        "本次 Excel 保留核验原文，未重复执行离线翻译。"
                     ),
                     "warning",
                 )
@@ -343,17 +356,29 @@ class ComponentVulnerabilityCatalogSubgraph:
                 _trace(
                     state,
                     "component_catalog.translation_cache",
-                    "已直接复用情报库中预先存储的中文译文，未调用翻译模型。",
+                    "已直接复用情报库中预先存储的中文译文，未重复执行离线翻译。",
                 )
         try:
-            artifact = invoke_catalog_excel_mcp(
-                {
+            generated_at = str(result.get("generated_at") or now_iso())
+            mcp_result = call_mcp_tool(
+                agent_id="component_agent",
+                tool_id="mcp__excel__export_component_vulnerability_catalog",
+                arguments={
                     "records": records,
                     "start_date": str(result.get("start_date") or ""),
                     "end_date": str(result.get("end_date") or ""),
                     "filters": dict(result.get("filters") or {}),
-                    "generated_at": str(result.get("generated_at") or now_iso()),
-                }
+                    "generated_at": generated_at,
+                },
+            )
+            artifact = publish_mcp_workbook(
+                mcp_result,
+                kind="component",
+                default_file_name="SecFlow-component-vulnerabilities.xlsx",
+                generated_at=generated_at,
+                user_id=str(state.get("user_id") or "default"),
+                session_id=str(state.get("session_id") or ""),
+                task_id=str(state.get("event_sink_id") or ""),
             )
             state["artifacts"] = [artifact]
             state["summary"] = f"组件漏洞目录 Excel 已生成：{artifact.get('file_name')}。"
@@ -468,26 +493,17 @@ def component_catalog_outcome_answer(outcome: dict[str, Any]) -> dict[str, Any]:
         "trace": list(outcome.get("trace") or []),
         "generated_at": now_iso(),
     }
-    language = str(outcome.get("response_language") or "zh-Hans").strip().lower()
-    if language in {"zh", "zh-cn", "zh-hans", "zh_hans"}:
-        status = dict(outcome.get("catalog_translation") or {})
-        ready = int(status.get("ready_records") or 0)
-        total = int(status.get("record_count") or 0)
-        answer["translation"] = {
-            "server": "SecFlow Vulnerability Catalog",
-            "tool": "translate_before_persist",
-            "transport": "local-catalog",
-            # The customer-facing envelope is fully localized even when some
-            # catalog descriptions are still pending; those descriptions use a
-            # deterministic Chinese placeholder until write-through completes.
-            "status": "completed",
-            "translation_status": "stored" if ready >= total else "stored-with-pending",
-            "target_language": "zh-Hans",
-            "storage_stage": "before-persist",
-            "record_count": total,
-            "ready_records": ready,
-            "pending_records": max(0, total - ready),
-        }
+    answer = public_answer_payload(answer)
+    language = str(outcome.get("response_language") or "zh-Hans")
+    status = outcome.get("catalog_translation")
+    if catalog_translation_status_is_complete(status, language):
+        record_count = status["record_count"]
+        answer["translation"] = issue_stored_translation_attestation(
+            answer,
+            target_language=language,
+            record_count=record_count,
+            source="component-vulnerability-catalog",
+        )
     return answer
 
 

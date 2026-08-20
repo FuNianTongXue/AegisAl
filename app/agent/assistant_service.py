@@ -13,6 +13,12 @@ from app.agent.assistant_intent import (
     resolve_catalog_date_range,
 )
 from app.agent.translation_agent import translate_answer_json
+from app.agent.translation_policy import (
+    fail_closed_translation_payload,
+    failed_translation_audit,
+    translation_audit_is_publishable,
+    translation_unavailable_message,
+)
 from app.langgraph.checkpoints import InterruptStateExpiredError
 from app.langgraph.component_catalog_graph import (
     component_catalog_outcome_answer,
@@ -285,7 +291,7 @@ def _recent_high_vulnerability_summary(
             f"- {record.get('id') or '未标明编号'} | {_severity_label_zh(record.get('severity'))} | "
             f"{'、'.join(dict.fromkeys(components)) or '组件待核验'} | {description or '未提供描述'}"
         )
-    lines.append("结果来自本机持续更新、翻译后存储的漏洞目录，本次未重复调用规划或翻译模型。")
+    lines.append("结果来自本机持续更新、翻译后存储的漏洞目录，已复用本地离线译文，本次未重复执行离线翻译。")
     return "\n".join(lines)
 
 
@@ -453,15 +459,25 @@ def translate_assistant_answer(
         )
         trace = list(translated.get("trace") or [])
         audit = translated.get("translation") if isinstance(translated.get("translation"), dict) else {}
+        translation_completed = translation_audit_is_publishable(audit)
+        if not translation_completed:
+            translated = fail_closed_translation_payload(
+                translated,
+                target_language=response_language,
+                audit=audit,
+            )
+            audit = dict(translated["translation"])
+            trace = []
         trace.append(
             {
                 "node": "translation_agent",
-                "status": "completed",
+                "status": "completed" if translation_completed else "warning",
                 "message": (
                     "Translation Agent 已调用翻译 MCP 处理结构化回复："
                     f"目标语言 {audit.get('target_language') or response_language}，"
-                    f"翻译 {int(audit.get('translated_fields') or 0)} 个字段。"
-                ),
+                    f"翻译 {int(audit.get('translated_fields') or 0)} 个字段，"
+                    f"状态为 {audit.get('status') or 'failed'}。"
+                ) if translation_completed else translation_unavailable_message(response_language),
                 "time": now_iso(),
             }
         )
@@ -469,20 +485,16 @@ def translate_assistant_answer(
         return public_answer_payload(translated)
     except Exception as exc:  # noqa: BLE001 - preserve an already verified operation result.
         message = sanitize_public_text(str(exc)).strip() or "翻译 MCP 未返回可用结果"
-        fallback = dict(answer)
-        fallback["translation"] = {
-            "server": "SecFlow Translation MCP",
-            "tool": "translate_json_payload",
-            "status": "failed",
-            "target_language": response_language,
-            "error": message,
-        }
+        fallback = fail_closed_translation_payload(
+            answer,
+            target_language=response_language,
+            audit=failed_translation_audit(response_language, message),
+        )
         fallback["trace"] = [
-            *list(fallback.get("trace") or []),
             {
                 "node": "translation_agent",
                 "status": "warning",
-                "message": f"Translation Agent 调用失败，已保留结构化结果：{message}",
+                "message": str(fallback.get("summary") or ""),
                 "time": now_iso(),
             },
         ]

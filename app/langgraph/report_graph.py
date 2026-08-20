@@ -14,20 +14,15 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.translation_agent import translation_agent
+from app.agent.translation_policy import translation_audit_is_publishable
+from app.composition import invoke_generation_pinned_graph
 from app.privacy import sanitize_public_text
 from app.langgraph.checkpoints import (
     authorize_pending_interrupt,
     delete_checkpoint_thread,
     persistent_checkpointer,
 )
-from app.mcp.report_charts import invoke_report_chart_mcp
-from app.mcp.report_excel import invoke_report_excel_mcp
-from app.mcp.report_markdown import invoke_report_markdown_mcp
-from app.mcp.report_mermaid import invoke_report_mermaid_mcp
-from app.mcp.report_pdf import invoke_report_pdf_mcp
-from app.mcp.report_sarif import invoke_report_sarif_mcp
-from app.mcp.report_word import invoke_report_word_mcp
-from app.mcp.report_template import invoke_report_template_mcp
+from app.mcp.protocol import call_mcp_tool, read_mcp_artifact, release_mcp_artifacts
 from app.report_pipeline import build_report_plan, validate_report_quality
 from app.reports import (
     build_report_document_json,
@@ -49,6 +44,7 @@ _REPORT_PROGRESS_SINKS: dict[str, Any] = {}
 
 
 class ReportSubgraphState(TypedDict, total=False):
+    plugin_state: dict[str, Any]
     operation_thread_id: str
     action: str
     question: str
@@ -72,7 +68,7 @@ class ReportSubgraphState(TypedDict, total=False):
     report_qa: dict[str, Any]
     report_draft: dict[str, Any]
     report_document: dict[str, Any]
-    rendered_artifacts: dict[str, str]
+    rendered_artifacts: dict[str, Any]
     report: dict[str, Any]
     artifacts: list[dict[str, Any]]
     cancelled: bool
@@ -126,7 +122,11 @@ class ReportCapabilitySubgraph:
         }
         with self._lock:
             self._owners[clean_thread_id] = (user_id, session_id)
-        result = self.graph.invoke(seed, self._config(clean_thread_id))
+        result = invoke_generation_pinned_graph(
+            self.graph,
+            seed,
+            self._config(clean_thread_id),
+        )
         return self._public_result(clean_thread_id, result)
 
     def resume(
@@ -162,7 +162,11 @@ class ReportCapabilitySubgraph:
             with _REPORT_PROGRESS_LOCK:
                 _REPORT_PROGRESS_SINKS[clean_thread_id] = event_sink
         try:
-            result = self.graph.invoke(Command(resume=resume_value), self._config(clean_thread_id))
+            result = invoke_generation_pinned_graph(
+                self.graph,
+                Command(resume=resume_value),
+                self._config(clean_thread_id),
+            )
         finally:
             if event_sink is not None:
                 with _REPORT_PROGRESS_LOCK:
@@ -458,6 +462,13 @@ class ReportCapabilitySubgraph:
             )
             translated = result.payload
             audit = dict(result.audit)
+            if (
+                audit.get("target_language") != str(state.get("response_language") or "zh-Hans")
+                or not translation_audit_is_publishable(audit)
+            ):
+                raise RuntimeError(
+                    "翻译 MCP 未生成完整的目标语言报告数据"
+                )
             source_hash = str(((translated.get("audit") or {}).get("payload_sha256") or ""))
             if not source_hash:
                 raise ValueError("translated report JSON is missing its verified payload hash")
@@ -512,14 +523,17 @@ class ReportCapabilitySubgraph:
     def _build_charts(state: ReportSubgraphState) -> ReportSubgraphState:
         invoked_at = now_iso()
         try:
-            charts = invoke_report_chart_mcp(
-                {"report_json": state.get("scan_json") or {}}
+            charts = call_mcp_tool(
+                agent_id="report_agent",
+                tool_id="mcp__report_chart__build_scan_report_charts",
+                arguments={"report_json": state.get("scan_json") or {}},
             )
             state["report_charts"] = charts
             state["report_mcp"] = {
                 "server": "SecFlow Report Chart MCP",
                 "tool": "build_scan_report_charts",
-                "transport": "in-process",
+                "transport": str((charts.get("_mcp_runtime") or {}).get("transport") or "stdio"),
+                "endpoint": "managed-child-process",
                 "status": "completed",
                 "invoked_at": invoked_at,
                 "fact_count": int(charts.get("fact_count") or 0),
@@ -552,7 +566,8 @@ class ReportCapabilitySubgraph:
             state["report_mcp"] = {
                 "server": "SecFlow Report Chart MCP",
                 "tool": "build_scan_report_charts",
-                "transport": "in-process",
+                "transport": "stdio",
+                "endpoint": "managed-child-process",
                 "status": "failed",
                 "invoked_at": invoked_at,
                 "error": message,
@@ -577,7 +592,11 @@ class ReportCapabilitySubgraph:
     def _build_sarif(state: ReportSubgraphState) -> ReportSubgraphState:
         invoked_at = now_iso()
         try:
-            result = invoke_report_sarif_mcp({"report_json": state.get("scan_json") or {}})
+            result = call_mcp_tool(
+                agent_id="report_agent",
+                tool_id="mcp__report_sarif__build_scan_sarif",
+                arguments={"report_json": state.get("scan_json") or {}},
+            )
             sarif = result.get("sarif") if isinstance(result.get("sarif"), dict) else {}
             digest = hashlib.sha256(
                 json.dumps(sarif, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -657,12 +676,14 @@ class ReportCapabilitySubgraph:
         invoked_at = now_iso()
         plan = state.get("report_plan") or {}
         try:
-            template = invoke_report_template_mcp(
-                {
+            template = call_mcp_tool(
+                agent_id="report_agent",
+                tool_id="mcp__report_template__resolve_report_template",
+                arguments={
                     "template_id": str(plan.get("template_id") or "security"),
                     "platform": "auto",
                     "language": str(state.get("response_language") or "zh-Hans"),
-                }
+                },
             )
             state["report_template"] = template
             encoded = json.dumps(template, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -799,15 +820,29 @@ class ReportCapabilitySubgraph:
     @staticmethod
     def _build_mermaid(state: ReportSubgraphState) -> ReportSubgraphState:
         invoked_at = now_iso()
+        result: dict[str, Any] | None = None
         try:
-            result = invoke_report_mermaid_mcp(
-                {
+            result = call_mcp_tool(
+                agent_id="report_agent",
+                tool_id="mcp__report_mermaid__build_report_mermaid",
+                arguments={
                     "report_json": state.get("scan_json") or {},
                     "report_charts": state.get("report_charts") or {},
                     "sarif": state.get("report_sarif") or {},
                     "language": state.get("response_language") or "zh-Hans",
-                }
+                },
             )
+            diagrams = [dict(item) for item in result.get("diagrams") or [] if isinstance(item, dict)]
+            for diagram in diagrams:
+                artifact_index = diagram.get("artifact_index")
+                if not isinstance(artifact_index, int):
+                    raise ValueError("Mermaid MCP did not return a Host artifact index")
+                image = read_mcp_artifact(result, index=artifact_index)
+                image_digest = hashlib.sha256(image).hexdigest()
+                if image_digest != str(diagram.get("image_sha256") or ""):
+                    raise ValueError("Mermaid MCP image hash verification failed")
+                diagram["image_base64"] = ""
+            result["diagrams"] = diagrams
             state["report_mermaid"] = result
             encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             audit = _format_mcp_audit(
@@ -819,7 +854,7 @@ class ReportCapabilitySubgraph:
                 media_type="application/vnd.secflow.mermaid+json",
                 artifact_size=sum(
                     len(str(item.get("source") or "").encode("utf-8"))
-                    + len(str(item.get("image_base64") or "")) * 3 // 4
+                    + _mermaid_artifact_size(result, item)
                     for item in result.get("diagrams") or []
                 ),
                 renderer=str(result.get("renderer") or "mermaid"),
@@ -847,6 +882,8 @@ class ReportCapabilitySubgraph:
                 ),
             )
         except Exception as exc:  # noqa: BLE001
+            if result is not None:
+                release_mcp_artifacts(result)
             return _format_mcp_failure(
                 state,
                 server="SecFlow Mermaid MCP",
@@ -861,13 +898,15 @@ class ReportCapabilitySubgraph:
         invoked_at = now_iso()
         draft = state.get("report_draft") or {}
         try:
-            result = invoke_report_markdown_mcp(
-                {
+            result = call_mcp_tool(
+                agent_id="report_agent",
+                tool_id="mcp__report_markdown__render_markdown_report",
+                arguments={
                     "report_json": state.get("scan_json") or {},
                     "markdown": str(draft.get("content") or ""),
-                    "mermaid": state.get("report_mermaid") or {},
+                    "mermaid": _hydrate_mermaid_artifacts(state.get("report_mermaid") or {}),
                     "language": state.get("response_language") or "zh-Hans",
-                }
+                },
             )
             content = str(result.get("content") or "")
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -918,7 +957,7 @@ class ReportCapabilitySubgraph:
             node="report.word_mcp",
             report_format="docx",
             signature=b"PK",
-            invoke=invoke_report_word_mcp,
+            tool_id="mcp__report_word__render_word_report",
         )
 
     @staticmethod
@@ -926,7 +965,7 @@ class ReportCapabilitySubgraph:
         try:
             _refresh_report_document(state)
             result = validate_report_quality(
-                state.get("report_document") or {},
+                _materialize_report_document(state),
                 state.get("report_plan") or {},
             )
             state["report_qa"] = result
@@ -954,7 +993,7 @@ class ReportCapabilitySubgraph:
             node="report.excel_mcp",
             report_format="xlsx",
             signature=b"PK",
-            invoke=invoke_report_excel_mcp,
+            tool_id="mcp__report_excel__render_excel_report",
         )
 
     @staticmethod
@@ -966,7 +1005,7 @@ class ReportCapabilitySubgraph:
             node="report.pdf_mcp",
             report_format="pdf",
             signature=b"%PDF",
-            invoke=invoke_report_pdf_mcp,
+            tool_id="mcp__report_pdf__render_pdf_report",
         )
 
     @staticmethod
@@ -979,12 +1018,12 @@ class ReportCapabilitySubgraph:
             metadata = dict(draft.get("metadata") or {})
             metadata["report_mcps"] = list(state.get("report_mcps") or [])
             metadata["report_mermaid"] = _mermaid_audit_payload(state.get("report_mermaid") or {})
-            artifacts = {
-                "md": str(draft.get("content") or ""),
-                "docx": base64.b64decode(str(rendered.get("docx") or ""), validate=True),
-                "xlsx": base64.b64decode(str(rendered.get("xlsx") or ""), validate=True),
-                "pdf": base64.b64decode(str(rendered.get("pdf") or ""), validate=True),
-            }
+            artifacts: dict[str, Any] = {"md": str(draft.get("content") or "")}
+            for report_format in ("docx", "xlsx", "pdf"):
+                pending = rendered.get(report_format)
+                if not isinstance(pending, dict):
+                    raise ValueError(f"Missing pending {report_format.upper()} Host artifact")
+                artifacts[report_format] = read_mcp_artifact(pending)
             saved = _store_for_state(state).save_json_report(
                 str(draft.get("title") or "SecFlow 安全报告"),
                 str(draft.get("content") or ""),
@@ -995,7 +1034,7 @@ class ReportCapabilitySubgraph:
                 metadata=metadata,
                 input_fingerprint=str(draft.get("input_fingerprint") or ""),
                 rendered_artifacts=artifacts,
-                report_document=state.get("report_document") or {},
+                report_document=_materialize_report_document(state),
             )
             missing = set(REPORT_FORMATS) - set(saved.get("available_formats") or [])
             if missing:
@@ -1003,8 +1042,17 @@ class ReportCapabilitySubgraph:
             state["report"] = saved
             state["report_ids"] = [str(saved.get("id") or "")]
             state["summary"] = f"报告已生成：{saved.get('file_name') or saved.get('title')}。"
+            for pending in rendered.values():
+                if isinstance(pending, dict):
+                    release_mcp_artifacts(pending)
+            release_mcp_artifacts(state.get("report_mermaid") or {})
+            state["rendered_artifacts"] = {}
             return _trace(state, "report.persist", state["summary"])
         except Exception as exc:  # noqa: BLE001
+            for pending in rendered.values():
+                if isinstance(pending, dict):
+                    release_mcp_artifacts(pending)
+            release_mcp_artifacts(state.get("report_mermaid") or {})
             state["error"] = sanitize_public_text(str(exc)).strip() or "报告制品保存失败。"
             return _trace(state, "report.persist", f"报告制品保存失败：{state['error']}", "warning")
 
@@ -1157,6 +1205,21 @@ def _trace(
 
 
 def _refresh_report_document(state: ReportSubgraphState) -> None:
+    state["report_document"] = _build_report_document_for_state(
+        state,
+        inline_visuals=False,
+    )
+
+
+def _materialize_report_document(state: ReportSubgraphState) -> dict[str, Any]:
+    return _build_report_document_for_state(state, inline_visuals=True)
+
+
+def _build_report_document_for_state(
+    state: ReportSubgraphState,
+    *,
+    inline_visuals: bool,
+) -> dict[str, Any]:
     draft = state.get("report_draft") or {}
     metadata = dict(draft.get("metadata") or {})
     metadata["report_mcps"] = list(state.get("report_mcps") or [])
@@ -1166,12 +1229,17 @@ def _refresh_report_document(state: ReportSubgraphState) -> None:
     metadata["report_qa"] = state.get("report_qa") or metadata.get("report_qa") or {}
     draft["metadata"] = metadata
     state["report_draft"] = draft
-    state["report_document"] = build_report_document_json(
+    visuals = (
+        _hydrate_mermaid_artifacts(state.get("report_mermaid") or {})
+        if inline_visuals
+        else _mermaid_audit_payload(state.get("report_mermaid") or {})
+    )
+    return build_report_document_json(
         str(draft.get("source_content") or draft.get("content") or ""),
         metadata,
         report_source=state.get("scan_json") or {},
         sarif=state.get("report_sarif") or {},
-        visuals=state.get("report_mermaid") or {},
+        visuals=visuals,
         rendered_markdown=str(draft.get("content") or ""),
     )
 
@@ -1184,18 +1252,24 @@ def _render_binary_mcp(
     node: str,
     report_format: str,
     signature: bytes,
-    invoke: Any,
+    tool_id: str,
 ) -> ReportSubgraphState:
     invoked_at = now_iso()
+    result: dict[str, Any] | None = None
+    retained = False
     try:
         _refresh_report_document(state)
-        result = invoke(
-            {
-                "report_document": state.get("report_document") or {},
-                "mermaid": state.get("report_mermaid") or {},
-            }
+        arguments = {"report_document": _materialize_report_document(state)}
+        if report_format in {"docx", "pdf"}:
+            arguments["mermaid"] = _hydrate_mermaid_artifacts(
+                state.get("report_mermaid") or {}
+            )
+        result = call_mcp_tool(
+            agent_id="report_agent",
+            tool_id=tool_id,
+            arguments=arguments,
         )
-        payload = base64.b64decode(str(result.get("artifact_base64") or ""), validate=True)
+        payload = read_mcp_artifact(result)
         if not payload.startswith(signature):
             raise ValueError(f"{server} returned an invalid {report_format.upper()} signature")
         digest = hashlib.sha256(payload).hexdigest()
@@ -1203,8 +1277,14 @@ def _render_binary_mcp(
             raise ValueError(f"{server} output hash verification failed")
         state["rendered_artifacts"] = {
             **state.get("rendered_artifacts", {}),
-            report_format: base64.b64encode(payload).decode("ascii"),
+            report_format: {
+                "artifacts": list(result.get("artifacts") or []),
+                "_mcp_runtime": dict(result.get("_mcp_runtime") or {}),
+                "output_sha256": digest,
+                "media_type": str(result.get("media_type") or "application/octet-stream"),
+            },
         }
+        retained = True
         audit = _format_mcp_audit(
             server=server,
             tool=tool,
@@ -1233,6 +1313,8 @@ def _render_binary_mcp(
             ),
         )
     except Exception as exc:  # noqa: BLE001
+        if result is not None and not retained:
+            release_mcp_artifacts(result)
         return _format_mcp_failure(
             state,
             server=server,
@@ -1257,7 +1339,8 @@ def _format_mcp_audit(
     return {
         "server": server,
         "tool": tool,
-        "transport": "in-process",
+        "transport": "stdio",
+        "endpoint": "managed-child-process",
         "status": "completed",
         "invoked_at": invoked_at,
         "input_sha256": input_sha256,
@@ -1280,13 +1363,44 @@ def _append_format_audit(state: ReportSubgraphState, audit: dict[str, Any]) -> N
 
 
 def _mermaid_audit_payload(value: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(value or {})
+    payload = {
+        key: item
+        for key, item in dict(value or {}).items()
+        if key not in {"artifacts", "_mcp_runtime"}
+    }
     payload["diagrams"] = [
         {key: item for key, item in diagram.items() if key != "image_base64"}
         for diagram in payload.get("diagrams") or []
         if isinstance(diagram, dict)
     ]
     return payload
+
+
+def _hydrate_mermaid_artifacts(value: dict[str, Any]) -> dict[str, Any]:
+    """Build transient inline visuals without placing binary data in checkpoints."""
+
+    hydrated = _mermaid_audit_payload(value)
+    diagrams = [dict(item) for item in hydrated.get("diagrams") or [] if isinstance(item, dict)]
+    for diagram in diagrams:
+        index = diagram.get("artifact_index")
+        if not isinstance(index, int):
+            raise ValueError("Mermaid diagram has no Host artifact index")
+        payload = read_mcp_artifact(value, index=index)
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != str(diagram.get("image_sha256") or ""):
+            raise ValueError("Mermaid Host artifact hash verification failed")
+        diagram["image_base64"] = base64.b64encode(payload).decode("ascii")
+    hydrated["diagrams"] = diagrams
+    return hydrated
+
+
+def _mermaid_artifact_size(result: dict[str, Any], diagram: dict[str, Any]) -> int:
+    index = diagram.get("artifact_index")
+    artifacts = result.get("artifacts")
+    if not isinstance(index, int) or not isinstance(artifacts, list) or index >= len(artifacts):
+        return 0
+    item = artifacts[index]
+    return int(item.get("size_bytes") or 0) if isinstance(item, dict) else 0
 
 
 def _report_metrics_from_scan_json(
@@ -1361,7 +1475,8 @@ def _format_mcp_failure(
     audit = {
         "server": server,
         "tool": tool,
-        "transport": "in-process",
+        "transport": "stdio",
+        "endpoint": "managed-child-process",
         "status": "failed",
         "invoked_at": invoked_at,
         "error": message,

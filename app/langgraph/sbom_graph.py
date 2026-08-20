@@ -12,6 +12,7 @@ from langgraph.types import Command, interrupt
 
 from app.agent.assistant_intent import sbom_skill_metadata
 from app.agent.task_agent import collect_project_sbom, resolve_workspace_path
+from app.composition import invoke_generation_pinned_graph
 from app.langgraph.checkpoints import (
     authorize_pending_interrupt,
     delete_checkpoint_thread,
@@ -20,7 +21,7 @@ from app.langgraph.checkpoints import (
     register_event_sink,
     unregister_event_sink,
 )
-from app.mcp.sbom import invoke_sbom_excel_mcp
+from app.mcp.protocol import call_mcp_tool, publish_mcp_workbook
 from app.privacy import sanitize_public_text
 from app.sbom import build_cyclonedx_sbom, canonical_sbom_json, match_sbom_vulnerabilities
 from app.storage import now_iso
@@ -28,6 +29,7 @@ from app.trace_ui import tool_call_presentation
 
 
 class SBOMState(TypedDict, total=False):
+    plugin_state: dict[str, Any]
     question: str
     workspace_path: str
     user_id: str
@@ -94,7 +96,11 @@ class ProjectSBOMSubgraph:
             self._owners[clean_thread_id] = (user_id, session_id)
         register_event_sink(clean_thread_id, event_sink)
         try:
-            result = self.graph.invoke(seed, self._config(clean_thread_id))
+            result = invoke_generation_pinned_graph(
+                self.graph,
+                seed,
+                self._config(clean_thread_id),
+            )
         finally:
             unregister_event_sink(clean_thread_id)
         return self._public_result(clean_thread_id, result)
@@ -126,7 +132,11 @@ class ProjectSBOMSubgraph:
             if str(decision).strip().lower() in {"confirm", "confirmed", "yes", "true"}
             else "cancel"
         }
-        result = self.graph.invoke(Command(resume=resume_value), self._config(clean_thread_id))
+        result = invoke_generation_pinned_graph(
+            self.graph,
+            Command(resume=resume_value),
+            self._config(clean_thread_id),
+        )
         public = self._public_result(clean_thread_id, result)
         if public["status"] not in {"interrupted"}:
             with self._lock:
@@ -447,13 +457,27 @@ class ProjectSBOMSubgraph:
     def _generate_excel(state: SBOMState) -> SBOMState:
         try:
             workspace_name = Path(state["workspace_path"]).name
-            artifact = invoke_sbom_excel_mcp(
-                {
+            generated_at = str(
+                ((state.get("sbom") or {}).get("metadata") or {}).get("timestamp") or now_iso()
+            )
+            result = call_mcp_tool(
+                agent_id="sbom_agent",
+                tool_id="mcp__sbom_excel__export_project_sbom_excel",
+                arguments={
                     "sbom_json": canonical_sbom_json(state.get("sbom") or {}),
                     "matching_json": json.dumps(state.get("matching") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                     "project_name": workspace_name,
-                    "generated_at": str(((state.get("sbom") or {}).get("metadata") or {}).get("timestamp") or now_iso()),
-                }
+                    "generated_at": generated_at,
+                },
+            )
+            artifact = publish_mcp_workbook(
+                result,
+                kind="sbom",
+                default_file_name=f"SecFlow-{workspace_name}-SBOM.xlsx",
+                generated_at=generated_at,
+                user_id=str(state.get("user_id") or "default"),
+                session_id=str(state.get("session_id") or ""),
+                task_id=str(state.get("event_sink_id") or ""),
             )
             state["artifacts"] = [artifact]
             state["summary"] = f"项目 SBOM Excel 已生成：{artifact.get('file_name')}。"

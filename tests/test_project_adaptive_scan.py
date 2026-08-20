@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
+from app.agent import project_adaptive_scan as project_adaptive_scan_module
 from app.project_adaptive_scan import (
     PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION,
     apply_overlay_classification,
@@ -16,6 +17,7 @@ from app.project_adaptive_scan import (
     validate_project_overlay,
 )
 from app.reports import build_agent_task_markdown_report
+from app.skills.runtime import default_skill_registry
 from app.task_agent import TaskAgentGraph
 from app.semgrep_tool import SemgrepTool
 
@@ -62,6 +64,48 @@ def scan_result() -> dict:
 
 
 class ProjectAdaptiveScanTests(unittest.TestCase):
+    def test_adaptive_skill_consumer_uses_the_plugin_registry(self) -> None:
+        registered_metadata = {
+            "name": "secflow-project-adaptive-scan",
+            "sha256": "b" * 64,
+            "prompt_version": PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION,
+        }
+        with (
+            patch.object(
+                project_adaptive_scan_module.skill_runtime,
+                "load_skill",
+                return_value="# Registered adaptive skill",
+            ) as load_skill,
+            patch.object(
+                project_adaptive_scan_module.skill_runtime,
+                "skill_metadata",
+                return_value=registered_metadata,
+            ) as skill_metadata,
+        ):
+            self.assertEqual(
+                load_project_adaptive_scan_skill(),
+                "# Registered adaptive skill",
+            )
+            self.assertEqual(project_adaptive_skill_metadata(), registered_metadata)
+
+        load_skill.assert_called_once_with("secflow-project-adaptive-scan")
+        skill_metadata.assert_called_once_with(
+            "secflow-project-adaptive-scan",
+            prompt_version=PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION,
+        )
+
+    def test_every_packaged_skill_is_valid_and_loadable_from_the_registry(self) -> None:
+        registry = default_skill_registry()
+        catalog = registry.catalog()
+
+        self.assertGreaterEqual(len(catalog), 7)
+        for item in catalog:
+            document = registry.load(item["id"])
+            self.assertEqual(document.name, item["id"])
+            self.assertEqual(document.sha256, item["sha256"])
+            self.assertTrue(document.description)
+            self.assertTrue(document.body)
+
     def test_packaged_skill_and_prompt_metadata_are_auditable(self) -> None:
         skill = load_project_adaptive_scan_skill()
         metadata = project_adaptive_skill_metadata()

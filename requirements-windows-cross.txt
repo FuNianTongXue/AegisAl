@@ -6,9 +6,11 @@ truststore>=0.10.4,<0.11
 langgraph>=0.2.0
 langgraph-checkpoint-sqlite>=3.1.0,<4.0.0
 mcp>=1.23.0,<2.0.0
+jsonschema>=4.23.0,<5.0.0
 psycopg[binary]>=3.2.0
 cryptography>=42.0.0
 packaging>=24.0
+PyYAML>=6.0.2,<7.0.0
 tree-sitter>=0.25.0,<0.26.0
 tree-sitter-java>=0.23.5,<0.24.0
 tree-sitter-python>=0.23.6,<0.26.0
@@ -23,5 +25,9 @@ reportlab>=4.2.0
 Pillow>=10.4.0,<13.0.0
 python-docx>=1.1.2,<2.0.0
 xlsxwriter>=3.2.5,<4.0.0
+numpy>=2.0,<3.0
+ctranslate2==4.8.1
+sentencepiece==0.2.2
+opencc-python-reimplemented==0.1.7
 pywin32>=308
 tzdata>=2025.2

@@ -14,7 +14,13 @@ from fastapi.testclient import TestClient
 from app.agent.task_agent import TaskAgentGraph, TaskAgentService
 from app.agent.task_store import AgentTaskStore
 from app.api.routes import application
-from app.mcp.code_scan import _parent_process_is_alive, _watch_parent, code_scan_mcp_spec
+from app.mcp.code_scan import (
+    _parent_process_is_alive,
+    _validate_cancel_marker,
+    _watch_parent,
+    code_scan_mcp_spec,
+    main as code_scan_main,
+)
 from app.mcp.code_scan_client import CodeScanMCPClient, _server_environment
 from app.mcp.license_scan import identify_workspace_licenses, invoke_license_scan_mcp, license_scan_mcp_spec
 from app.reports import ReportStore
@@ -60,6 +66,10 @@ def completed_scan_result(language: str = "python") -> dict:
 
 
 class CodeScanMCPTests(unittest.TestCase):
+    def test_code_scan_cli_rejects_retired_sse_transport(self) -> None:
+        with self.assertRaises(SystemExit):
+            code_scan_main(["--transport", "sse"])
+
     def test_parent_watch_exits_when_parent_is_no_longer_alive(self) -> None:
         with (
             patch("app.mcp.code_scan._parent_process_is_alive", return_value=False),
@@ -88,7 +98,7 @@ class CodeScanMCPTests(unittest.TestCase):
             "PYTHONPATH": "/Applications/SecFlow.app/backend/_internal",
         }
         with (
-            tempfile.TemporaryDirectory() as temp_dir,
+            tempfile.TemporaryDirectory(prefix="secflow-code-scan-runtime-") as temp_dir,
             patch.dict(os.environ, inherited, clear=True),
             patch.object(__import__("sys"), "frozen", True, create=True),
         ):
@@ -99,15 +109,36 @@ class CodeScanMCPTests(unittest.TestCase):
         self.assertNotIn("_PYI_PARENT_PROCESS_LEVEL", environment)
         self.assertNotIn("PYINSTALLER_STRICT_UNPACK_MODE", environment)
         self.assertNotIn("PYTHONPATH", environment)
+        self.assertEqual(environment["SECFLOW_CODE_SCAN_CANCEL_ROOT"], str(Path(temp_dir).resolve()))
+        self.assertNotIn("SECFLOW_SCAN_TEMP_ROOT", environment)
 
-    def test_public_mcp_spec_uses_sse_without_exposing_capability_token(self) -> None:
+    def test_cancel_marker_is_restricted_to_a_private_runtime_subdirectory(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="secflow-code-scan-runtime-") as runtime_dir,
+            tempfile.TemporaryDirectory() as outside_dir,
+        ):
+            cancel_dir = Path(runtime_dir) / "secflow-code-scan-cancel-test"
+            cancel_dir.mkdir(mode=0o700)
+            marker = cancel_dir / "cancel"
+            with patch.dict(
+                os.environ,
+                {"SECFLOW_CODE_SCAN_CANCEL_ROOT": runtime_dir},
+                clear=False,
+            ):
+                self.assertEqual(_validate_cancel_marker(str(marker)), marker.resolve())
+                with self.assertRaisesRegex(ValueError, "private runtime directory"):
+                    _validate_cancel_marker(str(Path(outside_dir) / "cancel"))
+                with self.assertRaisesRegex(ValueError, "private runtime directory"):
+                    _validate_cancel_marker(str(Path(runtime_dir) / "cancel"))
+
+    def test_public_mcp_spec_uses_stdio_without_exposing_capability_token(self) -> None:
         spec = asyncio.run(code_scan_mcp_spec())
         license_spec = asyncio.run(license_scan_mcp_spec())
         scan_tool = next(item for item in spec["tools"] if item["name"] == "scan_language")
         license_tool = next(item for item in license_spec["tools"] if item["name"] == "identify_project_licenses")
 
-        self.assertEqual(spec["transport"], "sse")
-        self.assertEqual(spec["endpoint"], "loopback-managed")
+        self.assertEqual(spec["transport"], "stdio")
+        self.assertEqual(spec["endpoint"], "managed-child-process")
         self.assertNotIn("capability_token", scan_tool["input_schema"]["properties"])
         self.assertNotIn("capability_token", scan_tool["input_schema"].get("required") or [])
         self.assertNotIn("identify_project_licenses", {item["name"] for item in spec["tools"]})
@@ -167,7 +198,7 @@ class CodeScanMCPTests(unittest.TestCase):
         self.assertEqual([item["spdx_id"] for item in scan["licenses"]], ["MIT"])
         self.assertFalse(scan["licenses"][0]["osi"]["listed"])
 
-    def test_sse_client_runs_the_engine_in_an_independent_process(self) -> None:
+    def test_stdio_client_runs_the_engine_in_an_independent_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "app.py").write_text("def run(value):\n    return value\n", encoding="utf-8")
@@ -187,7 +218,7 @@ class CodeScanMCPTests(unittest.TestCase):
                 client.shutdown()
 
         audit = result["_scan_mcp"]
-        self.assertEqual(audit["transport"], "sse")
+        self.assertEqual(audit["transport"], "stdio")
         self.assertNotEqual(audit["process_id"], os.getpid())
         self.assertEqual(len(audit["input_sha256"]), 64)
         self.assertEqual(len(audit["output_sha256"]), 64)
@@ -216,21 +247,16 @@ class CodeScanMCPTests(unittest.TestCase):
 
     def test_cancel_active_scan_terminates_mcp_process_and_removes_private_runtime(self) -> None:
         client = CodeScanMCPClient(startup_timeout=10)
-        endpoint, _token = client._ensure_server()
-        process = client._process
+        host, _token = client._ensure_server()
         runtime_path = client._runtime_path
-        log_path = client._log_path
 
-        self.assertTrue(endpoint.startswith("http://127.0.0.1:"))
-        self.assertIsNotNone(process)
+        self.assertEqual(host.snapshot()["servers"][0]["transport"], "stdio")
         self.assertIsNotNone(runtime_path)
         self.assertTrue(runtime_path.is_dir())
         client.cancel_active_scan()
 
-        self.assertIsNotNone(process.poll())
         self.assertFalse(runtime_path.exists())
-        self.assertFalse(log_path.exists())
-        self.assertIsNone(client._process)
+        self.assertIsNone(client._host)
 
     def test_frozen_runtime_allows_for_onefile_mcp_cold_start(self) -> None:
         with patch.object(sys, "frozen", True, create=True):
@@ -245,7 +271,7 @@ class CodeScanMCPTests(unittest.TestCase):
         self.addCleanup(client.shutdown)
 
         self.assertEqual(client._startup_timeout, 75.0)
-        self.assertGreater(client._sse_read_timeout, client._startup_timeout)
+        self.assertGreater(client._read_timeout, client._startup_timeout)
 
     def test_frozen_evaluation_keeps_the_existing_in_process_engine_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -264,7 +290,7 @@ class CodeScanMCPTests(unittest.TestCase):
         self.assertFalse(state["result"]["scan_mcp"]["enabled"])
         self.assertEqual(state["result"]["scan_mcp"]["transport"], "in-process")
 
-    def test_user_api_scan_report_and_download_flow_records_sse_mcp_audit(self) -> None:
+    def test_user_api_scan_report_and_download_flow_records_stdio_mcp_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -335,18 +361,20 @@ class CodeScanMCPTests(unittest.TestCase):
                         params={"user_id": "analyst"},
                         json={"generate": True},
                     )
+                    self.assertEqual(generated.status_code, 200, generated.text)
                     downloaded = client.post(
                         f"/api/tasks/{task_id}/report-download-decision",
                         params={"user_id": "analyst"},
                         json={"confirm": True, "format": "html"},
                     )
+                    self.assertEqual(downloaded.status_code, 200, downloaded.text)
                     report_content = reports.get_report(generated.json()["data"]["report"]["id"])["content"]
             finally:
                 service.shutdown(wait=True)
 
         self.assertEqual(task["status"], "completed")
         self.assertTrue(task["result"]["scan_mcp"]["enabled"])
-        self.assertEqual(task["result"]["scan_mcp"]["transport"], "sse")
+        self.assertEqual(task["result"]["scan_mcp"]["transport"], "stdio")
         self.assertEqual(
             task["result"]["languages"],
             ["java", "python", "go", "c", "cpp", "csharp", "rust", "solidity"],
@@ -404,8 +432,6 @@ class CodeScanMCPTests(unittest.TestCase):
                 "compose_result",
             }.issubset(completed_nodes)
         )
-        self.assertEqual(generated.status_code, 200, generated.text)
-        self.assertEqual(downloaded.status_code, 200, downloaded.text)
         self.assertEqual(downloaded.json()["data"]["artifact"]["media_type"], "text/html; charset=utf-8")
         self.assertIn("### 5.1 项目许可识别", report_content)
         self.assertIn("MIT", report_content)

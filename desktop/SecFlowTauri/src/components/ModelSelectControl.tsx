@@ -70,7 +70,7 @@ export function ModelSelectControl({
               autoFocus
               aria-label="模型 ID"
               value={newModel}
-              placeholder="输入模型 ID"
+              placeholder="输入模型 ID…"
               disabled={controlsDisabled}
               onChange={(event) => setNewModel(event.target.value)}
               onKeyDown={(event) => {

@@ -13,6 +13,8 @@ import app.component_mcp as component_mcp_module
 import app.component_query_subgraph as component_subgraph_module
 import app.graph as graph_module
 import app.main as main_module
+import app.mcp.protocol as mcp_protocol_module
+from app.catalog_translation import CATALOG_TRANSLATION_VERSION
 from app.component_mcp import ComponentArtifactStore, component_mcp_specs
 from app.mcp.component_query import build_component_vulnerability_detail
 from app.component_query_subgraph import looks_like_component_query, parse_component_query
@@ -171,6 +173,104 @@ class ComponentQuerySubgraphTests(unittest.TestCase):
         self.assertEqual(vector_only.cvss.score, 5.9)
         self.assertEqual(vector_only.cvss.rating, "中危")
 
+    def test_detail_mcp_projects_only_accepted_catalog_translation(self) -> None:
+        record = {
+            "id": "CVE-2026-10003",
+            "title": "English vulnerability title",
+            "summary": "Remote attackers can execute arbitrary code.",
+            "title_original": "English vulnerability title",
+            "summary_original": "Remote attackers can execute arbitrary code.",
+            "title_zh": "远程代码执行漏洞",
+            "summary_zh": "远程攻击者可能执行任意代码。",
+            "catalog_translation": {
+                "version": CATALOG_TRANSLATION_VERSION,
+                "status": "translated",
+                "target_language": "zh-Hans",
+            },
+        }
+        with patch(
+            "app.intelligence.translation_agent.translate_json",
+            side_effect=AssertionError("Component Detail MCP must not call the Host TranslationAgent"),
+        ) as translator:
+            detail = build_component_vulnerability_detail(
+                component={"name": "demo", "version": "2.3.0", "ecosystem": "PyPI"},
+                records=[record],
+                response_language="zh-Hans",
+            ).vulnerabilities[0]
+
+        self.assertEqual(detail.title, "远程代码执行漏洞")
+        self.assertEqual(detail.description, "远程攻击者可能执行任意代码。")
+        translator.assert_not_called()
+
+    def test_detail_mcp_fails_closed_when_chinese_translation_is_pending(self) -> None:
+        english = "Remote attackers can execute arbitrary code."
+        pending = build_component_vulnerability_detail(
+            component={"name": "demo", "version": "2.3.0", "ecosystem": "PyPI"},
+            records=[
+                {
+                    "id": "CVE-2026-10004",
+                    "title": "English vulnerability title",
+                    "summary": english,
+                    "content_language": "unknown",
+                    "translation_status": "pending",
+                }
+            ],
+            response_language="zh-Hans",
+        ).vulnerabilities[0]
+        stale = build_component_vulnerability_detail(
+            component={"name": "demo", "version": "2.3.0", "ecosystem": "PyPI"},
+            records=[
+                {
+                    "id": "CVE-2026-10007",
+                    "summary_original": english,
+                    "summary_zh": "这是不再可信的旧版译文。",
+                    "catalog_translation": {
+                        "version": CATALOG_TRANSLATION_VERSION - 1,
+                        "status": "translated",
+                    },
+                }
+            ],
+            response_language="zh-Hans",
+        ).vulnerabilities[0]
+
+        self.assertEqual(
+            pending.description,
+            "中文漏洞描述暂不可用。请根据漏洞编号、影响版本和修复版本核验风险。",
+        )
+        self.assertNotIn(english, pending.description)
+        self.assertNotIn("不再可信", stale.description)
+
+    def test_detail_mcp_uses_english_original_and_traditional_public_projection(self) -> None:
+        english = build_component_vulnerability_detail(
+            component={"name": "demo", "version": "2.3.0", "ecosystem": "PyPI"},
+            records=[
+                {
+                    "id": "CVE-2026-10005",
+                    "title_original": "English vulnerability title",
+                    "summary_original": "Remote code execution is possible.",
+                }
+            ],
+            response_language="en",
+        ).vulnerabilities[0]
+        traditional = build_component_vulnerability_detail(
+            component={"name": "demo", "version": "2.3.0", "ecosystem": "PyPI"},
+            records=[
+                {
+                    "id": "CVE-2026-10006",
+                    "title": "遠程程式碼執行漏洞",
+                    "summary": "遠程攻擊者可能執行任意程式碼。",
+                    "content_language": "zh-Hant",
+                    "translation_status": "translated",
+                }
+            ],
+            response_language="zh-Hant",
+        ).vulnerabilities[0]
+
+        self.assertEqual(english.title, "English vulnerability title")
+        self.assertEqual(english.description, "Remote code execution is possible.")
+        self.assertEqual(traditional.title, "遠程程式碼執行漏洞")
+        self.assertEqual(traditional.description, "遠程攻擊者可能執行任意程式碼。")
+
     def test_parser_supports_maven_and_scoped_npm_coordinates(self) -> None:
         self.assertEqual(
             parse_component_query("查询 Maven org.apache.logging.log4j:log4j-core 2.14.1 的组件漏洞"),
@@ -191,6 +291,11 @@ class ComponentQuerySubgraphTests(unittest.TestCase):
             patch.object(component_subgraph_module, "intelligence_service", fake),
             patch.object(component_mcp_module, "intelligence_service", fake),
             patch.object(component_mcp_module, "artifact_store", ComponentArtifactStore(Path(directory))),
+            patch.object(
+                mcp_protocol_module,
+                "component_artifact_store",
+                component_mcp_module.artifact_store,
+            ),
             patch.object(
                 graph_module.memory_service,
                 "build_context",

@@ -9,3 +9,4 @@ dist/
 dist-macos-trial/
 vendor/codeql/
 macos/SecFlowMac/.build/
+app/resources/translation-models/opus-mt-en-zh-1.9/model/model.bin

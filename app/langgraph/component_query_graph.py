@@ -9,7 +9,8 @@ except Exception:  # noqa: BLE001
     END = "__end__"
     StateGraph = None
 
-from app.mcp.component_query import invoke_detail_mcp, invoke_excel_mcp, invoke_sankey_mcp
+from app.mcp.protocol import call_mcp_tool, publish_mcp_workbook
+from app.agent.translation_policy import catalog_translation_status_is_complete
 from app.intelligence import intelligence_service
 from app.privacy import sanitize_public_text
 from app.storage import now_iso
@@ -183,8 +184,9 @@ class ComponentQuerySubgraph:
             state["component_result"] = result
             state["records"] = list(result.get("records") or [])
             state["knowledge_graph"] = dict(result.get("graph") or {})
-            state["catalog_translation_ready"] = (
-                str((result.get("catalog_translation") or {}).get("status") or "") == "completed"
+            state["catalog_translation_ready"] = catalog_translation_status_is_complete(
+                result.get("catalog_translation"),
+                state.get("response_language", "zh-Hans"),
             )
             state["component_error"] = ""
             return _add_trace(
@@ -231,14 +233,25 @@ class ComponentQuerySubgraph:
     def _excel_mcp(state: ComponentQueryState) -> ComponentQueryState:
         query = state.get("component_query") or {}
         try:
-            artifact = invoke_excel_mcp(
-                {
+            generated_at = str((state.get("component_result") or {}).get("generated_at") or now_iso())
+            result = call_mcp_tool(
+                agent_id="component_agent",
+                tool_id="mcp__excel__export_component_vulnerabilities",
+                arguments={
                     "name": str(query.get("name") or ""),
                     "version": str(query.get("version") or ""),
                     "ecosystem": str(query.get("ecosystem") or ""),
                     "records": list(state.get("records") or []),
-                    "generated_at": str((state.get("component_result") or {}).get("generated_at") or now_iso()),
-                }
+                    "generated_at": generated_at,
+                },
+            )
+            artifact = publish_mcp_workbook(
+                result,
+                kind="component",
+                default_file_name="SecFlow-component-vulnerabilities.xlsx",
+                generated_at=generated_at,
+                user_id=str(state.get("user_id") or "default"),
+                session_id=str(state.get("session_id") or ""),
             )
             state["artifacts"] = [*state.get("artifacts", []), artifact]
             return _add_trace(
@@ -281,13 +294,15 @@ class ComponentQuerySubgraph:
         result = state.get("component_result") or {}
         query = state.get("component_query") or {}
         try:
-            detail = invoke_detail_mcp(
-                {
+            detail = call_mcp_tool(
+                agent_id="component_agent",
+                tool_id="mcp__component_detail__build_component_vulnerability_detail",
+                arguments={
                     "component": result.get("component") or query,
                     "records": list(state.get("records") or []),
                     "generated_at": str(result.get("generated_at") or now_iso()),
                     "response_language": str(state.get("response_language") or "zh-Hans"),
-                }
+                },
             )
             state["component_detail"] = detail
             return _add_trace(
@@ -329,7 +344,11 @@ class ComponentQuerySubgraph:
     @staticmethod
     def _sankey_mcp(state: ComponentQueryState) -> ComponentQueryState:
         try:
-            sankey = invoke_sankey_mcp({"graph": state.get("knowledge_graph") or {}})
+            sankey = call_mcp_tool(
+                agent_id="component_agent",
+                tool_id="mcp__d3_sankey__build_component_sankey",
+                arguments={"graph": state.get("knowledge_graph") or {}},
+            )
             state["chart_data"] = {
                 "schema_version": int(sankey.get("schema_version") or 1),
                 "sankey": {

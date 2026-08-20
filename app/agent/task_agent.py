@@ -8,7 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from threading import Event, RLock, Thread
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Mapping, TypedDict
 from uuid import uuid4
 
 try:
@@ -42,8 +42,9 @@ from app.agent.project_adaptive_scan import (
     project_adaptive_skill_metadata,
     project_overlay_rule_file,
 )
+from app.composition import SecFlowRuntime, secflow_runtime, task_plugin_state
 from app.langgraph.report_graph import report_capability_subgraph
-from app.mcp.code_scan_client import CodeScanMCPClient, CodeScanMCPError
+from app.mcp.protocol import CodeScanMCPClient, CodeScanMCPError
 from app.agent.specialist_agents import SBOMLicenseCapability
 from app.sbom import build_cyclonedx_sbom, match_sbom_vulnerabilities
 from app.semgrep_tool import semgrep_rule_paths_for_language, semgrep_tool
@@ -344,7 +345,7 @@ class TaskAgentGraph:
                     "exit": "synthesize_project_overlay",
                     "max_adaptation_iterations": MAX_ADAPTATION_ITERATIONS,
                     "evaluation_mode": "frozen_evaluation",
-                    "user_scan_transport": "mcp-sse",
+                    "user_scan_transport": "mcp-stdio",
                     "mcp_server": "SecFlow Code Scan MCP",
                     "mcp_tools": ["scan_language"],
                     "delegated_agents": ["sbom_agent:identify_project_licenses"],
@@ -676,7 +677,8 @@ class TaskAgentGraph:
             "running",
             "正在通过独立 License MCP 识别 SPDX、依赖清单和许可证文件，并查询 OSI 许可元数据。",
             {
-                "transport": "in-process+stdio",
+                "transport": "stdio",
+                "endpoint": "managed-child-process",
                 "mcp_server": "SecFlow License MCP",
                 "mcp_tool": "identify_project_licenses",
                 "registry": "https://opensource.org/api/licenses",
@@ -1466,11 +1468,11 @@ class TaskAgentGraph:
             "adaptation": deepcopy(state.get("adaptation") or {}),
             "scan_mcp": {
                 "enabled": any(
-                    str(item.get("transport") or "") == "sse"
+                    str(item.get("transport") or "") == "stdio"
                     for item in state.get("scan_mcp_invocations", [])
                     if isinstance(item, dict)
                 ),
-                "transport": "sse" if state.get("scan_mcp_invocations") else "in-process",
+                "transport": "stdio" if state.get("scan_mcp_invocations") else "in-process",
                 "server": "SecFlow Code Scan MCP" if state.get("scan_mcp_invocations") else "",
                 "tool": "scan_language" if state.get("scan_mcp_invocations") else "",
                 "invocation_count": len(state.get("scan_mcp_invocations", [])),
@@ -1485,7 +1487,8 @@ class TaskAgentGraph:
             },
             "license_mcp": {
                 "enabled": bool(state.get("license_mcp_invocations")),
-                "transport": "in-process+stdio" if state.get("license_mcp_invocations") else "in-process",
+                "transport": "stdio" if state.get("license_mcp_invocations") else "disabled",
+                "endpoint": "managed-child-process" if state.get("license_mcp_invocations") else "",
                 "server": "SecFlow License MCP" if state.get("license_mcp_invocations") else "",
                 "tool": "identify_project_licenses" if state.get("license_mcp_invocations") else "",
                 "invocation_count": len(state.get("license_mcp_invocations", [])),
@@ -1595,7 +1598,7 @@ class TaskAgentGraph:
         return self._code_scan_client.enabled
 
     def _scan_transport(self, task_id: str) -> str:
-        return "mcp-sse" if self._uses_scan_mcp(task_id) else "in-process"
+        return "mcp-stdio" if self._uses_scan_mcp(task_id) else "in-process"
 
     def shutdown(self) -> None:
         self._code_scan_client.shutdown()
@@ -1618,6 +1621,7 @@ class TaskAgentService:
         adaptive_upload: bool = True,
         project_memory_sink: ProjectMemorySink | None = None,
         execution_mode: str | None = None,
+        plugin_runtime: SecFlowRuntime | None = None,
     ) -> None:
         self.store = store or AgentTaskStore()
         self._max_workers = max_workers
@@ -1638,6 +1642,7 @@ class TaskAgentService:
         self._futures: dict[str, Future[Any]] = {}
         self._lock = RLock()
         self._project_memory_sink = project_memory_sink
+        self._plugin_runtime = plugin_runtime
         self.graph = graph or TaskAgentGraph(
             event_sink=self._record_event,
             cancel_check=self.is_cancelled,
@@ -1682,6 +1687,7 @@ class TaskAgentService:
             "report_ready": False,
             "report_decision": "unavailable",
             "report": None,
+            "plugin_state": self._runtime().task_pin(),
             "error": "",
             "archived": False,
             "archived_at": None,
@@ -2277,6 +2283,9 @@ class TaskAgentService:
                 raise RuntimeError("任务执行器未启动")
             self._futures[task_id] = self._executor.submit(self._run, task_id)
 
+    def _runtime(self) -> SecFlowRuntime:
+        return self._plugin_runtime or secflow_runtime()
+
     def run_claimed(self, task_id: str, worker_id: str, *, recovered: bool = False) -> dict[str, Any]:
         """Execute one already-leased job inside the dedicated worker process."""
 
@@ -2338,12 +2347,34 @@ class TaskAgentService:
             if self.is_cancelled(task_id):
                 raise TaskCancelled("任务已由用户停止。")
             self._record_event(task_id, "task.started", "inspect_workspace", "running", "任务开始执行。", None)
-            state = self.graph.invoke(
-                task_id=task_id,
-                objective=str(task.get("objective") or ""),
-                workspace_path=str(task.get("workspace_path") or ""),
-                user_id=str(task.get("user_id") or "default"),
-            )
+            runtime = self._runtime()
+            with runtime.pin() as runtime_snapshot:
+                persisted_pin = task.get("plugin_state")
+                if persisted_pin is None:
+                    # Tasks created before plugin pinning existed are adopted by
+                    # the first runtime that resumes them, then become strict.
+                    persisted_pin = task_plugin_state(runtime_snapshot)
+                    task = self.store.update(task_id, plugin_state=persisted_pin)
+                    self._record_event(
+                        task_id,
+                        "task.plugin_state_migrated",
+                        "inspect_workspace",
+                        "warning",
+                        "旧任务已绑定当前插件运行时快照。",
+                        {
+                            "schema_version": persisted_pin["schema_version"],
+                            "runtime_generation": persisted_pin["runtime_generation"],
+                        },
+                    )
+                elif not isinstance(persisted_pin, Mapping):
+                    raise ValueError("Task plugin state is invalid")
+                runtime.validate_task_pin(persisted_pin, snapshot=runtime_snapshot)
+                state = self.graph.invoke(
+                    task_id=task_id,
+                    objective=str(task.get("objective") or ""),
+                    workspace_path=str(task.get("workspace_path") or ""),
+                    user_id=str(task.get("user_id") or "default"),
+                )
             if self.is_cancelled(task_id):
                 raise TaskCancelled("任务已由用户停止。")
             result = deepcopy(state.get("result") or {})

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from app import assistant_app
+from app.agent import assistant_intent
 from app.agent.assistant_intent import heuristic_intent_plan
 from app.agent.assistant_service import (
     invoke_assistant_question,
@@ -46,12 +47,86 @@ class FakeKnowledgeGraph:
 
 
 class StandaloneAssistantModuleTests(unittest.TestCase):
+    def test_intent_skills_are_resolved_through_the_plugin_registry(self) -> None:
+        def registered_body(name: str) -> str:
+            return f"registered:{name}"
+
+        def registered_metadata(name: str, *, prompt_version: str = "") -> dict[str, str]:
+            return {
+                "name": name,
+                "sha256": "a" * 64,
+                "prompt_version": prompt_version,
+            }
+
+        with (
+            patch.object(
+                assistant_intent.skill_runtime,
+                "load_skill",
+                side_effect=registered_body,
+            ) as load_skill,
+            patch.object(
+                assistant_intent.skill_runtime,
+                "skill_metadata",
+                side_effect=registered_metadata,
+            ) as skill_metadata,
+        ):
+            loaders = {
+                assistant_intent.ASSISTANT_INTENT_SKILL_NAME:
+                    assistant_intent.load_component_catalog_skill,
+                assistant_intent.COMPONENT_QUERY_SKILL_NAME:
+                    assistant_intent.load_component_query_skill,
+                assistant_intent.SBOM_SKILL_NAME: assistant_intent.load_sbom_skill,
+                assistant_intent.PROJECT_SCAN_SKILL_NAME:
+                    assistant_intent.load_project_scan_skill,
+                assistant_intent.REPORT_SKILL_NAME: assistant_intent.load_report_skill,
+                assistant_intent.MULTI_AGENT_SUPERVISOR_SKILL_NAME:
+                    assistant_intent.load_multi_agent_supervisor_skill,
+            }
+            for name, loader in loaders.items():
+                self.assertEqual(loader(), f"registered:{name}")
+
+            metadata_loaders = {
+                assistant_intent.ASSISTANT_INTENT_SKILL_NAME:
+                    assistant_intent.assistant_intent_skill_metadata,
+                assistant_intent.COMPONENT_QUERY_SKILL_NAME:
+                    assistant_intent.component_query_skill_metadata,
+                assistant_intent.SBOM_SKILL_NAME: assistant_intent.sbom_skill_metadata,
+                assistant_intent.PROJECT_SCAN_SKILL_NAME:
+                    assistant_intent.project_scan_skill_metadata,
+                assistant_intent.MULTI_AGENT_SUPERVISOR_SKILL_NAME:
+                    assistant_intent.multi_agent_supervisor_skill_metadata,
+            }
+            for name, metadata_loader in metadata_loaders.items():
+                self.assertEqual(metadata_loader()["name"], name)
+
+        self.assertEqual(
+            [args.args[0] for args in load_skill.call_args_list],
+            list(loaders),
+        )
+        self.assertEqual(
+            [args.args[0] for args in skill_metadata.call_args_list],
+            list(metadata_loaders),
+        )
+        self.assertTrue(
+            all(
+                args.kwargs["prompt_version"]
+                == assistant_intent.ASSISTANT_INTENT_PROMPT_VERSION
+                for args in skill_metadata.call_args_list
+            )
+        )
+
     def test_pretranslated_catalog_answer_routes_directly_to_memory(self) -> None:
         route = KnowledgeSecurityGraph._route_after_compose(
             {
                 "intent": "vulnerability_lookup",
                 "response_language": "zh-Hans",
-                "records": [{"id": "CVE-2026-7788"}],
+                "records": [
+                    {
+                        "id": "CVE-2026-7788",
+                        "translation_status": "translated",
+                        "content_language": "zh-Hans",
+                    }
+                ],
                 "catalog_translation_ready": True,
                 "attachments": [],
             }

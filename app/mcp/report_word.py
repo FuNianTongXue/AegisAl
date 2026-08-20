@@ -10,13 +10,15 @@ from typing import Any, Literal
 from xml.etree import ElementTree
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.mcp.artifacts import MCPArtifactReference, stage_output_artifact
 
 
 class WordReportOutput(BaseModel):
     schema_version: int = 1
     renderer: Literal["python-docx"] = "python-docx"
-    artifact_base64: str
+    artifacts: list[MCPArtifactReference] = Field(default_factory=list)
     media_type: Literal[
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     ] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -46,6 +48,8 @@ report_word_mcp = FastMCP(
 def render_word_report(
     report_document: dict[str, Any],
     mermaid: dict[str, Any] | None = None,
+    *,
+    output_dir: str,
 ) -> WordReportOutput:
     from app.reports import validate_report_document_json
 
@@ -55,10 +59,19 @@ def render_word_report(
         raise RuntimeError("Word MCP produced an invalid DOCX container")
     source = document.get("source") if isinstance(document.get("source"), dict) else {}
     input_sha256 = str((source.get("audit") or {}).get("payload_sha256") or "")
+    digest = hashlib.sha256(payload).hexdigest()
+    artifacts = [
+        stage_output_artifact(
+            output_dir,
+            file_name="SecFlow-security-report.docx",
+            payload=payload,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    ]
     return WordReportOutput(
-        artifact_base64=base64.b64encode(payload).decode("ascii"),
+        artifacts=artifacts,
         input_sha256=input_sha256,
-        output_sha256=hashlib.sha256(payload).hexdigest(),
+        output_sha256=digest,
         size=len(payload),
     )
 

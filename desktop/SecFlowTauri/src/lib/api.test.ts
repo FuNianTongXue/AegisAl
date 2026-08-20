@@ -33,6 +33,194 @@ describe("dashboard normalization", () => {
       { date: "2026-08-01", count: 36 },
     ]);
   });
+
+  it("sends the requested language and normalizes offline translation progress and localized fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        response_language: "zh-Hans",
+        vulnerability_count: 20,
+        catalog_count: 20,
+        catalog_translation: {
+          status: "completed",
+          target_language: "zh-Hans",
+          record_count: 20,
+          ready_records: 20,
+        },
+        recent_records: [{
+          id: "CVE-2026-1234",
+          title: "OpenSSL validation issue",
+          title_zh: "OpenSSL 验证缺陷",
+          summary: "A validation issue affects OpenSSL.",
+          summary_zh: "OpenSSL 受验证缺陷影响。",
+          content_language: "zh-Hans",
+          catalog_translation: { status: "translated" },
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const dashboard = await new SecFlowApi("http://secflow.test").dashboard("zh-Hans");
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.get("response_language")).toBe("zh-Hans");
+    expect(dashboard).toMatchObject({
+      response_language: "zh-Hans",
+      translation_status: "translated",
+      translation_progress: 100,
+      translation_count: 20,
+      translation_ready_count: 20,
+    });
+    expect(dashboard.records[0]).toMatchObject({
+      title: "OpenSSL 验证缺陷",
+      description: "OpenSSL 受验证缺陷影响。",
+      content_language: "zh-Hans",
+      translation_status: "translated",
+    });
+  });
+
+  it("keeps original vulnerability content for an English request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        response_language: "en",
+        recent_records: [{
+          id: "CVE-2026-4321",
+          title: "中文标题",
+          title_original: "Original vulnerability title",
+          summary: "中文描述。",
+          summary_original: "Original vulnerability description.",
+          content_language: "en",
+          translation_status: "original",
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const dashboard = await new SecFlowApi("http://secflow.test").dashboard("en");
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.get("response_language")).toBe("en");
+    expect(dashboard.translation_status).toBe("not_required");
+    expect(dashboard.records[0]).toMatchObject({
+      title: "Original vulnerability title",
+      description: "Original vulnerability description.",
+      translation_status: "original",
+    });
+  });
+
+  it("keeps total and ready translation counts distinct for a partial catalog", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        response_language: "zh-Hans",
+        vulnerability_count: 20,
+        translation_count: 5,
+        translation_progress: 25,
+        translation_status: "partial",
+        catalog_translation: {
+          status: "partial",
+          record_count: 20,
+          ready_records: 5,
+        },
+        recent_records: [],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const dashboard = await new SecFlowApi("http://secflow.test").dashboard("zh-Hans");
+
+    expect(dashboard.translation_count).toBe(20);
+    expect(dashboard.translation_ready_count).toBe(5);
+    expect(dashboard.translation_progress).toBe(25);
+    expect(dashboard.translation_status).toBe("pending");
+  });
+
+  it("drops pending mixed-language prose from normalized display fields", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        response_language: "zh-Hans",
+        recent_records: [{
+          id: "CVE-2026-76008",
+          title: "远程 URI 参数 Parsing vulnerability",
+          summary: "远程攻击者可以 trigger 基于堆栈的缓冲区溢出。",
+          content_language: "unknown",
+          translation_status: "pending",
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const dashboard = await new SecFlowApi("http://secflow.test").dashboard("zh-Hans");
+
+    expect(dashboard.records[0]).toMatchObject({
+      id: "CVE-2026-76008",
+      title: "",
+      summary: "",
+      description: "",
+      translation_status: "pending",
+    });
+  });
+
+  it("does not let a simplified response override a Traditional Chinese request", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        response_language: "zh-Hans",
+        translation_status: "completed",
+        recent_records: [{
+          id: "CVE-2026-76009",
+          title: "简体中文漏洞标题",
+          summary: "简体中文漏洞描述。",
+          content_language: "zh-Hans",
+          translation_status: "translated",
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const dashboard = await new SecFlowApi("http://secflow.test").dashboard("zh-Hant");
+
+    expect(dashboard.response_language).toBe("zh-Hant");
+    expect(dashboard.translation_status).toBe("pending");
+    expect(dashboard.records[0]).toMatchObject({
+      title: "",
+      summary: "",
+      description: "",
+      content_language: "zh-Hans",
+      translation_status: "pending",
+    });
+  });
+
+  it("rejects a forged translated status when the declared record language does not match", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{
+        id: "CVE-2026-76010",
+        title: "Simplified or stale content",
+        title_zh_hant: "伪造的译文标题",
+        summary: "Stale source summary.",
+        summary_zh_hant: "伪造的译文摘要。",
+        content_language: "unknown",
+        translation_status: "translated",
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const records = await new SecFlowApi("http://secflow.test").vulnerabilities("zh-Hant");
+
+    expect(records[0]).toMatchObject({
+      title: "",
+      summary: "",
+      description: "",
+      content_language: "unknown",
+      translation_status: "pending",
+    });
+  });
+
+  it("passes a CVE query to the full vulnerability catalog endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { records: [] },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new SecFlowApi("http://secflow.test").vulnerabilities("zh-Hans", " CVE-2026-98765 ");
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.get("response_language")).toBe("zh-Hans");
+    expect(url.searchParams.get("query")).toBe("CVE-2026-98765");
+  });
 });
 
 describe("workspace actions", () => {

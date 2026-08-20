@@ -13,7 +13,7 @@ FastAPI 控制面
   -> Code Scan MCP / SBOM MCP / Report MCP
 ```
 
-源码目录为 `desktop/SecFlowTauri`。原生 SwiftUI 客户端保留在 `macos/SecFlowMac`，用于回归对照和兼容，不再作为第三阶段主界面。
+源码目录为 `desktop/SecFlowTauri`。旧 SwiftUI 兼容客户端已从主分支移除，桌面功能、测试和发布均以 Tauri 客户端为唯一实现。
 
 ## 2. 真实 21st.dev 收藏清单
 

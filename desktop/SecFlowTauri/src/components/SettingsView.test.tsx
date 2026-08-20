@@ -39,6 +39,7 @@ const settings: SettingsSnapshot = {
 };
 
 beforeEach(() => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
   useAppStore.setState({
     userId: "default",
     settings: structuredClone(settings),
@@ -53,12 +54,26 @@ afterEach(() => {
 });
 
 describe("SettingsView source separation", () => {
+  it("keeps the current form open when unsaved changes are not discarded", () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    render(<SettingsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "解锁模型配置" }));
+    fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    fireEvent.click(screen.getByRole("button", { name: "用户资料" }));
+
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(screen.getByRole("heading", { name: "模型设置" })).toBeInTheDocument();
+  });
+
   it("opens with the Zcode-style model workspace and supports returning to the app", () => {
     const onBack = vi.fn();
     const { container } = render(<SettingsView onBack={onBack} />);
     const stableContent = container.querySelector(".settings-content");
 
     expect(screen.getByRole("heading", { name: "模型设置" })).toBeInTheDocument();
+    expect(screen.getByText(/\u6f0f洞翻译由本机离线能力完成/)).toHaveTextContent("不依赖模型配置");
+    expect(screen.getByText(/\u6f0f洞翻译由本机离线能力完成/)).toHaveTextContent("不计入 Token 用量");
     expect(screen.getByText(/选择厂商/)).toBeInTheDocument();
     expect(screen.getByText(/接入凭证/)).toBeInTheDocument();
     expect(container.querySelector(".settings-window-drag")).toHaveAttribute("data-tauri-drag-region");
@@ -359,7 +374,7 @@ describe("SettingsView source separation", () => {
     render(<SettingsView />);
     fireEvent.click(screen.getByRole("button", { name: "使用统计" }));
 
-    expect(await screen.findByText("1,545")).toBeInTheDocument();
+    expect((await screen.findAllByText("1,545")).length).toBeGreaterThan(0);
     expect(screen.getByText("gpt-secflow")).toBeInTheDocument();
     expect(usageSpy).toHaveBeenCalledWith("default", 30);
 

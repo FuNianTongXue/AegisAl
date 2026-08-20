@@ -17,6 +17,74 @@ class AlwaysUsableTrial:
 
 
 class ApiStructureTests(unittest.TestCase):
+    def test_vulnerability_read_routes_forward_requested_language(self) -> None:
+        localized = {
+            "vulnerability_count": 1,
+            "severity": {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 0, "LOW": 0},
+            "recent_records": [
+                {
+                    "id": "CVE-2026-1234",
+                    "title": "繁體中文漏洞標題",
+                    "summary": "繁體中文漏洞描述。",
+                    "content_language": "zh-Hant",
+                    "translation_status": "translated",
+                }
+            ],
+            "response_language": "zh-Hant",
+            "catalog_translation": {"status": "completed", "target_language": "zh-Hant"},
+            "translation_status": "completed",
+            "translation_progress": 100,
+            "translation_count": 1,
+            "translation_ready_count": 1,
+        }
+        with patch.object(application.intelligence_service, "dashboard", return_value=localized) as dashboard:
+            dashboard_response = application.dashboard(response_language="zh-Hant")
+            records_response = application.vulnerabilities(response_language="zh-Hant")
+
+        self.assertEqual(dashboard.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["response_language"] for call in dashboard.call_args_list],
+            ["zh-Hant", "zh-Hant"],
+        )
+        self.assertEqual(dashboard_response.data["recent_records"][0]["content_language"], "zh-Hant")
+        self.assertEqual(records_response.data["records"][0]["summary"], "繁體中文漏洞描述。")
+        self.assertEqual(records_response.data["response_language"], "zh-Hant")
+        self.assertEqual(records_response.data["translation_count"], 1)
+        self.assertEqual(records_response.data["translation_ready_count"], 1)
+
+    def test_vulnerability_search_forwards_cve_to_full_catalog_query(self) -> None:
+        result = {
+            "records": [
+                {
+                    "id": "CVE-2026-98765",
+                    "title": "目标漏洞",
+                    "summary": "目标漏洞描述。",
+                    "severity": "CRITICAL",
+                    "content_language": "zh-Hans",
+                    "translation_status": "translated",
+                }
+            ],
+            "catalog_translation": {
+                "status": "completed",
+                "record_count": 1,
+                "ready_records": 1,
+            },
+        }
+        with patch.object(application.intelligence_service, "query", return_value=result) as query:
+            response = application.vulnerabilities(
+                query=" CVE-2026-98765 ",
+                response_language="zh-Hans",
+            )
+
+        query.assert_called_once_with(
+            "CVE-2026-98765",
+            limit=50,
+            response_language="zh-Hans",
+        )
+        self.assertEqual(response.data["records"][0]["id"], "CVE-2026-98765")
+        self.assertEqual(response.data["stats"]["critical"], 1)
+        self.assertEqual(response.data["translation_progress"], 100)
+
     def test_implementations_live_in_their_domain_packages(self) -> None:
         root = Path(__file__).resolve().parents[1] / "app"
         expected = {

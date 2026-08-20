@@ -1,6 +1,6 @@
 ---
 name: secflow-multi-agent-supervisor
-description: Coordinate SecFlow specialist agents through explicit, auditable handoffs. Use for assistant questions, authorized project scans, SBOM generation, full scans (code scan + SBOM), component intelligence, vulnerability research, scan follow-up, and report operations. When a user requests a scan without specifying the type, ask them to choose: code scan, SBOM scan, or full scan. Give each specialist only its allowed tools, preserve human interrupts, and keep online project adaptation isolated from frozen evaluation corpora.
+description: "Coordinate SecFlow specialist agents through explicit, auditable handoffs. Use for assistant questions, authorized project scans, SBOM generation, full scans (code scan + SBOM), component intelligence, vulnerability research, scan follow-up, and report operations. When a user requests a scan without specifying the type, ask them to choose: code scan, SBOM scan, or full scan. Give each specialist only its allowed tools, preserve human interrupts, and keep online project adaptation isolated from frozen evaluation corpora."
 ---
 
 # SecFlow Multi-Agent Supervisor
@@ -42,7 +42,7 @@ Report specialist receives `scan_type=full_scan` and includes all sections: vuln
 
 - The Supervisor may plan and hand off but cannot scan files, query vulnerability providers, generate artifacts, or modify rules.
 - Project Context may read encrypted project links and user-owned task metadata but cannot infer a path from an SBOM or report name.
-- Code Scan may create or rescan authorized tasks and call only `scan_language` on the loopback SSE Code Scan MCP. It cannot identify project licenses, generate reports, or promote project overlays into global rules.
+- Code Scan may create or rescan authorized tasks and call only `scan_language` through the Host-managed local stdio Code Scan MCP sandbox process. It cannot identify project licenses, generate reports, or promote project overlays into global rules.
 - SBOM exclusively owns project-license identification, may extract dependencies, match component vulnerabilities, answer stored SBOM-result follow-ups, and invoke the SBOM Excel MCP. It cannot perform source-code vulnerability scanning or consume a pending interrupt during a read-only follow-up.
 - Component and Vulnerability Intelligence agents may query their respective verified data capabilities but cannot access local project paths.
 - Report may consume canonical scan JSON, fixed SBOM Agent license facts, and format-specific MCP outputs but cannot scan licenses, rescan, or change vulnerability facts. Report content must respect `scan_type` context: `code_scan` excludes SBOM/license sections, `sbom` excludes code vulnerability/taint sections, `full_scan` includes all.

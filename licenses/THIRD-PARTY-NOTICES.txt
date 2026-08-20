@@ -126,3 +126,58 @@ content remains hosted by and subject to the terms of each publisher. The
 upstream repository did not declare a license file at the snapshot date; this
 notice provides attribution and does not claim additional rights in the
 catalog or publisher content.
+
+OPUS-MT English-Chinese model (Argos package 1.9)
+-------------------------------------------------
+
+Authors: Jorg Tiedemann and Santhosh Thottingal.
+Title: "OPUS-MT - Building open translation services for the World".
+Source package: https://argos-net.com/v1/translate-en_zh-1_9.argosmodel
+Archive SHA-256: 433e7c4f034d87fbe2353161e05f18646d7999452f801a4e1f0378522b9850ab
+License: Creative Commons Attribution 4.0 International (CC-BY-4.0).
+
+The corresponding license text is distributed as OPUS-MT-CC-BY-4.0.txt.
+SecFlow ships only the CTranslate2 model and SentencePiece vocabulary needed
+for local inference; the upstream Stanza runtime and data are not bundled.
+
+CTranslate2 4.8.1
+-----------------
+
+Copyright (c) 2018- SYSTRAN.
+Copyright (c) 2019- The OpenNMT Authors.
+License: MIT.
+Source: https://github.com/OpenNMT/CTranslate2/tree/v4.8.1
+
+The corresponding license text is distributed as CTranslate2-MIT.txt.
+
+NumPy 2.x
+---------
+
+Copyright (c) 2005-2025, NumPy Developers.
+License: BSD-3-Clause.
+Source: https://github.com/numpy/numpy
+
+The core license text is distributed as NumPy-BSD-3-Clause.txt. The packaged
+client also includes NumPy-Binary-Notices.txt copied from the platform wheel;
+it contains the notices for native libraries shipped by that exact wheel.
+
+SentencePiece 0.2.2
+-------------------
+
+Copyright 2018 Google Inc.
+License: Apache License 2.0.
+Source: https://github.com/google/sentencepiece/tree/v0.2.2
+
+The corresponding license text is distributed as
+SentencePiece-Apache-2.0.txt.
+
+OpenCC Python Reimplemented 0.1.7
+--------------------------------
+
+Copyright belongs to Yichen Huang and project contributors.
+License: Apache License 2.0.
+Source: https://github.com/yichen0831/opencc-python/tree/v0.1.7
+
+The corresponding license and notice texts are distributed as
+OpenCC-Python-Reimplemented-Apache-2.0.txt and
+OpenCC-Python-Reimplemented-NOTICE.txt.

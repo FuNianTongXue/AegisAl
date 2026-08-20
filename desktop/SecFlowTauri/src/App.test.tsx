@@ -8,19 +8,24 @@ import App from "./App";
 import { api } from "./lib/api";
 import { useAppStore } from "./store/appStore";
 
+const refreshBackend = vi.hoisted(() => vi.fn());
+
 vi.mock("./hooks/useBackend", () => ({
-  useBackendBootstrap: () => vi.fn(),
+  useBackendBootstrap: () => refreshBackend,
   useActiveTaskStream: vi.fn(),
 }));
 
 describe("App navigation theme", () => {
   beforeEach(() => {
+    window.history.replaceState({}, "", "/");
+    refreshBackend.mockReset();
     useAppStore.setState({
       view: "assistant",
       sidebarOpen: true,
       inspectorOpen: false,
       commandOpen: false,
       bootstrapReady: true,
+      bootstrapError: undefined,
       initialSetupRequired: false,
       conversations: [],
       archivedConversations: [],
@@ -46,6 +51,7 @@ describe("App navigation theme", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    window.history.replaceState({}, "", "/");
   });
 
   it("keeps the Zcode shell palette while switching primary navigation views", () => {
@@ -188,5 +194,48 @@ describe("App navigation theme", () => {
     expect(screen.getByRole("heading", { name: "欢迎使用安全智脑" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "配置个人信息" })).toBeInTheDocument();
     expect(container.querySelector(".app-shell")).not.toBeInTheDocument();
+  });
+
+  it("provides a skip link whose target follows the visible primary view", () => {
+    const { container } = render(<App />);
+
+    const skipLink = screen.getByRole("link", { name: "跳到主要内容" });
+    const workspaceMain = container.querySelector("main#main-content");
+    expect(skipLink).toHaveAttribute("href", "#main-content");
+    expect(workspaceMain).toHaveAttribute("tabindex", "-1");
+    fireEvent.click(skipLink);
+    expect(workspaceMain).toHaveFocus();
+
+    act(() => useAppStore.getState().set({ view: "settings" }));
+    expect(container.querySelector(".workspace-content")).not.toHaveAttribute("id");
+    expect(container.querySelector("#main-content .settings-stage")).toBeInTheDocument();
+  });
+
+  it("mirrors navigation in the URL while preserving task-window parameters", () => {
+    window.history.replaceState({}, "", "/?secflowWindow=task&taskWindowId=window-1");
+    render(<App />);
+
+    act(() => useAppStore.getState().set({
+      view: "archive",
+      activeSessionId: "session-7",
+      activeTaskId: "task-9",
+    }));
+
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("secflowWindow")).toBe("task");
+    expect(params.get("taskWindowId")).toBe("window-1");
+    expect(params.get("view")).toBe("archive");
+    expect(params.get("session")).toBe("session-7");
+    expect(params.get("task")).toBe("task-9");
+  });
+
+  it("shows startup failures and invokes the retry action", () => {
+    useAppStore.setState({ bootstrapReady: false, bootstrapError: "connection refused" });
+    render(<App />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("本机服务初始化失败");
+    expect(screen.getByText("connection refused")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(refreshBackend).toHaveBeenCalledOnce();
   });
 });

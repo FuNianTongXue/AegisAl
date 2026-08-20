@@ -20,6 +20,8 @@ from typing import Any
 import httpx
 from packaging.version import InvalidVersion, Version
 
+from app.agent.translation_agent import translation_agent
+from app.agent.translation_policy import translation_audit_is_publishable
 from app.catalog_translation import (
     CATALOG_TRANSLATION_LANGUAGE,
     CATALOG_TRANSLATION_VERSION,
@@ -38,7 +40,6 @@ from app.collectors import (
     _nvd_record,
     _nvd_severity,
 )
-from app.llm import active_model_from_env, diagnose_chat_completion
 from app.privacy import sanitize_public_text, severity_cn
 from app.secure_storage import decrypt_json_from_text, encrypt_json_to_text, secure_metadata_key
 from app.storage import DATA_DIR, now_iso, store
@@ -80,6 +81,7 @@ _GITHUB_BATCH_PAGE_SIZE = 100
 _GITHUB_BATCH_MAX_PAGES = 50
 _GITHUB_BATCH_MAX_RECORDS = 5_000
 _GITHUB_BATCH_BUDGET_SECONDS = 18.0
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 
 
 def _environment_flag(name: str, *, default: bool = False) -> bool:
@@ -87,6 +89,47 @@ def _environment_flag(name: str, *, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def _verified_summary_translation_audit(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    raw = candidate.get("translation_audit")
+    if not isinstance(raw, dict):
+        raw = candidate.get("translation")
+    if not isinstance(raw, dict):
+        return None
+    if not translation_audit_is_publishable(raw):
+        return None
+
+    required_values = {
+        "status": "completed",
+        "translation_status": "translated",
+        "target_language": CATALOG_TRANSLATION_LANGUAGE,
+        "server": "SecFlow Translation MCP",
+        "tool": "translate_json_payload",
+        "transport": "stdio",
+    }
+    if any(raw.get(field) != expected for field, expected in required_values.items()):
+        return None
+    required_booleans = {
+        "offline": True,
+        "network_used": False,
+        "requires_api_key": False,
+        "model_used": False,
+        "offline_model_used": True,
+        "resource_verified": True,
+    }
+    if any(type(raw.get(field)) is not bool or raw[field] is not expected for field, expected in required_booleans.items()):
+        return None
+    for field in ("unresolved_fields", "provider_calls", "billable_tokens", "token_usage"):
+        if type(raw.get(field)) is not int or raw[field] != 0:
+            return None
+    if any(not _SHA256_HEX.fullmatch(str(raw.get(field) or "")) for field in (
+        "input_sha256",
+        "output_sha256",
+        "model_sha256",
+    )):
+        return None
+    return deepcopy(raw)
 
 
 def _catalog_record_count(path: Path) -> int:
@@ -297,6 +340,35 @@ class _VulnerabilityCatalog:
                     "pending" if record_count else "complete",
                 )
                 self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
+            translation_version = self._decode_metadata_value(
+                secure_metadata_key("catalog_translation_version"),
+                str(
+                    (
+                        connection.execute(
+                            "SELECT value FROM catalog_metadata WHERE key = ?",
+                            (secure_metadata_key("catalog_translation_version"),),
+                        ).fetchone()
+                        or {"value": "0"}
+                    )["value"]
+                ),
+            )
+            if str(translation_version) != str(CATALOG_TRANSLATION_VERSION):
+                record_count = int(connection.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()[0])
+                self._set_metadata_in_connection(
+                    connection,
+                    "catalog_translation_backfill_status",
+                    "pending" if record_count else "complete",
+                )
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_processed", "0")
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_failed", "0")
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_total", str(record_count))
+                self._set_metadata_in_connection(connection, "catalog_translation_backfill_progress", "0")
+                self._set_metadata_in_connection(
+                    connection,
+                    "catalog_translation_version",
+                    str(CATALOG_TRANSLATION_VERSION),
+                )
 
     def _migrate_catalog_metadata(self, connection: sqlite3.Connection) -> None:
         metadata_rows = connection.execute("SELECT key, value FROM catalog_metadata WHERE key <> 'schema_version'").fetchall()
@@ -318,7 +390,7 @@ class _VulnerabilityCatalog:
         return self.metadata("poc_backfill_status") == "pending"
 
     def translation_migration_pending(self) -> bool:
-        return self.metadata("catalog_translation_backfill_status") == "pending"
+        return self.metadata("catalog_translation_backfill_status") in {"pending", "partial", "retrying"}
 
     def migrate_catalog_incrementally(self, stop: Event) -> None:
         # Populate dashboard metrics first so a large legacy catalog does not
@@ -341,6 +413,31 @@ class _VulnerabilityCatalog:
         if not self.translation_migration_pending():
             return
         cursor = self.metadata("catalog_translation_backfill_cursor")
+        status = self.metadata("catalog_translation_backfill_status", "pending")
+        if status == "partial" and not cursor:
+            processed = 0
+            failed = 0
+        else:
+            try:
+                processed = int(self.metadata("catalog_translation_backfill_processed", "0") or 0)
+            except ValueError:
+                processed = 0
+            try:
+                failed = int(self.metadata("catalog_translation_backfill_failed", "0") or 0)
+            except ValueError:
+                failed = 0
+        try:
+            total = int(self.metadata("catalog_translation_backfill_total", "0") or 0)
+        except ValueError:
+            total = 0
+        if total <= 0:
+            with self._connect() as connection:
+                total = int(connection.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()[0])
+        with self._lock, self._connect() as connection:
+            self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "retrying")
+            self._set_metadata_in_connection(connection, "catalog_translation_backfill_total", str(total))
+            self._set_metadata_in_connection(connection, "catalog_translation_backfill_processed", str(processed))
+            self._set_metadata_in_connection(connection, "catalog_translation_backfill_failed", str(failed))
         while not stop.is_set():
             with self._connect() as connection:
                 rows = connection.execute(
@@ -355,31 +452,101 @@ class _VulnerabilityCatalog:
                 ).fetchall()
             if not rows:
                 with self._lock, self._connect() as connection:
-                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "complete")
+                    self._set_metadata_in_connection(
+                        connection,
+                        "catalog_translation_backfill_status",
+                        "partial" if failed else "complete",
+                    )
                     self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_processed", str(processed))
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_failed", str(failed))
+                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_progress", "100")
                 return
 
-            decoded = [self._decode_record(str(row["record_json"])) for row in rows]
-            localized, audit = translate_records_for_storage(decoded, session_id="catalog-translation-backfill")
-            pending = int(audit.get("pending_records") or 0)
-            if pending:
-                # No configured model or a transient translation failure: retain
-                # the pending marker and retry from the beginning next startup.
-                with self._lock, self._connect() as connection:
-                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "pending")
-                    self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
-                return
-
+            valid_rows: list[sqlite3.Row] = []
+            decoded: list[dict[str, Any]] = []
+            decode_errors: list[str] = []
+            for row in rows:
+                try:
+                    decoded.append(self._decode_record(str(row["record_json"])))
+                    valid_rows.append(row)
+                except Exception as exc:  # noqa: BLE001 - one corrupt legacy row must not stop the catalog.
+                    decode_errors.append(
+                        f"{str(row['canonical_id'])}: {sanitize_public_text(str(exc))[:180] or type(exc).__name__}"
+                    )
+            if decoded:
+                localized, audit = translate_records_for_storage(
+                    decoded,
+                    session_id="catalog-translation-backfill",
+                )
+            else:
+                localized, audit = [], {}
+            pending = sum(
+                not record_translation_ready(record, "zh-Hans")
+                or not record_translation_ready(record, "zh-Hant")
+                for record in localized
+            )
+            traditional_audit = (
+                audit.get("traditional_translation")
+                if isinstance(audit.get("traditional_translation"), dict)
+                else {}
+            )
+            unavailable = "unavailable" in {
+                str(audit.get("translation_status") or ""),
+                str(traditional_audit.get("translation_status") or ""),
+            }
+            warnings = [
+                *decode_errors,
+                *[str(item) for item in audit.get("warnings") or [] if str(item)],
+                *[str(item) for item in traditional_audit.get("warnings") or [] if str(item)],
+            ]
             with self._lock, self._connect() as connection:
                 connection.executemany(
                     "UPDATE vulnerabilities SET record_json = ? WHERE canonical_id = ?",
                     [
                         (self._encode_record(record), str(row["canonical_id"]))
-                        for row, record in zip(rows, localized, strict=True)
+                        for row, record in zip(valid_rows, localized, strict=True)
                     ],
                 )
-                cursor = str(rows[-1]["canonical_id"])
-                self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", cursor)
+                self._set_metadata_in_connection(
+                    connection,
+                    "catalog_translation_backfill_status",
+                    "pending" if unavailable else "retrying",
+                )
+                self._set_metadata_in_connection(
+                    connection,
+                    "catalog_translation_backfill_error",
+                    warnings[0][:300] if warnings else "",
+                )
+                if not unavailable:
+                    cursor = str(rows[-1]["canonical_id"])
+                    processed += len(rows)
+                    failed += pending + len(decode_errors)
+                    progress = 100 if total <= 0 else min(99, int((processed / total) * 100))
+                    self._set_metadata_in_connection(
+                        connection,
+                        "catalog_translation_backfill_cursor",
+                        cursor,
+                    )
+                    self._set_metadata_in_connection(
+                        connection,
+                        "catalog_translation_backfill_processed",
+                        str(processed),
+                    )
+                    self._set_metadata_in_connection(
+                        connection,
+                        "catalog_translation_backfill_failed",
+                        str(failed),
+                    )
+                    self._set_metadata_in_connection(
+                        connection,
+                        "catalog_translation_backfill_progress",
+                        str(progress),
+                    )
+            # Missing or invalid signed resources cannot recover during this
+            # process. Keep this batch's cursor so the next run retries it.
+            if unavailable:
+                return
             if stop.wait(max(0.0, float(pause_seconds))):
                 return
 
@@ -561,29 +728,83 @@ class _VulnerabilityCatalog:
             )
             if int(translation_audit.get("pending_records") or 0):
                 self._set_metadata_in_connection(connection, "catalog_translation_backfill_status", "pending")
-                self._set_metadata_in_connection(connection, "catalog_translation_backfill_cursor", "")
         return stored_records
 
-    def persist_summary_translations(self, translations: list[dict[str, str]]) -> int:
-        """Write verified display translations without changing upstream facts.
+    def persist_display_translations(self, records: list[dict[str, Any]]) -> int:
+        """Write verified title/summary translations without merging source facts."""
+
+        persisted = 0
+        with self._lock, self._connect() as connection:
+            for candidate in records:
+                if not isinstance(candidate, dict):
+                    continue
+                canonical_id = _canonical_vulnerability_id(candidate)
+                if not canonical_id:
+                    continue
+                row = connection.execute(
+                    "SELECT record_json FROM vulnerabilities WHERE canonical_id = ?",
+                    (canonical_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                current = self._decode_record(str(row["record_json"]))
+                source_title = str(current.get("title_original") or current.get("title") or "").strip()
+                source_summary = str(current.get("summary_original") or current.get("summary") or "").strip()
+                audit = candidate.get("catalog_translation") if isinstance(candidate.get("catalog_translation"), dict) else {}
+                if str(audit.get("source_title") or "") != source_title or str(
+                    audit.get("source_summary") or ""
+                ) != source_summary:
+                    continue
+                simplified_ready = record_translation_ready(candidate, "zh-Hans")
+                traditional_ready = record_translation_ready(candidate, "zh-Hant")
+                if not simplified_ready:
+                    continue
+                for key in ("title_zh", "summary_zh"):
+                    value = str(candidate.get(key) or "").strip()
+                    if value:
+                        current[key] = value
+                    else:
+                        current.pop(key, None)
+                for key in ("title_zh_hant", "summary_zh_hant"):
+                    value = str(candidate.get(key) or "").strip() if traditional_ready else ""
+                    if value:
+                        current[key] = value
+                    else:
+                        current.pop(key, None)
+                current["catalog_translation"] = deepcopy(audit)
+                connection.execute(
+                    "UPDATE vulnerabilities SET record_json = ? WHERE canonical_id = ?",
+                    (self._encode_record(current), canonical_id),
+                )
+                persisted += 1
+            if persisted:
+                connection.execute("DELETE FROM range_query_snapshots")
+        return persisted
+
+    def persist_summary_translations(self, translations: list[dict[str, Any]]) -> int:
+        """Write audited TranslationAgent output without changing upstream facts.
 
         Report export receives public catalog rows, so feeding those rows back
         through ``upsert`` would incorrectly turn the localized display text
         into the upstream source text.  This narrow write-through path updates
-        only ``summary_zh`` after checking that the supplied source summary
-        still matches the encrypted catalog record.
+        only ``summary_zh`` after checking the source text and the complete
+        offline, zero-token TranslationAgent audit contract.
         """
 
-        candidates = {
-            str(item.get("id") or "").strip().upper(): {
+        candidates: dict[str, dict[str, Any]] = {}
+        for item in translations:
+            if not isinstance(item, dict):
+                continue
+            identifier = str(item.get("id") or "").strip().upper()
+            summary_zh = str(item.get("summary_zh") or "").strip()
+            audit = _verified_summary_translation_audit(item)
+            if not identifier or not re.search(r"[\u3400-\u9fff]", summary_zh) or audit is None:
+                continue
+            candidates[identifier] = {
                 "source_summary": str(item.get("source_summary") or "").strip(),
-                "summary_zh": str(item.get("summary_zh") or "").strip(),
+                "summary_zh": summary_zh,
+                "translation_audit": audit,
             }
-            for item in translations
-            if isinstance(item, dict)
-            and str(item.get("id") or "").strip()
-            and re.search(r"[\u3400-\u9fff]", str(item.get("summary_zh") or ""))
-        }
         if not candidates:
             return 0
 
@@ -620,7 +841,11 @@ class _VulnerabilityCatalog:
                     "source_summary": source_summary,
                     "translation_status": "translated",
                     "storage_stage": "report-write-through",
+                    "translation_agent": deepcopy(candidate["translation_audit"]),
                 }
+                if not record_translation_ready(record, CATALOG_TRANSLATION_LANGUAGE):
+                    record["catalog_translation"]["status"] = "pending"
+                    record["catalog_translation"]["translated_at"] = ""
                 connection.execute(
                     "UPDATE vulnerabilities SET record_json = ? WHERE canonical_id = ?",
                     (self._encode_record(record), canonical_id),
@@ -1490,7 +1715,7 @@ class RealtimeIntelligenceService:
         self._remember_catalog_snapshot(result)
         return deepcopy(result)
 
-    def persist_component_summary_translations(self, translations: list[dict[str, str]]) -> int:
+    def persist_component_summary_translations(self, translations: list[dict[str, Any]]) -> int:
         """Persist report-time translations and evict stale range snapshots."""
 
         persisted = self._catalog.persist_summary_translations(translations)
@@ -1829,7 +2054,11 @@ class RealtimeIntelligenceService:
         *,
         start_date: date | str | None = None,
         end_date: date | str | None = None,
+        response_language: str = "zh-Hans",
     ) -> dict[str, Any]:
+        language = _normalize_response_language(response_language)
+        if language not in {"zh-Hans", "zh-Hant", "en"}:
+            raise ValueError(f"Dashboard language is not supported by the offline translator: {language}")
         range_start, range_end = _dashboard_date_range(start_date, end_date)
         with self._lock:
             batch_sources = deepcopy(self._batch_sources)
@@ -1845,6 +2074,55 @@ class RealtimeIntelligenceService:
             catalog_progress = int(self._catalog.metadata("baseline_progress", "0") or 0)
         except ValueError:
             catalog_progress = 0
+        visible_records = list(snapshot["records"])
+        if language == "en":
+            translation_audit: dict[str, Any] = {
+                "status": "not_required",
+                "translation_status": "passthrough",
+                "target_language": "en",
+                "record_count": len(visible_records),
+                "ready_records": len(visible_records),
+                "pending_records": 0,
+                "invoked": False,
+                "offline": True,
+                "network_used": False,
+                "provider_calls": 0,
+                "billable_tokens": 0,
+            }
+            recent_records = _public_records(visible_records, language)
+        else:
+            visible_records, translation_audit = translate_records_for_storage(
+                visible_records,
+                session_id="dashboard-visible-records",
+            )
+            self._catalog.persist_display_translations(visible_records)
+            recent_records = _public_records(visible_records, language)
+        ready_records = int(
+            (
+                translation_audit.get("traditional_ready_records")
+                if language == "zh-Hant"
+                else translation_audit.get("ready_records")
+            )
+            or 0
+        )
+        record_count = len(visible_records)
+        translation_progress = 100 if not record_count else int((ready_records / record_count) * 100)
+        warnings = [str(item) for item in translation_audit.get("warnings") or [] if str(item)]
+        projection_status = (
+            "not_required"
+            if language == "en"
+            else "completed" if ready_records == record_count else "partial"
+        )
+        translation_audit = {
+            **translation_audit,
+            "status": projection_status,
+            "target_language": language,
+            "record_count": record_count,
+            "ready_records": ready_records,
+            "pending_records": max(0, record_count - ready_records),
+            "progress": max(0, min(translation_progress, 100)),
+            "error": warnings[0] if warnings else "",
+        }
         return {
             "vulnerability_count": snapshot["total"],
             "high_risk_count": severity["CRITICAL"] + severity["HIGH"],
@@ -1856,7 +2134,7 @@ class RealtimeIntelligenceService:
             "poc_count": snapshot["poc_count"],
             "exploited_count": snapshot["poc_count"],
             "recent_update_trend": snapshot["trend"],
-            "recent_records": _public_records(snapshot["records"]),
+            "recent_records": recent_records,
             "sources": sources if sources else self.sources_status(),
             "persistence": "local-catalog",
             "generated_at": self._catalog.metadata("last_sync", batch_generated_at or now_iso()),
@@ -1867,6 +2145,13 @@ class RealtimeIntelligenceService:
             "catalog_progress": max(0, min(catalog_progress, 100)),
             "catalog_count": catalog_snapshot["total"],
             "catalog_error": self._catalog.metadata("baseline_error", ""),
+            "response_language": language,
+            "catalog_translation": translation_audit,
+            "translation_status": str(translation_audit.get("status") or "partial"),
+            "translation_progress": int(translation_audit.get("progress") or 0),
+            "translation_count": record_count,
+            "translation_ready_count": ready_records,
+            "translation_error": str(translation_audit.get("error") or ""),
         }
 
     def sources_status(self, latest: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -2512,21 +2797,25 @@ def _not_specified(language: str) -> str:
 
 def _localized_vulnerability_summary(record: dict[str, Any], language: str = "zh-Hans") -> str:
     language = _normalize_response_language(language)
+    source_summary = str(record.get("summary_original") or record.get("summary") or "").strip()
     summary = str(
         record_summary_for_language(record, language)
         or record_title_for_language(record, language)
     ).strip()
     if not summary:
         return _fallback_vulnerability_summary(record, language)
-    if language == "zh-Hans" and _contains_cjk(summary):
+    if (
+        language in {"zh-Hans", "zh-Hant"}
+        and record_translation_ready(record, language)
+        and _contains_cjk(summary)
+    ):
         return sanitize_public_text(summary)
     if language == "en" and not _contains_cjk(summary):
         return sanitize_public_text(summary)
 
-    if _llm_summary_translation_enabled():
-        translated = _translate_vulnerability_summary(summary, language)
-        if translated:
-            return translated
+    translated = _translate_vulnerability_summary(source_summary or summary, language)
+    if translated:
+        return translated
     return _fallback_vulnerability_summary(record, language)
 
 
@@ -2544,51 +2833,39 @@ def localized_vulnerability_summary(
         or record_title_for_language(record, language)
     ).strip()
     if prefer_translation and summary:
-        requires_translation = (language == "zh-Hans" and not _contains_cjk(summary)) or (
+        requires_translation = (language in {"zh-Hans", "zh-Hant"} and not _contains_cjk(summary)) or (
             language == "en" and _contains_cjk(summary)
         )
         if requires_translation:
             translated = _translate_vulnerability_summary(summary, language)
-            if translated and (language != "zh-Hans" or _contains_cjk(translated)):
+            if translated and (language not in {"zh-Hans", "zh-Hant"} or _contains_cjk(translated)):
                 return translated
     return _localized_vulnerability_summary(record, language)
 
 
 def _translate_vulnerability_summary(summary: str, language: str = "zh-Hans") -> str:
-    active_model = active_model_from_env()
-    if not active_model:
+    source = str(summary or "").strip()
+    if not source:
         return ""
     language = _normalize_response_language(language)
-    result = diagnose_chat_completion(
-        active_model,
-        [
-            {
-                "role": "system",
-                "content": (
-                    f"你是安全漏洞信息翻译助手。请把漏洞描述翻译为{_language_name(language)}。"
-                    "要求：保留 CVE、GHSA、产品名、包名、函数名、版本号、URL 和技术术语；"
-                    "不要添加情报来源、链接或额外解释；"
-                    "只输出译文正文。"
-                ),
-            },
-            {"role": "user", "content": summary[:1800]},
-        ],
-        source="intelligence_translation",
-    )
-    if result.get("status") != "success":
+    if language == "en" and not _contains_cjk(source):
+        return sanitize_public_text(source)
+    try:
+        result = translation_agent.translate_json(
+            {"summary": source},
+            target_language=language,
+            user_id="default",
+            session_id="intelligence-summary",
+            content_scope="vulnerability_summary",
+        )
+    except Exception:  # noqa: BLE001 - callers use a fact-only localized fallback.
         return ""
-    return sanitize_public_text(str(result.get("answer") or "").strip())
-
-
-def _llm_summary_translation_enabled() -> bool:
-    """Keep graph construction deterministic; per-record LLM calls scale linearly."""
-
-    return str(os.getenv("SECFLOW_ENABLE_LLM_SUMMARY_TRANSLATION", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    if result.audit.get("status") != "completed" or int(result.audit.get("unresolved_fields") or 0):
+        return ""
+    translated = sanitize_public_text(str(result.payload.get("summary") or "").strip())
+    if language in {"zh-Hans", "zh-Hant"} and not _contains_cjk(translated):
+        return ""
+    return translated
 
 
 def _fallback_vulnerability_summary(record: dict[str, Any], language: str = "zh-Hans") -> str:
@@ -3344,7 +3621,15 @@ def _merge_record(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     # facts replace a pending translation, while a transient translation outage
     # must not erase a previously stored Chinese rendering.
     if record_translation_ready(incoming) and not record_translation_ready(target):
-        for key in ("title_original", "summary_original", "title_zh", "summary_zh", "catalog_translation"):
+        for key in (
+            "title_original",
+            "summary_original",
+            "title_zh",
+            "summary_zh",
+            "title_zh_hant",
+            "summary_zh_hant",
+            "catalog_translation",
+        ):
             if key in incoming:
                 target[key] = deepcopy(incoming[key])
     # Window queries key on published_at (record_date). Multiple sources report
@@ -3741,7 +4026,7 @@ def _public_source_status(statuses: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") -> list[dict[str, Any]]:
-    """Remove upstream provenance from records returned to the desktop client."""
+    """Project only verified localized content to the desktop client."""
 
     language = _normalize_response_language(language)
     private_keys = {
@@ -3756,26 +4041,121 @@ def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") ->
         "summary_original",
         "title_zh",
         "summary_zh",
+        "title_zh_hant",
+        "summary_zh_hant",
         "catalog_translation",
     }
     result: list[dict[str, Any]] = []
     for record in records:
         item = {key: deepcopy(value) for key, value in record.items() if key not in private_keys}
-        item["title"] = record_title_for_language(record, language)
-        item["summary"] = record_summary_for_language(record, language)
+        translation_ready = language == "en" or record_translation_ready(record, language)
+        localized_title = record_title_for_language(record, language) if translation_ready else ""
+        localized_summary = record_summary_for_language(record, language) if translation_ready else ""
+        item["title"] = localized_title
+        item["summary"] = localized_summary
+        if translation_ready and language == "zh-Hans":
+            item["title_zh"] = localized_title
+            item["summary_zh"] = localized_summary
+        elif translation_ready and language == "zh-Hant":
+            item["title_zh_hant"] = localized_title
+            item["summary_zh_hant"] = localized_summary
         item["reference_links"] = _public_reference_links(record)
+        item["content_language"] = language if translation_ready else "unknown"
+        item["translation_status"] = (
+            "original"
+            if language == "en"
+            else "translated" if translation_ready else "pending"
+        )
         result.append(item)
     return result
 
 
+def _translate_dashboard_script(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Convert the public Dashboard slice to Traditional Chinese via Translation MCP."""
+
+    try:
+        result = translation_agent.translate_json(
+            {"records": deepcopy(records)},
+            target_language="zh-Hant",
+            user_id="default",
+            session_id="dashboard-visible-records",
+            content_scope="dashboard_traditional_chinese",
+        )
+        translated_records = result.payload.get("records")
+        if not isinstance(translated_records, list):
+            raise RuntimeError("Translation MCP returned an invalid Dashboard record list")
+        audit = dict(result.audit)
+        successful = (
+            audit.get("target_language") == "zh-Hant"
+            and translation_audit_is_publishable(audit)
+        )
+        normalized: list[dict[str, Any]] = []
+        for value in translated_records:
+            if not isinstance(value, dict):
+                continue
+            item = dict(value)
+            item["content_language"] = "zh-Hant" if successful else "unknown"
+            item["translation_status"] = "translated" if successful else "pending"
+            normalized.append(item)
+        audit.update(
+            {
+                "status": "completed" if successful and len(normalized) == len(records) else "partial",
+                "target_language": "zh-Hant",
+                "record_count": len(records),
+                "ready_records": len(normalized) if successful else 0,
+                "pending_records": 0 if successful else len(records),
+            }
+        )
+        if successful and len(normalized) == len(records):
+            return normalized, audit
+        pending = []
+        for value in records:
+            item = dict(value)
+            for field in ("title", "summary", "description", "title_zh", "summary_zh"):
+                item.pop(field, None)
+            item["content_language"] = "unknown"
+            item["translation_status"] = "pending"
+            pending.append(item)
+        return pending, audit
+    except Exception as exc:  # noqa: BLE001 - return no cross-language source text as translated.
+        pending = []
+        for value in records:
+            item = dict(value)
+            for field in ("title", "summary", "description", "title_zh", "summary_zh"):
+                item.pop(field, None)
+            item["content_language"] = "unknown"
+            item["translation_status"] = "pending"
+            pending.append(item)
+        return pending, {
+            "status": "partial",
+            "translation_status": "unavailable",
+            "target_language": "zh-Hant",
+            "record_count": len(records),
+            "ready_records": 0,
+            "pending_records": len(records),
+            "offline": True,
+            "network_used": False,
+            "requires_api_key": False,
+            "provider_calls": 0,
+            "billable_tokens": 0,
+            "token_usage": 0,
+            "warnings": [sanitize_public_text(str(exc))[:300]],
+        }
+
+
 def _catalog_translation_status(records: list[dict[str, Any]], language: str) -> dict[str, Any]:
-    ready = records_translation_ready(records, language)
+    ready_records = sum(record_translation_ready(record, language) for record in records)
+    pending_records = max(0, len(records) - ready_records)
+    ready = bool(records) and pending_records == 0
     return {
         "status": "completed" if ready else "pending",
         "target_language": _normalize_response_language(language),
         "storage_stage": "before-persist",
         "record_count": len(records),
-        "ready_records": sum(record_translation_ready(record, language) for record in records),
+        "ready_records": ready_records,
+        "pending_records": pending_records,
     }
 
 

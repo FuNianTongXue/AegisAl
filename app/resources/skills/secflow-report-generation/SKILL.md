@@ -1,6 +1,6 @@
 ---
 name: secflow-report-generation
-description: Generate and download auditable SecFlow scan reports through SARIF, Mermaid JPEG, Markdown, Word, PDF, and Excel MCP services. Use after a completed code scan, SBOM generation, or full scan, or when a user requests an existing report in one or all supported formats. Report content scope is determined by scan_type context. Keep generation and download human-confirmed.
+description: "Generate and download auditable SecFlow scan reports through SARIF, Mermaid JPEG, Markdown, Word, PDF, and Excel MCP services. Use after a completed code scan, SBOM generation, or full scan, or when a user requests an existing report in one or all supported formats. Report content scope is determined by scan_type context. Keep generation and download human-confirmed."
 ---
 
 # SecFlow Report Generation

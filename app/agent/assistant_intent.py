@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from calendar import monthrange
 from datetime import date, timedelta
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from app.llm import active_model_from_env, chat_readiness_error, diagnose_chat_completion
+from app.skills import runtime as skill_runtime
 
 
 ASSISTANT_INTENT_PROMPT_VERSION = "secflow-assistant-intent-v9"
@@ -19,28 +17,6 @@ COMPONENT_QUERY_SKILL_NAME = "secflow-component-vulnerability-query"
 SBOM_SKILL_NAME = "secflow-project-sbom"
 PROJECT_SCAN_SKILL_NAME = "secflow-project-scan"
 REPORT_SKILL_NAME = "secflow-report-generation"
-_SKILL_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "resources"
-    / "skills"
-    / ASSISTANT_INTENT_SKILL_NAME
-    / "SKILL.md"
-)
-_SBOM_SKILL_PATH = Path(__file__).resolve().parents[1] / "resources" / "skills" / SBOM_SKILL_NAME / "SKILL.md"
-_COMPONENT_QUERY_SKILL_PATH = (
-    Path(__file__).resolve().parents[1] / "resources" / "skills" / COMPONENT_QUERY_SKILL_NAME / "SKILL.md"
-)
-_PROJECT_SCAN_SKILL_PATH = (
-    Path(__file__).resolve().parents[1] / "resources" / "skills" / PROJECT_SCAN_SKILL_NAME / "SKILL.md"
-)
-_REPORT_SKILL_PATH = Path(__file__).resolve().parents[1] / "resources" / "skills" / REPORT_SKILL_NAME / "SKILL.md"
-_MULTI_AGENT_SKILL_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "resources"
-    / "skills"
-    / MULTI_AGENT_SUPERVISOR_SKILL_NAME
-    / "SKILL.md"
-)
 _ALLOWED_INTENTS = {
     "component_vulnerability_catalog",
     "component_vulnerability_query",
@@ -75,7 +51,7 @@ ASSISTANT_INTENT_SYSTEM_PROMPT = """你是 SecFlow 的语义规划节点，不�
 只有用户明确询问某个组件的某个具体版本是否受影响时，才选择 component_vulnerability_query；该能力会使用 Component Detail MCP 生成结构化漏洞详情页，不要把它改成通用问答。
 用户询问某年所有漏洞但没有强调组件清单时，选择 vulnerability_year_lookup。
 当用户明确希望实际执行代码、依赖、AST、CFG、DFG、污点或安全扫描时，选择 project_scan，即使本轮没有显式附加工作区。工作区是否可恢复由确定性项目关联节点判断；不要因为只有历史 SBOM 文件名就把执行意图降级成普通问答，也不要根据文件名猜测本机路径。仅询问“代码扫描是什么”等概念问题时仍选择 llm_direct。
-用户项目扫描确定后，由任务图按语言调用独立 Code Scan MCP SSE 服务；项目许可识别属于 SBOM Agent 的专属能力，代码扫描 Agent 和报告 Agent 不得直接调用许可识别工具。语义规划节点只决定用户目标，不伪造 MCP 调用状态，也不把普通问答误路由为扫描。
+用户项目扫描确定后，由任务图按语言调用 Host 管理的本地 stdio Code Scan MCP 独立沙箱进程；项目许可识别属于 SBOM Agent 的专属能力，代码扫描 Agent 和报告 Agent 不得直接调用许可识别工具。语义规划节点只决定用户目标，不伪造 MCP 调用状态，也不把普通问答误路由为扫描。
 当输入提供已完成的活动扫描任务且用户希望再次扫描、回归扫描或与上次结果对比时，选择 project_rescan。
 当用户希望解释活动扫描结果、补充修复方案、修改代码示例、验证方法、优先级或风险判断时，选择 scan_result_follow_up。
 同一次扫描内部的项目 Overlay 重扫不等于用户发起的 project_rescan。其他问题选择 llm_direct。
@@ -105,121 +81,63 @@ ASSISTANT_INTENT_SYSTEM_PROMPT = """你是 SecFlow 的语义规划节点，不�
 """
 
 
-@lru_cache(maxsize=1)
 def load_component_catalog_skill() -> str:
-    text = _SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow component catalog skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow component catalog skill body is empty")
-    return body
+    return skill_runtime.load_skill(ASSISTANT_INTENT_SKILL_NAME)
 
 
-@lru_cache(maxsize=1)
 def load_component_query_skill() -> str:
-    text = _COMPONENT_QUERY_SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow component query skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow component query skill body is empty")
-    return body
+    return skill_runtime.load_skill(COMPONENT_QUERY_SKILL_NAME)
 
 
-@lru_cache(maxsize=1)
 def load_sbom_skill() -> str:
-    text = _SBOM_SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow project SBOM skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow project SBOM skill body is empty")
-    return body
+    return skill_runtime.load_skill(SBOM_SKILL_NAME)
 
 
-@lru_cache(maxsize=1)
 def load_project_scan_skill() -> str:
-    text = _PROJECT_SCAN_SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow project scan skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow project scan skill body is empty")
-    return body
+    return skill_runtime.load_skill(PROJECT_SCAN_SKILL_NAME)
 
 
-@lru_cache(maxsize=1)
 def load_report_skill() -> str:
-    text = _REPORT_SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow report generation skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow report generation skill body is empty")
-    return body
+    return skill_runtime.load_skill(REPORT_SKILL_NAME)
 
 
-@lru_cache(maxsize=1)
 def load_multi_agent_supervisor_skill() -> str:
-    text = _MULTI_AGENT_SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow multi-agent supervisor skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow multi-agent supervisor skill body is empty")
-    return body
+    return skill_runtime.load_skill(MULTI_AGENT_SUPERVISOR_SKILL_NAME)
 
 
 def multi_agent_supervisor_skill_metadata() -> dict[str, str]:
-    skill = load_multi_agent_supervisor_skill()
-    return {
-        "name": MULTI_AGENT_SUPERVISOR_SKILL_NAME,
-        "sha256": hashlib.sha256(skill.encode("utf-8")).hexdigest(),
-        "prompt_version": ASSISTANT_INTENT_PROMPT_VERSION,
-    }
+    return skill_runtime.skill_metadata(
+        MULTI_AGENT_SUPERVISOR_SKILL_NAME,
+        prompt_version=ASSISTANT_INTENT_PROMPT_VERSION,
+    )
 
 
 def assistant_intent_skill_metadata() -> dict[str, str]:
-    skill = load_component_catalog_skill()
-    return {
-        "name": ASSISTANT_INTENT_SKILL_NAME,
-        "sha256": hashlib.sha256(skill.encode("utf-8")).hexdigest(),
-        "prompt_version": ASSISTANT_INTENT_PROMPT_VERSION,
-    }
+    return skill_runtime.skill_metadata(
+        ASSISTANT_INTENT_SKILL_NAME,
+        prompt_version=ASSISTANT_INTENT_PROMPT_VERSION,
+    )
 
 
 def component_query_skill_metadata() -> dict[str, str]:
-    skill = load_component_query_skill()
-    return {
-        "name": COMPONENT_QUERY_SKILL_NAME,
-        "sha256": hashlib.sha256(skill.encode("utf-8")).hexdigest(),
-        "prompt_version": ASSISTANT_INTENT_PROMPT_VERSION,
-    }
+    return skill_runtime.skill_metadata(
+        COMPONENT_QUERY_SKILL_NAME,
+        prompt_version=ASSISTANT_INTENT_PROMPT_VERSION,
+    )
 
 
 def sbom_skill_metadata() -> dict[str, str]:
-    skill = load_sbom_skill()
-    return {
-        "name": SBOM_SKILL_NAME,
-        "sha256": hashlib.sha256(skill.encode("utf-8")).hexdigest(),
-        "prompt_version": ASSISTANT_INTENT_PROMPT_VERSION,
-    }
+    return skill_runtime.skill_metadata(
+        SBOM_SKILL_NAME,
+        prompt_version=ASSISTANT_INTENT_PROMPT_VERSION,
+    )
 
 
 def project_scan_skill_metadata() -> dict[str, str]:
-    skill = load_project_scan_skill()
-    return {
-        "name": PROJECT_SCAN_SKILL_NAME,
-        "sha256": hashlib.sha256(skill.encode("utf-8")).hexdigest(),
-        "prompt_version": ASSISTANT_INTENT_PROMPT_VERSION,
-    }
+    return skill_runtime.skill_metadata(
+        PROJECT_SCAN_SKILL_NAME,
+        prompt_version=ASSISTANT_INTENT_PROMPT_VERSION,
+    )
 
 
 def plan_assistant_intent(

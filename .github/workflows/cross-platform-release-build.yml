@@ -1,6 +1,7 @@
-name: Cross-platform seven-day trial build
+name: Cross-platform formal desktop build
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "app/**"
@@ -9,7 +10,6 @@ on:
       - "scripts/build_tauri_**"
       - "requirements*.txt"
       - ".github/workflows/cross-platform-release-build.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,6 +31,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - name: Fetch pinned offline translation model
+        shell: pwsh
+        run: python scripts/fetch_translation_model.py
       - name: Install build dependencies
         shell: pwsh
         run: |
@@ -39,15 +42,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-windows.txt
           pnpm --dir desktop/SecFlowTauri install --frozen-lockfile
-      - name: Build Windows x86_64 seven-day trial
+      - name: Build Windows x86_64 formal package
         shell: pwsh
-        run: ./scripts/build_tauri_windows.ps1 -Edition trial -OutputDir dist/windows-x86_64/trial
+        run: ./scripts/build_tauri_windows.ps1 -Edition formal -OutputDir dist/windows-x86_64/formal
       - uses: actions/upload-artifact@v4
         with:
-          name: secflow-v1.3.3-windows-x86-64-trial-7days
-          path: dist/windows-x86_64/trial/*.exe
+          name: secflow-v1.3.3-windows-x86-64-formal
+          path: dist/windows-x86_64/formal/*.exe
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
 
   macos-intel:
     runs-on: macos-15-intel
@@ -69,6 +72,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
+      - name: Fetch pinned offline translation model
+        run: python3 scripts/fetch_translation_model.py
       - name: Install build dependencies
         run: |
           test "$(uname -m)" = "x86_64"
@@ -77,56 +82,15 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install -r requirements-macos.txt
           pnpm --dir desktop/SecFlowTauri install --frozen-lockfile
-      - name: Build macOS Intel seven-day trial
+      - name: Build macOS Intel formal package
         run: |
-          bash scripts/build_tauri_macos_trial.sh
-          mkdir -p dist/macos-x86_64/trial
-          cp "desktop/SecFlowTauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/安全智脑 7 天试用版_1.3.3_x64.dmg" \
-            dist/macos-x86_64/trial/SecFlow-v1.3.3-macOS-x86_64-Trial-7Days.dmg
+          bash scripts/build_tauri_macos.sh
+          mkdir -p dist/macos-x86_64/formal
+          cp "desktop/SecFlowTauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/安全智脑_1.3.3_x64.dmg" \
+            dist/macos-x86_64/formal/SecFlow-v1.3.3-macOS-x86_64-Formal.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: secflow-v1.3.3-macos-x86-64-trial-7days
-          path: dist/macos-x86_64/trial/*.dmg
+          name: secflow-v1.3.3-macos-x86-64-formal
+          path: dist/macos-x86_64/formal/*.dmg
           if-no-files-found: error
-          retention-days: 7
-
-  macos-arm64:
-    runs-on: macos-14
-    timeout-minutes: 90
-    env:
-      PYTHON_BIN: python3
-      SECFLOW_MACOS_ARCH: arm64
-      SECFLOW_TAURI_TARGET: aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          architecture: "arm64"
-          cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-      - name: Install build dependencies
-        run: |
-          test "$(uname -m)" = "arm64"
-          corepack enable
-          corepack prepare pnpm@10.13.1 --activate
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-macos.txt
-          pnpm --dir desktop/SecFlowTauri install --frozen-lockfile
-      - name: Build macOS ARM64 seven-day trial
-        run: |
-          bash scripts/build_tauri_macos_trial.sh
-          mkdir -p dist/macos-arm64/trial
-          cp "desktop/SecFlowTauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/安全智脑 7 天试用版_1.3.3_aarch64.dmg" \
-            dist/macos-arm64/trial/SecFlow-v1.3.3-macOS-ARM64-Trial-7Days.dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: secflow-v1.3.3-macos-arm64-trial-7days
-          path: dist/macos-arm64/trial/*.dmg
-          if-no-files-found: error
-          retention-days: 7
+          retention-days: 14

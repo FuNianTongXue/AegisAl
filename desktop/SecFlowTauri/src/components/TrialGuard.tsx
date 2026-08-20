@@ -1,5 +1,5 @@
 import { Clock3, RefreshCw, ServerCrash, ShieldAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { waitForBackendReady } from "../hooks/useBackend";
 import { api } from "../lib/api";
@@ -12,6 +12,9 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
   const [loadError, setLoadError] = useState("");
   const [retrySequence, setRetrySequence] = useState(0);
   const [checking, setChecking] = useState(false);
+  const blocker = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!trialBuild) return;
@@ -48,6 +51,37 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
     };
   }, [retrySequence, trialBuild]);
 
+  const blockerKind = trialBuild && !status && loadError
+    ? "service"
+    : trialBuild && status && !status.usable
+      ? "license"
+      : null;
+
+  useEffect(() => {
+    if (!blockerKind) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialog.current?.focus();
+    const restoreBackground = blocker.current ? isolateBackground(blocker.current) : () => undefined;
+    const trap = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (event.key === "Tab" && dialog.current) trapFocus(event, dialog.current);
+    };
+    document.addEventListener("keydown", trap, true);
+    return () => {
+      document.removeEventListener("keydown", trap, true);
+      restoreBackground();
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, [blockerKind]);
+
+  useEffect(() => {
+    if (blockerKind === "service" && !checking) retryButton.current?.focus();
+  }, [blockerKind, checking]);
+
   const retry = () => {
     setLoadError("");
     setStatus(null);
@@ -63,12 +97,19 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
   }
   if (!status) {
     return (
-      <div className="trial-blocker service-unavailable" role="alert" aria-label="本地安全服务不可用">
-        <div>
+      <div className="trial-blocker service-unavailable" ref={blocker}>
+        <div
+          ref={dialog}
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="trial-service-title"
+          aria-describedby="trial-service-description"
+          tabIndex={-1}
+        >
           <span><ServerCrash size={24} /></span>
-          <h2>本地安全服务正在恢复</h2>
-          <p>暂时无法连接本机分析服务。这不代表试用授权或用户数据已损坏。</p>
-          <button type="button" className="trial-retry-button" onClick={retry} disabled={checking}>
+          <h2 id="trial-service-title">本地安全服务正在恢复</h2>
+          <p id="trial-service-description">暂时无法连接本机分析服务。这不代表试用授权或用户数据已损坏。</p>
+          <button ref={retryButton} type="button" className="trial-retry-button" onClick={retry} disabled={checking}>
             <RefreshCw size={15} className={checking ? "spinning" : ""} />
             {checking ? "正在重新连接" : "重新连接"}
           </button>
@@ -79,12 +120,19 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
   }
   if (!status.usable) {
     return (
-      <div className="trial-blocker" role="alert" aria-label="试用授权不可用">
-        <div>
+      <div className="trial-blocker" ref={blocker}>
+        <div
+          ref={dialog}
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="trial-license-title"
+          aria-describedby="trial-license-description trial-license-guidance"
+          tabIndex={-1}
+        >
           <span><ShieldAlert size={24} /></span>
-          <h2>安全智脑试用版不可用</h2>
-          <p>{status?.message || loadError || "无法验证本机试用授权。"}</p>
-          <small>应用和用户数据未被修改。请安装正式授权版本或联系管理员。</small>
+          <h2 id="trial-license-title">安全智脑试用版不可用</h2>
+          <p id="trial-license-description">{status?.message || loadError || "无法验证本机试用授权。"}</p>
+          <small id="trial-license-guidance">应用和用户数据未被修改。请安装正式授权版本或联系管理员。</small>
         </div>
       </div>
     );
@@ -102,4 +150,51 @@ function remainingLabel(seconds: number | null | undefined) {
   if (safe >= 86400) return `剩余 ${Math.ceil(safe / 86400)} 天`;
   if (safe >= 3600) return `剩余 ${Math.ceil(safe / 3600)} 小时`;
   return `剩余 ${Math.ceil(safe / 60)} 分钟`;
+}
+
+const FOCUSABLE = [
+  "button:not([disabled])",
+  "[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function trapFocus(event: KeyboardEvent, container: HTMLElement) {
+  const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) => !element.hidden);
+  if (!focusable.length) {
+    event.preventDefault();
+    container.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !container.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function isolateBackground(layer: HTMLElement) {
+  const siblings = Array.from(layer.parentElement?.children || [])
+    .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== layer)
+    .map((element) => ({
+      element,
+      inert: element.inert,
+      ariaHidden: element.getAttribute("aria-hidden"),
+    }));
+  siblings.forEach(({ element }) => {
+    element.inert = true;
+    element.setAttribute("aria-hidden", "true");
+  });
+  return () => siblings.forEach(({ element, inert, ariaHidden }) => {
+    element.inert = inert;
+    if (ariaHidden === null) element.removeAttribute("aria-hidden");
+    else element.setAttribute("aria-hidden", ariaHidden);
+  });
 }

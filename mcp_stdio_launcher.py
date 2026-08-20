@@ -9,7 +9,7 @@ Available server IDs:
     code-scan, component-detail, excel, d3-sankey,
     license-scan, sbom-excel, translation,
     report-chart, report-markdown, report-mermaid,
-    report-pdf, report-sarif, report-word
+    report-pdf, report-sarif, report-template, report-excel, report-word
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="SecFlow MCP stdio Launcher")
     parser.add_argument(
         "--server",
@@ -41,26 +41,19 @@ def main() -> None:
             "report-mermaid",
             "report-pdf",
             "report-sarif",
+            "report-template",
+            "report-excel",
             "report-word",
         ],
         help="MCP server to launch",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     server_id = args.server
 
     # ── code-scan ──────────────────────────────────────────────────────
     if server_id == "code-scan":
-        # code_scan.py expects --transport sse --port <port> --parent-pid <pid>
-        # We override main() to run in stdio mode instead
-        from mcp.server.fastmcp import FastMCP
-
-        # We can't easily import the server instance due to heavy dependencies
-        # (semgrep, tree-sitter, etc.), so we create a lightweight wrapper
-        # that exposes the same tool interface via stdio.
-
-        # The code-scan server is the most complex (SSE, subprocess-based).
-        # For ZCode stdio, we provide a simplified stdio-compatible version.
+        # The Host launches this entry point as an isolated child process.
         from app.mcp.code_scan import code_scan_mcp
 
         code_scan_mcp.run(transport="stdio")
@@ -128,6 +121,18 @@ def main() -> None:
     if server_id == "report-sarif":
         from app.mcp.report_sarif import report_sarif_mcp
         report_sarif_mcp.run(transport="stdio")
+        return
+
+    # ── report-template ─────────────────────────────────────────
+    if server_id == "report-template":
+        from app.mcp.report_template import template_mcp
+        template_mcp.run(transport="stdio")
+        return
+
+    # ── report-excel ───────────────────────────────────────────
+    if server_id == "report-excel":
+        from app.mcp.report_excel import report_excel_mcp
+        report_excel_mcp.run(transport="stdio")
         return
 
     # ── report-word ────────────────────────────────────────────────────

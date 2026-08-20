@@ -6,11 +6,11 @@ import re
 import tempfile
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from app.llm import active_model_from_env, chat_readiness_error, diagnose_chat_completion
+from app.skills import runtime as skill_runtime
 
 
 PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION = "secflow-project-adaptive-scan-v1"
@@ -21,13 +21,6 @@ MAX_EVIDENCE_REVIEW_FINDINGS = 24
 MAX_OVERLAY_TAINT_RULES = 8
 MAX_OVERLAY_ACTIONS = 24
 
-_SKILL_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "resources"
-    / "skills"
-    / PROJECT_ADAPTIVE_SCAN_SKILL_NAME
-    / "SKILL.md"
-)
 _LANGUAGES = {"java", "python", "go", "c", "cpp", "csharp", "rust", "solidity"}
 _MACRO_NAME_RE = re.compile(r"[A-Za-z_]\w*\Z")
 _RULE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}\Z")
@@ -69,25 +62,15 @@ PROJECT_ADAPTIVE_SCAN_SYSTEM_PROMPT = """你是 SecFlow 上传项目的自适应
 OverlaySynthesizer = Callable[[dict[str, Any]], dict[str, Any]]
 
 
-@lru_cache(maxsize=1)
 def load_project_adaptive_scan_skill() -> str:
-    text = _SKILL_PATH.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        raise ValueError("SecFlow project-adaptive skill frontmatter is missing")
-    _, _, remainder = text.partition("\n---\n")
-    body = remainder.strip()
-    if not body:
-        raise ValueError("SecFlow project-adaptive skill body is empty")
-    return body
+    return skill_runtime.load_skill(PROJECT_ADAPTIVE_SCAN_SKILL_NAME)
 
 
 def project_adaptive_skill_metadata() -> dict[str, str]:
-    skill = load_project_adaptive_scan_skill()
-    return {
-        "name": PROJECT_ADAPTIVE_SCAN_SKILL_NAME,
-        "sha256": hashlib.sha256(skill.encode("utf-8")).hexdigest(),
-        "prompt_version": PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION,
-    }
+    return skill_runtime.skill_metadata(
+        PROJECT_ADAPTIVE_SCAN_SKILL_NAME,
+        prompt_version=PROJECT_ADAPTIVE_SCAN_PROMPT_VERSION,
+    )
 
 
 def build_project_profile(

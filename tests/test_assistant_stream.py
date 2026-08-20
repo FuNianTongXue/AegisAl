@@ -56,8 +56,8 @@ class FakeKnowledgeGraph:
 
 class FakeStreamingKnowledgeGraph(FakeKnowledgeGraph):
     def invoke(self, _question, _top_k, **kwargs):
-        kwargs["content_sink"]("实时")
-        kwargs["content_sink"]("回答")
+        kwargs["content_sink"]("UNVERIFIED ENGLISH ")
+        kwargs["content_sink"]("BODY")
         return {
             "mode": "llm_direct",
             "summary": "实时回答",
@@ -315,7 +315,7 @@ class AssistantStreamTests(unittest.TestCase):
         self.assertEqual(result["orchestration"]["architecture"], "direct-model")
         self.assertFalse(result["orchestration"]["agentic"])
 
-    def test_stream_endpoint_does_not_repeat_genuine_model_deltas(self) -> None:
+    def test_stream_endpoint_publishes_only_final_accepted_content(self) -> None:
         with (
             patch.object(main_module, "knowledge_graph", FakeStreamingKnowledgeGraph()),
             patch.object(main_module, "trial_manager", AlwaysUsableTrial()),
@@ -334,9 +334,10 @@ class AssistantStreamTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.text.count("event: content"), 2)
-        self.assertEqual(response.text.count('"delta": "实时"'), 1)
-        self.assertEqual(response.text.count('"delta": "回答"'), 1)
+        self.assertEqual(response.text.count("event: content"), 1)
+        self.assertEqual(response.text.count('"delta": "实时回答"'), 1)
+        self.assertNotIn("UNVERIFIED ENGLISH", response.text)
+        self.assertNotIn("BODY", response.text)
 
     def test_answer_content_chunks_preserve_markdown_exactly(self) -> None:
         answer = "# 漏洞摘要\n\n第一段。第二段。\n\n```java\nreturn value;\n```"
@@ -353,6 +354,8 @@ class AssistantStreamTests(unittest.TestCase):
         self.assertIn("NVD、GitHub Advisory、OSV、CISA", prompt)
         self.assertIn("不要输出模型的私有推理过程", prompt)
         self.assertIn("禁止生成 PoC、利用载荷或攻击步骤", prompt)
+        self.assertIn("不承担跨语言翻译", prompt)
+        self.assertIn("模型不得执行该翻译", prompt)
 
     def test_llm_token_usage_normalizes_supported_provider_shapes(self) -> None:
         self.assertEqual(llm_token_usage({"data": {"usage": {"total_tokens": 4128}}}), 4128)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import io
 import json
@@ -9,8 +8,9 @@ from typing import Any, Literal
 
 import xlsxwriter
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.mcp.artifacts import MCPArtifactReference, stage_output_artifact
 from app.privacy import severity_cn
 from app.reports import validate_report_document_json
 
@@ -21,7 +21,7 @@ class ExcelReportOutput(BaseModel):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     renderer: Literal["xlsxwriter-enterprise-report"] = "xlsxwriter-enterprise-report"
-    artifact_base64: str
+    artifacts: list[MCPArtifactReference] = Field(default_factory=list)
     input_sha256: str
     output_sha256: str
     artifact_size: int
@@ -39,14 +39,23 @@ report_excel_mcp = FastMCP(
     description="Render a styled Excel workbook with summary, findings, inventory, licenses and audit sheets.",
     structured_output=True,
 )
-def render_excel_report(report_document: dict[str, Any]) -> ExcelReportOutput:
+def render_excel_report(report_document: dict[str, Any], *, output_dir: str) -> ExcelReportOutput:
     document = validate_report_document_json(report_document)
     source_hash = str(((document.get("source") or {}).get("audit") or {}).get("payload_sha256") or "")
     payload, sheet_count = _build_xlsx(document)
+    digest = hashlib.sha256(payload).hexdigest()
+    artifacts = [
+        stage_output_artifact(
+            output_dir,
+            file_name="SecFlow-security-report.xlsx",
+            payload=payload,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    ]
     return ExcelReportOutput(
-        artifact_base64=base64.b64encode(payload).decode("ascii"),
+        artifacts=artifacts,
         input_sha256=source_hash,
-        output_sha256=hashlib.sha256(payload).hexdigest(),
+        output_sha256=digest,
         artifact_size=len(payload),
         sheet_count=sheet_count,
     )

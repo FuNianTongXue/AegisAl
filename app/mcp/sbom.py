@@ -8,77 +8,37 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import xlsxwriter
 from mcp.server.fastmcp import FastMCP
 
-from app.mcp.component_query import AssistantArtifact
+from app.assistant_artifacts import (
+    AssistantArtifact,
+    XLSX_MEDIA_TYPE,
+)
+from app.mcp.artifacts import stage_output_artifact
 from app.privacy import severity_cn
 from app.sbom import canonical_sbom_json, localized_intelligence_source
-from app.storage import DATA_DIR, now_iso
+from app.storage import now_iso
 
 
-_ARTIFACT_ID = re.compile(r"^sbom-xlsx-[0-9]{14}-[a-f0-9]{12}$")
+def __getattr__(name: str) -> Any:
+    """Lazy compatibility only; MCP execution never imports Host artifact stores."""
+
+    if name in {"SBOMArtifactStore", "artifact_store"}:
+        from app.assistant_artifacts import SBOMArtifactStore, sbom_artifact_store
+
+        return SBOMArtifactStore if name == "SBOMArtifactStore" else sbom_artifact_store
+    raise AttributeError(name)
+
+
 _EXCEL_CELL_LIMIT = 32_000
 _CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _CHINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
-class SBOMArtifactStore:
-    def __init__(self, root: Path | None = None, *, retain: int = 100) -> None:
-        self.root = root or (DATA_DIR / "assistant_artifacts")
-        self.retain = max(10, min(int(retain), 500))
-        self._lock = RLock()
-
-    def save(self, content: bytes, *, file_name: str, generated_at: str) -> AssistantArtifact:
-        if not content.startswith(b"PK\x03\x04"):
-            raise ValueError("SBOM Excel MCP 未生成有效的 XLSX 工作簿")
-        digest = hashlib.sha256(content).hexdigest()
-        timestamp = re.sub(r"\D", "", generated_at)[:14]
-        if len(timestamp) != 14:
-            timestamp = re.sub(r"\D", "", now_iso())[:14]
-        artifact_id = f"sbom-xlsx-{timestamp}-{digest[:12]}"
-        safe_name = _safe_excel_name(file_name)
-        path = self.root / f"{artifact_id}.xlsx"
-        temporary = self.root / f".{artifact_id}.tmp"
-        with self._lock:
-            self.root.mkdir(parents=True, exist_ok=True)
-            temporary.write_bytes(content)
-            temporary.chmod(0o600)
-            temporary.replace(path)
-            self._prune()
-        return AssistantArtifact(
-            id=artifact_id,
-            file_name=safe_name,
-            download_path=f"/api/assistant/artifacts/{artifact_id}",
-            sha256=digest,
-            size=len(content),
-            generated_at=generated_at,
-        )
-
-    def resolve(self, artifact_id: str) -> Path:
-        clean_id = str(artifact_id or "").strip()
-        if not _ARTIFACT_ID.fullmatch(clean_id):
-            raise KeyError(artifact_id)
-        path = self.root / f"{clean_id}.xlsx"
-        if not path.is_file() or path.parent.resolve() != self.root.resolve():
-            raise KeyError(artifact_id)
-        return path
-
-    def _prune(self) -> None:
-        files = sorted(
-            (path for path in self.root.glob("sbom-xlsx-*.xlsx") if path.is_file()),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        for path in files[self.retain :]:
-            path.unlink(missing_ok=True)
-
-
-artifact_store = SBOMArtifactStore()
 sbom_excel_mcp = FastMCP(
     "SecFlow SBOM Excel MCP",
     instructions=(
@@ -98,6 +58,8 @@ def export_project_sbom_excel(
     matching_json: str = "{}",
     project_name: str = "project",
     generated_at: str = "",
+    *,
+    output_dir: str,
 ) -> AssistantArtifact:
     sbom = json.loads(sbom_json)
     matching = json.loads(matching_json or "{}")
@@ -106,10 +68,19 @@ def export_project_sbom_excel(
         raise ValueError("漏洞匹配 JSON 必须是对象")
     timestamp = str(generated_at or (sbom.get("metadata") or {}).get("timestamp") or now_iso())
     content = build_sbom_workbook(sbom, matching)
-    return artifact_store.save(
-        content,
-        file_name=f"SecFlow-{_safe_file_part(project_name)}-SBOM.xlsx",
+    file_name = f"SecFlow-{_safe_file_part(project_name)}-SBOM.xlsx"
+    reference = stage_output_artifact(
+        output_dir,
+        file_name=file_name,
+        payload=content,
+        media_type=XLSX_MEDIA_TYPE,
+    )
+    return AssistantArtifact(
+        file_name=file_name,
+        sha256=reference.sha256,
+        size=len(content),
         generated_at=timestamp,
+        artifacts=[reference.model_dump(mode="json")],
     )
 
 

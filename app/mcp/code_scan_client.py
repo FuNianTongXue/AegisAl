@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import asyncio
 import atexit
 import os
 import secrets
 import shutil
-import socket
-import subprocess
 import sys
 import tempfile
-import time
 import weakref
 from pathlib import Path
-from threading import Event, RLock, Thread
-from typing import Any, Callable
+from threading import RLock
+from typing import Any, Callable, Mapping
 
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+from app.mcp.runtime import (
+    MCPRuntimeHost,
+    MCPServerConfig,
+    SandboxPolicy,
+    namespaced_tool_id,
+)
 
 
 class CodeScanMCPError(RuntimeError):
@@ -28,7 +28,7 @@ class CodeScanMCPClient:
         self,
         *,
         startup_timeout: float | None = None,
-        sse_read_timeout: float | None = None,
+        read_timeout: float | None = None,
         allowed_tools: set[str] | tuple[str, ...] | None = None,
     ) -> None:
         packaged_default = 60.0 if getattr(sys, "frozen", False) else 15.0
@@ -39,19 +39,17 @@ class CodeScanMCPClient:
                 or packaged_default
             )
         self._startup_timeout = max(1.0, float(configured_startup_timeout))
-        configured_read_timeout = sse_read_timeout or float(
+        configured_read_timeout = read_timeout or float(
             os.getenv("SECFLOW_CODE_SCAN_MCP_READ_TIMEOUT_SECONDS", "86400") or 86400
         )
-        self._sse_read_timeout = max(60.0, configured_read_timeout)
+        self._read_timeout = max(60.0, configured_read_timeout)
         self._allowed_tools = frozenset(allowed_tools or {"scan_language"})
         unsupported = self._allowed_tools - {"scan_language"}
         if unsupported or not self._allowed_tools:
             raise ValueError("Code Scan MCP client requires a non-empty supported tool allowlist")
         self._lock = RLock()
-        self._process: subprocess.Popen[bytes] | None = None
-        self._port = 0
+        self._host: MCPRuntimeHost | None = None
         self._token = ""
-        self._log_path: Path | None = None
         self._runtime_path: Path | None = None
         _ACTIVE_CLIENTS.add(self)
 
@@ -63,7 +61,7 @@ class CodeScanMCPClient:
 
     @property
     def enabled(self) -> bool:
-        return os.getenv("SECFLOW_CODE_SCAN_MCP_TRANSPORT", "sse").strip().casefold() == "sse"
+        return os.getenv("SECFLOW_CODE_SCAN_MCP_TRANSPORT", "stdio").strip().casefold() == "stdio"
 
     def scan_language(
         self,
@@ -79,18 +77,22 @@ class CodeScanMCPClient:
     ) -> dict[str, Any]:
         self._require_tool("scan_language")
         if not self.enabled:
-            raise CodeScanMCPError("Code Scan MCP SSE transport is disabled")
-        endpoint, token = self._ensure_server()
-        with tempfile.TemporaryDirectory(prefix="secflow-code-scan-cancel-") as temp_dir:
+            raise CodeScanMCPError("Code Scan MCP stdio transport is disabled")
+        try:
+            host, token = self._ensure_server()
+        except Exception as exc:
+            self.shutdown()
+            raise CodeScanMCPError(self._failure_message(exc)) from exc
+        with self._lock:
+            runtime_path = self._runtime_path
+        if runtime_path is None:
+            self.shutdown()
+            raise CodeScanMCPError("Code Scan MCP private runtime is unavailable")
+        with tempfile.TemporaryDirectory(
+            prefix="secflow-code-scan-cancel-",
+            dir=_verified_private_runtime(runtime_path),
+        ) as temp_dir:
             marker = Path(temp_dir) / "cancel"
-            monitor_stop = Event()
-            monitor = Thread(
-                target=_monitor_cancellation,
-                args=(cancelled, marker, monitor_stop, self.cancel_active_scan),
-                daemon=True,
-                name=f"secflow-code-scan-cancel-{language}",
-            )
-            monitor.start()
             arguments = {
                 "capability_token": token,
                 "workspace_path": workspace_path,
@@ -103,15 +105,21 @@ class CodeScanMCPClient:
                 "cancel_marker": str(marker),
             }
             try:
-                payload = asyncio.run(self._call_tool(endpoint, "scan_language", arguments))
+                execution = host.call(
+                    agent_id="code_scan_agent",
+                    tool_id=namespaced_tool_id("code-scan", "scan_language"),
+                    arguments=arguments,
+                    timeout_seconds=self._read_timeout,
+                    cancelled=lambda: _mark_cancelled(cancelled, marker),
+                )
+                payload = _mutable_json(execution.data or {})
             except Exception as exc:  # noqa: BLE001 - normalize transport failures for the task graph.
                 if cancelled():
                     self.cancel_active_scan()
                     raise CodeScanMCPError("Code Scan MCP call was cancelled") from exc
-                raise CodeScanMCPError(self._failure_message(exc)) from exc
-            finally:
-                monitor_stop.set()
-                monitor.join(timeout=0.2)
+                message = self._failure_message(exc)
+                self.cancel_active_scan()
+                raise CodeScanMCPError(message) from exc
             if cancelled():
                 self.cancel_active_scan()
                 raise CodeScanMCPError("Code Scan MCP call was cancelled")
@@ -122,24 +130,36 @@ class CodeScanMCPClient:
             "schema_version": int(payload.get("schema_version") or 1),
             "server": str(payload.get("server") or "SecFlow Code Scan MCP"),
             "tool": str(payload.get("tool") or "scan_language"),
-            "transport": "sse",
-            "endpoint": "loopback-managed",
+            "transport": "stdio",
+            "endpoint": "managed-child-process",
             "process_id": int(payload.get("process_id") or 0),
             "language": str(payload.get("language") or language),
             "started_at": str(payload.get("started_at") or ""),
             "completed_at": str(payload.get("completed_at") or ""),
             "duration_ms": int(payload.get("duration_ms") or 0),
-            "input_sha256": str(payload.get("input_sha256") or ""),
-            "output_sha256": str(payload.get("output_sha256") or ""),
+            "input_sha256": execution.input_sha256,
+            "output_sha256": execution.output_sha256,
+            "server_input_sha256": str(payload.get("input_sha256") or ""),
+            "server_output_sha256": str(payload.get("output_sha256") or ""),
+            "call_id": execution.call_id,
+            "result_size_bytes": execution.result_size_bytes,
+            "plugin_id": execution.audit.plugin_id,
+            "plugin_version": execution.audit.plugin_version,
+            "config_hash": execution.audit.config_hash,
+            "generation": execution.audit.generation,
             "status": "completed",
         }
         return result
 
     def capabilities(self) -> dict[str, Any]:
-        endpoint, token = self._ensure_server()
-        return asyncio.run(
-            self._call_tool(endpoint, "get_scan_capabilities", {"capability_token": token})
+        host, token = self._ensure_server()
+        execution = host.call(
+            agent_id="code_scan_agent",
+            tool_id=namespaced_tool_id("code-scan", "get_scan_capabilities"),
+            arguments={"capability_token": token},
+            timeout_seconds=self._startup_timeout,
         )
+        return _mutable_json(execution.data or {})
 
     def shutdown(self) -> None:
         self._shutdown_server(grace_seconds=3.0)
@@ -150,173 +170,96 @@ class CodeScanMCPClient:
         self._shutdown_server(grace_seconds=0.25)
 
     def _shutdown_server(self, *, grace_seconds: float) -> None:
+        del grace_seconds  # MCP stdio performs graceful close then process-tree termination.
         with self._lock:
-            process = self._process
-            self._process = None
-            self._port = 0
+            host = self._host
+            self._host = None
             self._token = ""
-            log_path = self._log_path
-            self._log_path = None
             runtime_path = self._runtime_path
             self._runtime_path = None
         try:
-            if process is not None and process.poll() is None:
-                _signal_server_process(process, force=False)
-                try:
-                    process.wait(timeout=max(0.05, grace_seconds))
-                except subprocess.TimeoutExpired:
-                    _signal_server_process(process, force=True)
-                    try:
-                        process.wait(timeout=1.0)
-                    except subprocess.TimeoutExpired:
-                        pass
+            if host is not None:
+                host.shutdown()
         finally:
-            if log_path is not None:
-                log_path.unlink(missing_ok=True)
             _remove_private_runtime(runtime_path)
 
-    async def _call_tool(self, endpoint: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        async with sse_client(
-            endpoint,
-            timeout=10,
-            sse_read_timeout=self._sse_read_timeout,
-        ) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                response = await session.call_tool(tool_name, arguments)
-        if response.isError:
-            detail = " ".join(
-                str(getattr(item, "text", "") or "").strip()
-                for item in response.content
-                if str(getattr(item, "text", "") or "").strip()
-            )
-            raise CodeScanMCPError(detail or f"Code Scan MCP tool failed: {tool_name}")
-        if isinstance(response.structuredContent, dict):
-            return dict(response.structuredContent)
-        raise CodeScanMCPError(f"Code Scan MCP tool returned no structured output: {tool_name}")
-
-    def _ensure_server(self) -> tuple[str, str]:
+    def _ensure_server(self) -> tuple[MCPRuntimeHost, str]:
         with self._lock:
-            if self._process is not None and self._process.poll() is None and self._port and self._token:
-                process = self._process
-                port = self._port
-                token = self._token
-            else:
-                self._cleanup_stopped_process()
-                port = _reserve_loopback_port()
-                token = secrets.token_urlsafe(32)
-                runtime_path = Path(tempfile.mkdtemp(prefix="secflow-code-scan-runtime-"))
-                command, prefix_args = _server_command()
-                args = [
+            if self._host is not None and self._token:
+                return self._host, self._token
+            token = secrets.token_urlsafe(32)
+            runtime_path = Path(tempfile.mkdtemp(prefix="secflow-code-scan-runtime-"))
+            command, prefix_args = _server_command()
+            environment = _server_environment(
+                token,
+                allowed_tools=self._allowed_tools,
+                runtime_path=runtime_path,
+            )
+            config = MCPServerConfig(
+                server_id="code-scan",
+                transport="stdio",
+                trust_level="builtin",
+                command=command,
+                args=(
                     *prefix_args,
                     "--transport",
-                    "sse",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(port),
+                    "stdio",
                     "--parent-pid",
                     str(os.getpid()),
-                ]
-                env = _server_environment(
-                    token,
-                    allowed_tools=self._allowed_tools,
-                    runtime_path=runtime_path,
+                ),
+                cwd=_repository_root(),
+                environment=environment,
+                sandbox=SandboxPolicy(environment_allowlist=frozenset(environment)),
+                timeout_seconds=self._read_timeout,
+                startup_timeout_seconds=self._startup_timeout,
+                max_result_bytes=64 * 1024 * 1024,
+                plugin_id="secflow.code-scan",
+                plugin_version="1",
+            )
+            host = MCPRuntimeHost(thread_name="secflow-code-scan-mcp")
+            try:
+                host.register_server(config)
+                host.set_agent_allowlist(
+                    "code_scan_agent",
+                    [
+                        namespaced_tool_id("code-scan", "scan_language"),
+                        namespaced_tool_id("code-scan", "get_scan_capabilities"),
+                    ],
                 )
-                log_handle = tempfile.NamedTemporaryFile(
-                    mode="w+b",
-                    prefix="secflow-code-scan-mcp-",
-                    suffix=".log",
-                    delete=False,
-                )
-                log_path = Path(log_handle.name)
-                try:
-                    process = subprocess.Popen(
-                        [command, *args],
-                        cwd=str(_repository_root()),
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=log_handle,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=sys.platform != "win32",
-                    )
-                except BaseException:
-                    log_handle.close()
-                    log_path.unlink(missing_ok=True)
-                    _remove_private_runtime(runtime_path)
-                    raise
-                else:
-                    log_handle.close()
-                self._process = process
-                self._port = port
-                self._token = token
-                self._log_path = log_path
-                self._runtime_path = runtime_path
-            deadline = time.monotonic() + self._startup_timeout
-            while time.monotonic() < deadline:
-                if process.poll() is not None:
-                    message = self._read_log()
-                    self.shutdown()
-                    raise CodeScanMCPError(
-                        f"Code Scan MCP SSE service exited during startup: {message or process.returncode}"
-                    )
-                if _loopback_port_is_open(port):
-                    return f"http://127.0.0.1:{port}/sse", token
-                time.sleep(0.05)
-            message = self._read_log()
-            self.shutdown()
-            raise CodeScanMCPError(f"Code Scan MCP SSE service startup timed out: {message or 'no log'}")
+            except BaseException:
+                host.shutdown()
+                _remove_private_runtime(runtime_path)
+                raise
+            self._host = host
+            self._token = token
+            self._runtime_path = runtime_path
+            return host, token
 
     def _failure_message(self, exc: Exception) -> str:
         detail = str(exc).strip()
-        log = self._read_log()
-        if self._process is not None and self._process.poll() is not None:
-            self.shutdown()
-        return f"Code Scan MCP SSE call failed: {detail or log or type(exc).__name__}"
+        return f"Code Scan MCP stdio call failed: {detail or type(exc).__name__}"
 
     def _require_tool(self, tool_name: str) -> None:
         if tool_name not in self._allowed_tools:
             raise CodeScanMCPError(f"Code Scan MCP tool is outside this agent capability: {tool_name}")
 
-    def _read_log(self) -> str:
-        path = self._log_path
-        if path is None:
-            return ""
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            return ""
-        return " ".join(text.split())[-1000:]
 
-    def _cleanup_stopped_process(self) -> None:
-        if self._process is not None and self._process.poll() is not None:
-            self._process = None
-        if self._log_path is not None:
-            self._log_path.unlink(missing_ok=True)
-            self._log_path = None
-        _remove_private_runtime(self._runtime_path)
-        self._runtime_path = None
-        self._port = 0
-        self._token = ""
+def _mark_cancelled(cancelled: Callable[[], bool], marker: Path) -> bool:
+    if not cancelled():
+        return False
+    try:
+        marker.touch(exist_ok=True)
+    except OSError:
+        pass
+    return True
 
 
-def _monitor_cancellation(
-    cancelled: Callable[[], bool],
-    marker: Path,
-    stop: Event,
-    terminate_scan: Callable[[], None],
-) -> None:
-    while not stop.wait(0.05):
-        if cancelled():
-            try:
-                marker.touch(exist_ok=True)
-            except OSError:
-                pass
-            try:
-                terminate_scan()
-            except Exception:
-                pass
-            return
+def _mutable_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mutable_json(item) for item in value]
+    return value
 
 
 def _server_command() -> tuple[str, list[str]]:
@@ -334,6 +277,7 @@ def _server_environment(
     allowed_tools: set[str] | tuple[str, ...] | frozenset[str] | None = None,
     runtime_path: Path,
 ) -> dict[str, str]:
+    private_runtime = _verified_private_runtime(runtime_path)
     allowed_names = {
         "COMSPEC",
         "DYLD_LIBRARY_PATH",
@@ -365,7 +309,7 @@ def _server_environment(
     }
     env["SECFLOW_CODE_SCAN_MCP_TOKEN"] = token
     env["SECFLOW_CODE_SCAN_MCP_ALLOWED_TOOLS"] = ",".join(sorted(allowed_tools or {"scan_language"}))
-    env["SECFLOW_SCAN_TEMP_ROOT"] = str(runtime_path)
+    env["SECFLOW_CODE_SCAN_CANCEL_ROOT"] = str(private_runtime)
     env["PYTHONUNBUFFERED"] = "1"
     if getattr(sys, "frozen", False):
         # The MCP server and bundled Semgrep are independent PyInstaller apps.
@@ -375,6 +319,22 @@ def _server_environment(
     else:
         env["PYTHONPATH"] = str(_repository_root())
     return env
+
+
+def _verified_private_runtime(path: Path) -> str:
+    if path.is_symlink():
+        raise CodeScanMCPError("Code Scan MCP private runtime cannot be a symlink")
+    try:
+        resolved = path.resolve(strict=True)
+        system_temp = Path(tempfile.gettempdir()).resolve(strict=True)
+        resolved.relative_to(system_temp)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CodeScanMCPError(
+            "Code Scan MCP private runtime must be inside the system temporary directory"
+        ) from exc
+    if not resolved.is_dir() or not resolved.name.startswith("secflow-code-scan-runtime-"):
+        raise CodeScanMCPError("Code Scan MCP private runtime is invalid")
+    return str(resolved)
 
 
 def _remove_private_runtime(path: Path | None) -> None:
@@ -393,32 +353,6 @@ def _remove_private_runtime(path: Path | None) -> None:
 
 def _repository_root() -> Path:
     return Path(__file__).resolve().parents[2]
-
-
-def _reserve_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _loopback_port_is_open(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
-
-
-def _signal_server_process(process: subprocess.Popen[bytes], *, force: bool) -> None:
-    try:
-        if sys.platform != "win32":
-            import signal
-
-            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
-        elif force:
-            process.kill()
-        else:
-            process.terminate()
-    except (OSError, ProcessLookupError):
-        return
 
 
 _ACTIVE_CLIENTS: weakref.WeakSet[CodeScanMCPClient] = weakref.WeakSet()

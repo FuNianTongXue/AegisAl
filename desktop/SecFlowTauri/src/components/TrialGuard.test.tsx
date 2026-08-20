@@ -55,9 +55,15 @@ describe("TrialGuard", () => {
       message: "试用授权状态无效或已被修改，核心功能已停用。",
     });
 
-    render(<TrialGuard />);
+    render(<><button type="button">Background action</button><TrialGuard /></>);
+    const background = screen.getByRole("button", { name: "Background action" });
+    background.focus();
 
-    expect(await screen.findByRole("alert", { name: "试用授权不可用" })).toHaveTextContent("核心功能已停用");
+    const blocker = await screen.findByRole("alertdialog", { name: "安全智脑试用版不可用" });
+    expect(blocker).toHaveTextContent("核心功能已停用");
+    expect(blocker).toHaveFocus();
+    expect(background).toHaveAttribute("aria-hidden", "true");
+    expect(background.inert).toBe(true);
     expect(screen.getByText(/用户数据未被修改/)).toBeInTheDocument();
   });
 
@@ -79,15 +85,21 @@ describe("TrialGuard", () => {
       message: "7 天试用版可用。",
     });
 
-    render(<TrialGuard />);
+    render(<><button type="button">Background action</button><TrialGuard /></>);
+    const background = screen.getByRole("button", { name: "Background action" });
+    background.focus();
 
-    const serviceAlert = await screen.findByRole("alert", { name: "本地安全服务不可用" });
+    const serviceAlert = await screen.findByRole("alertdialog", { name: "本地安全服务正在恢复" });
     expect(serviceAlert).toHaveTextContent("不代表试用授权或用户数据已损坏");
     expect(serviceAlert).not.toHaveTextContent("安装正式授权版本");
+    expect(screen.getByRole("button", { name: "重新连接" })).toHaveFocus();
+    expect(background.inert).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
 
     expect(await screen.findByText("7 天试用 · 剩余 5 天")).toBeInTheDocument();
+    expect(background.inert).not.toBe(true);
+    expect(background).not.toHaveAttribute("aria-hidden");
     expect(waitForBackendReady).toHaveBeenCalledTimes(2);
     expect(restartLocalBackend).toHaveBeenCalledTimes(1);
   });

@@ -19,6 +19,7 @@ from app.intelligence import (
     _merge_records,
     _osv_record,
     _patch_snippets_from_commit_payload,
+    _public_records,
     _public_source_status,
     _version_in_affected_range,
     build_knowledge_graph,
@@ -27,6 +28,76 @@ from app.langgraph.assistant_graph import runtime_status
 from app.secure_storage import is_encrypted_text, secure_metadata_key
 from app.memory import LongTermMemoryService
 from app.storage import StateStore, default_state
+
+
+def _translation_mcp_result(payload: dict, target_language: str) -> dict:
+    return {
+        "payload": payload,
+        "target_language": target_language,
+        "translation_status": "translated",
+        "candidate_fields": 2,
+        "translated_fields": 2,
+        "unresolved_fields": 0,
+        "batch_count": 1,
+        "model_used": False,
+        "offline_model_used": True,
+        "offline": True,
+        "network_used": False,
+        "requires_api_key": False,
+        "provider_calls": 0,
+        "billable_tokens": 0,
+        "token_usage": 0,
+        "resource_verified": True,
+        "input_sha256": "1" * 64,
+        "output_sha256": "2" * 64,
+        "model_sha256": "3" * 64,
+        "errors": [],
+        "_mcp_runtime": {
+            "server_id": "translation",
+            "tool_id": "mcp__translation__translate_json_payload",
+            "transport": "stdio",
+            "status": "completed",
+        },
+    }
+
+
+def _stored_translation_audit(
+    source_title: str,
+    source_summary: str,
+    *,
+    traditional: bool = False,
+) -> dict:
+    simplified_agent = {
+        "server": "SecFlow Translation MCP",
+        "tool": "translate_json_payload",
+        "transport": "stdio",
+        "agent_status": "completed",
+        "translation_status": "translated",
+        "target_language": "zh-Hans",
+        "unresolved_fields": 0,
+        "offline_contract_valid": True,
+        "runtime_contract_valid": True,
+        "network_used": False,
+        "provider_calls": 0,
+        "billable_tokens": 0,
+        "token_usage": 0,
+    }
+    audit = {
+        "version": 3,
+        "status": "translated",
+        "source_title": source_title,
+        "source_summary": source_summary,
+        **simplified_agent,
+    }
+    if traditional:
+        audit["traditional_status"] = "translated"
+        audit["traditional_translation"] = {
+            **simplified_agent,
+            "target_language": "zh-Hant",
+        }
+    else:
+        audit["traditional_status"] = "pending"
+    return audit
 
 
 class RealtimeIntelligenceTests(unittest.TestCase):
@@ -141,6 +212,161 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual([source["name"] for source in sources], ["NVD 漏洞数据库", "GitHub 安全公告", "OSV 开源漏洞库"])
         self.assertTrue(all("咨询" not in source["name"] for source in sources))
 
+    def test_public_projection_hides_unverified_partial_chinese_translation(self) -> None:
+        record = {
+            "id": "CVE-2026-76008",
+            "title_original": "Remote URI parameter parsing vulnerability",
+            "summary_original": "A remote attacker can trigger a stack buffer overflow.",
+            "title_zh": "远程 URI 参数 Parsing vulnerability",
+            "summary_zh": "远程攻击者可以 trigger 基于堆栈的缓冲区溢出。",
+            "severity": "HIGH",
+            "catalog_translation": {
+                "version": 3,
+                "status": "pending",
+                "source_title": "Remote URI parameter parsing vulnerability",
+                "source_summary": "A remote attacker can trigger a stack buffer overflow.",
+            },
+        }
+
+        public = _public_records([record], "zh-Hans")[0]
+
+        self.assertEqual(public["id"], "CVE-2026-76008")
+        self.assertEqual(public["title"], "")
+        self.assertEqual(public["summary"], "")
+        self.assertEqual(public["content_language"], "unknown")
+        self.assertEqual(public["translation_status"], "pending")
+        self.assertNotIn("title_zh", public)
+        self.assertNotIn("summary_zh", public)
+
+    def test_public_projection_publishes_verified_localized_fields(self) -> None:
+        record = {
+            "id": "CVE-2026-76009",
+            "title_original": "Remote validation vulnerability in OpenSSL",
+            "summary_original": "A remote attacker can bypass validation.",
+            "title_zh": "OpenSSL 远程验证绕过漏洞",
+            "summary_zh": "远程攻击者可绕过验证。",
+            "severity": "HIGH",
+            "catalog_translation": _stored_translation_audit(
+                "Remote validation vulnerability in OpenSSL",
+                "A remote attacker can bypass validation.",
+            ),
+        }
+
+        public = _public_records([record], "zh-Hans")[0]
+
+        self.assertEqual(public["title"], "OpenSSL 远程验证绕过漏洞")
+        self.assertEqual(public["summary"], "远程攻击者可绕过验证。")
+        self.assertEqual(public["title_zh"], public["title"])
+        self.assertEqual(public["summary_zh"], public["summary"])
+        self.assertEqual(public["content_language"], "zh-Hans")
+        self.assertEqual(public["translation_status"], "translated")
+
+    def test_display_translation_writeback_rejects_failed_agent_audit(self) -> None:
+        source = {
+            "id": "CVE-2026-76012",
+            "title": "Remote parsing vulnerability",
+            "summary": "A remote attacker can trigger a parsing issue.",
+            "severity": "HIGH",
+            "aliases": ["CVE-2026-76012"],
+            "components": [],
+            "references": [],
+        }
+        prepared = {
+            **source,
+            "title_original": source["title"],
+            "summary_original": source["summary"],
+            "catalog_translation": {
+                "version": 3,
+                "status": "pending",
+                "source_title": source["title"],
+                "source_summary": source["summary"],
+            },
+        }
+        with patch(
+            "app.intelligence.translate_records_for_storage",
+            return_value=([prepared], {"pending_records": 1}),
+        ):
+            self.service._catalog.upsert([source])
+
+        candidate = {
+            **prepared,
+            "title_zh": "远程解析漏洞",
+            "summary_zh": "远程攻击者可能触发解析问题。",
+            "catalog_translation": _stored_translation_audit(
+                source["title"],
+                source["summary"],
+            ),
+        }
+        candidate["catalog_translation"]["agent_status"] = "failed"
+        persisted = self.service._catalog.persist_display_translations([candidate])
+        stored = self.service._catalog.find_by_identifier(source["id"])[0]
+
+        self.assertEqual(persisted, 0)
+        self.assertNotIn("summary_zh", stored)
+
+    def test_traditional_dashboard_uses_stored_readiness_without_retranslation(self) -> None:
+        source_records = [
+            {
+                "id": "CVE-2026-76010",
+                "title_original": "Remote validation vulnerability",
+                "summary_original": "A remote attacker can bypass validation.",
+                "title_zh": "远程验证绕过漏洞",
+                "summary_zh": "远程攻击者可绕过验证。",
+                "title_zh_hant": "遠程驗證繞過漏洞",
+                "summary_zh_hant": "遠程攻擊者可繞過驗證。",
+                "severity": "HIGH",
+                "catalog_translation": _stored_translation_audit(
+                    "Remote validation vulnerability",
+                    "A remote attacker can bypass validation.",
+                    traditional=True,
+                ),
+            },
+            {
+                "id": "CVE-2026-76011",
+                "title_original": "Pending remote parsing vulnerability",
+                "summary_original": "A remote attacker can trigger a parsing issue.",
+                "title_zh": "待处理的远程解析漏洞",
+                "summary_zh": "远程攻击者可触发解析问题。",
+                "severity": "MEDIUM",
+                "catalog_translation": _stored_translation_audit(
+                    "Pending remote parsing vulnerability",
+                    "A remote attacker can trigger a parsing issue.",
+                ),
+            },
+        ]
+        snapshot = {
+            "total": 2,
+            "severity": {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 1, "LOW": 0},
+            "kev_count": 0,
+            "poc_count": 0,
+            "trend": [],
+            "records": source_records,
+        }
+        translation_audit = {
+            "status": "completed",
+            "record_count": 2,
+            "ready_records": 2,
+            "traditional_ready_records": 1,
+            "traditional_pending_records": 1,
+            "warnings": [],
+        }
+
+        with (
+            patch.object(self.service._catalog, "snapshot", return_value=snapshot),
+            patch.object(self.service._catalog, "persist_display_translations"),
+            patch("app.intelligence.translate_records_for_storage", return_value=(source_records, translation_audit)),
+            patch("app.intelligence._translate_dashboard_script", side_effect=AssertionError("must not retranslate")),
+        ):
+            dashboard = self.service.dashboard(response_language="zh-Hant")
+
+        self.assertEqual(dashboard["translation_count"], 2)
+        self.assertEqual(dashboard["translation_ready_count"], 1)
+        self.assertEqual(dashboard["translation_progress"], 50)
+        self.assertEqual(dashboard["translation_status"], "partial")
+        self.assertEqual(dashboard["recent_records"][0]["summary"], "遠程攻擊者可繞過驗證。")
+        self.assertEqual(dashboard["recent_records"][1]["summary"], "")
+        self.assertEqual(dashboard["recent_records"][1]["translation_status"], "pending")
+
     def test_multi_source_query_persists_catalog_record_for_translation_reuse(self) -> None:
         nvd = {
             "id": "CVE-2026-1000",
@@ -179,7 +405,6 @@ class RealtimeIntelligenceTests(unittest.TestCase):
 
         with (
             patch("app.intelligence.store", self.store),
-            patch("app.intelligence.active_model_from_env", return_value=None),
             patch.object(self.service, "_query_source", side_effect=query_source),
         ):
             result = self.service.query("CVE-2026-1000", sources=["nvd", "github_advisory", "osv"])
@@ -199,8 +424,8 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertTrue({"ALIAS_OF", "HAS_WEAKNESS", "AFFECTS", "FIXED_BY"}.issubset(edge_types))
         vulnerability_node = next(node for node in result["graph"]["nodes"] if node["type"] == "vulnerability")
         self.assertEqual(vulnerability_node["metadata"]["severity_zh"], "严重")
-        self.assertIn("CVE-2026-1000", vulnerability_node["metadata"]["summary_zh"])
-        self.assertIn("严重漏洞", vulnerability_node["metadata"]["summary_zh"])
+        self.assertRegex(vulnerability_node["metadata"]["summary_zh"], r"[\u3400-\u9fff]")
+        self.assertNotIn("Example issue", vulnerability_node["metadata"]["summary_zh"])
         self.assertEqual(vulnerability_node["metadata"]["affected_versions"], ["demo server < 2.0.0"])
         self.assertEqual(vulnerability_node["metadata"]["fixed_versions"], ["npm / demo-server: 2.0.0"])
         self.assertIn("建议优先升级", vulnerability_node["metadata"]["remediation_zh"])
@@ -238,21 +463,17 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertIn("本地漏洞 catalog 命中", result["trace"][1]["message"])
 
     def test_catalog_stores_chinese_translation_and_keeps_english_original(self) -> None:
-        def fake_translate(payload, **_kwargs):
+        def fake_translate(*, arguments, **_kwargs):
+            payload = arguments["payload"]
             translated = json.loads(json.dumps(payload))
-            translated["records"][0]["title"] = "远程代码执行漏洞"
-            translated["records"][0]["summary"] = "该漏洞可导致远程代码执行。"
-            return Mock(
-                payload=translated,
-                translation_status="translated",
-                candidate_fields=2,
-                translated_fields=2,
-                batch_count=1,
-                model_used=True,
-                input_sha256="input",
-                output_sha256="output",
-                errors=[],
+            traditional = arguments["target_language"] == "zh-Hant"
+            translated["records"][0]["title"] = "遠程程式碼執行漏洞" if traditional else "远程代码执行漏洞"
+            translated["records"][0]["summary"] = (
+                "該漏洞可導致遠程程式碼執行。"
+                if traditional
+                else "该漏洞可导致远程代码执行。"
             )
+            return _translation_mcp_result(translated, arguments["target_language"])
 
         record = {
             "id": "CVE-2026-7788",
@@ -266,13 +487,18 @@ class RealtimeIntelligenceTests(unittest.TestCase):
             "published_at": "2026-07-17T00:00:00+00:00",
             "updated_at": "2026-07-17T00:00:00+00:00",
         }
-        with patch("app.mcp.translation.translate_json_payload", side_effect=fake_translate) as translator:
+        with patch("app.agent.translation_agent.call_mcp_tool", side_effect=fake_translate) as translator:
             stored = self.service._catalog.upsert([record])
 
         self.assertEqual(stored[0]["summary_zh"], "该漏洞可导致远程代码执行。")
+        self.assertEqual(stored[0]["summary_zh_hant"], "該漏洞可導致遠程程式碼執行。")
         self.assertEqual(stored[0]["summary_original"], record["summary"])
         self.assertEqual(stored[0]["catalog_translation"]["status"], "translated")
-        translator.assert_called_once()
+        self.assertEqual(translator.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["arguments"]["target_language"] for call in translator.call_args_list],
+            ["zh-Hans", "zh-Hant"],
+        )
 
         with patch.object(self.service, "_query_source", side_effect=AssertionError("should use translated catalog")):
             chinese = self.service.query("CVE-2026-7788", response_language="zh-Hans")
@@ -295,46 +521,43 @@ class RealtimeIntelligenceTests(unittest.TestCase):
             "published_at": "2026-07-17T00:00:00+00:00",
             "updated_at": "2026-07-17T00:00:00+00:00",
         }
-        fallback = Mock(
-            payload={"records": [{"record_key": record["id"], "title": record["title"], "summary": record["summary"]}]},
-            translation_status="fallback",
-            candidate_fields=2,
-            translated_fields=0,
-            batch_count=0,
-            model_used=False,
-            input_sha256="input",
-            output_sha256="input",
-            errors=["model unavailable"],
-        )
-        with patch("app.mcp.translation.translate_json_payload", return_value=fallback):
+        fallback = {
+            "payload": {"records": [{"record_key": record["id"], "title": record["title"], "summary": record["summary"]}]},
+            "translation_status": "fallback",
+            "candidate_fields": 2,
+            "translated_fields": 0,
+            "batch_count": 0,
+            "model_used": False,
+            "input_sha256": "input",
+            "output_sha256": "input",
+            "errors": ["offline language pack unavailable"],
+        }
+        with patch("app.agent.translation_agent.call_mcp_tool", return_value=fallback):
             stored = self.service._catalog.upsert([record])
 
         self.assertEqual(stored[0]["catalog_translation"]["status"], "pending")
         self.assertTrue(self.service._catalog.translation_migration_pending())
 
-        def translated(payload, **_kwargs):
+        def translated(*, arguments, **_kwargs):
+            payload = arguments["payload"]
             localized = json.loads(json.dumps(payload))
-            localized["records"][0]["title"] = "历史命令注入漏洞"
-            localized["records"][0]["summary"] = "该历史记录存在命令注入风险。"
-            return Mock(
-                payload=localized,
-                translation_status="translated",
-                candidate_fields=2,
-                translated_fields=2,
-                batch_count=1,
-                model_used=True,
-                input_sha256="input",
-                output_sha256="output",
-                errors=[],
+            traditional = arguments["target_language"] == "zh-Hant"
+            localized["records"][0]["title"] = "歷史命令注入漏洞" if traditional else "历史命令注入漏洞"
+            localized["records"][0]["summary"] = (
+                "該歷史記錄存在命令注入風險。"
+                if traditional
+                else "该历史记录存在命令注入风险。"
             )
+            return _translation_mcp_result(localized, arguments["target_language"])
 
-        with patch("app.mcp.translation.translate_json_payload", side_effect=translated) as translator:
+        with patch("app.agent.translation_agent.call_mcp_tool", side_effect=translated) as translator:
             self.service._catalog.migrate_catalog_translations_incrementally(Event(), batch_size=1, pause_seconds=0)
 
         migrated = self.service._catalog.find_by_identifier(record["id"])[0]
         self.assertEqual(migrated["summary_zh"], "该历史记录存在命令注入风险。")
+        self.assertEqual(migrated["summary_zh_hant"], "該歷史記錄存在命令注入風險。")
         self.assertFalse(self.service._catalog.translation_migration_pending())
-        translator.assert_called_once()
+        self.assertEqual(translator.call_count, 2)
 
     def test_catalog_reads_do_not_wait_for_background_writer_lock(self) -> None:
         self.service._catalog.upsert(
@@ -740,16 +963,11 @@ class RealtimeIntelligenceTests(unittest.TestCase):
             "components": [],
             "references": [],
         }
-        with (
-            patch("app.intelligence.active_model_from_env", return_value={"provider": "deepseek"}),
-            patch("app.intelligence.diagnose_chat_completion", side_effect=AssertionError("should not call llm")),
-        ):
-            graph = build_knowledge_graph([record], "dependency-scan")
+        graph = build_knowledge_graph([record], "dependency-scan")
 
         summary = graph["nodes"][0]["metadata"]["summary_zh"]
-        self.assertIn("CVE-2026-9191", summary)
-        self.assertIn("高危漏洞", summary)
-        self.assertIn("demo 2.0.0", summary)
+        self.assertRegex(summary, r"[\u3400-\u9fff]")
+        self.assertNotIn("An English vulnerability description", summary)
 
     def test_batch_dashboard_counts_vulnerability_batch_not_queries(self) -> None:
         critical = {

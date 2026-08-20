@@ -165,8 +165,8 @@ export function TaskCard({ task: initialTask, showExecutionDetails = true }: { t
         </div>
       ) : null}
       {showExecutionDetails ? <AgentTimeline events={task.events} plan={task.plan} running={running} /> : null}
-      {task.error ? <p className="task-error"><TriangleAlert size={14} />{task.error}</p> : null}
-      {downloadError ? <p className="task-error"><TriangleAlert size={14} />{downloadError}</p> : null}
+      {task.error ? <p className="task-error" role="alert"><TriangleAlert size={14} />{task.error}</p> : null}
+      {downloadError ? <p className="task-error" role="alert"><TriangleAlert size={14} />{downloadError}</p> : null}
       <footer>
         {scanRunning ? <button className="secondary" disabled={cancelling || task.status === "cancelling"} onClick={() => void cancelScan()}>{cancelling || task.status === "cancelling" ? <LoaderCircle size={14} className="spin" /> : <Square size={14} />}{cancelling || task.status === "cancelling" ? "停止中" : "停止分析"}</button> : null}
         {["failed", "cancelled"].includes(task.status) ? <button className="secondary" onClick={() => void api.taskMutation(task.id, "resume", userId).then(replaceTask)}><RotateCcw size={14} />重新扫描</button> : null}

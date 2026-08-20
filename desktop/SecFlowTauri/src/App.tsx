@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { AppSidebar } from "./components/AppSidebar";
 import { ArchiveView } from "./components/ArchiveView";
@@ -32,13 +32,28 @@ function MainApp() {
   const refreshBackend = useBackendBootstrap();
   const state = useAppStore();
   const { locale } = useI18n();
+  const copy = interfaceCopy(locale);
 
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = state.theme;
     root.lang = locale;
     root.style.setProperty("--font-scale", String(state.fontScale));
+    const dark = state.theme === "dark" || (state.theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", dark ? "#171718" : "#fafbfd");
   }, [locale, state.fontScale, state.theme]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", state.view);
+    if (state.activeSessionId) url.searchParams.set("session", state.activeSessionId);
+    else url.searchParams.delete("session");
+    if (state.activeTaskId) url.searchParams.set("task", state.activeTaskId);
+    else url.searchParams.delete("task");
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl !== currentUrl) window.history.replaceState(window.history.state, "", nextUrl);
+  }, [state.activeSessionId, state.activeTaskId, state.view]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -65,15 +80,38 @@ function MainApp() {
   }, []);
 
   if (!state.bootstrapReady) {
-    return <div className="startup-loading"><BrandMark size={44} /><strong>安全智脑</strong><span>正在初始化本机服务…</span></div>;
+    return (
+      <>
+        <SkipLink label={copy.skip} />
+        <main id="main-content" tabIndex={-1} className="startup-loading" aria-busy={!state.bootstrapError}>
+          <BrandMark size={44} />
+          <strong>安全智脑</strong>
+          {state.bootstrapError ? (
+            <>
+              <span role="alert">
+                {copy.bootstrapFailed}
+                <small style={{ display: "block", marginTop: 4 }}>{state.bootstrapError}</small>
+              </span>
+              <button type="button" className="primary" onClick={() => void refreshBackend()}>{copy.retry}</button>
+            </>
+          ) : <span>{copy.initializing}</span>}
+        </main>
+      </>
+    );
   }
 
   if (state.initialSetupRequired) {
-    return <InitialSetupView />;
+    return (
+      <>
+        <SkipLink label={copy.skip} />
+        <div id="main-content" tabIndex={-1} style={{ width: "100%", height: "100%" }}><InitialSetupView /></div>
+      </>
+    );
   }
 
   return (
     <>
+      <SkipLink label={copy.skip} />
       {/* Settings used to replace this entire tree. That unmounted the active
           report card and aborted the task SSE subscription, so returning to
           the task made an in-flight graph look interrupted. Keep the shell
@@ -87,7 +125,7 @@ function MainApp() {
         <div className="app-main">
           <Topbar onRefresh={() => void refreshBackend()} />
           <div className={`workspace-frame ${state.inspectorOpen && state.view === "assistant" ? "with-inspector" : ""}`}>
-            <main className="workspace-content">
+            <main id={state.view === "settings" ? undefined : "main-content"} tabIndex={-1} className="workspace-content">
               {/* Keep the active workspace mounted while visiting every other
                   feature. Its local action state and SSE connection then keep
                   running instead of being recreated from an interrupt snapshot. */}
@@ -100,8 +138,63 @@ function MainApp() {
           </div>
         </div>
       </div>
-      {state.view === "settings" ? <SettingsView onBack={() => state.set({ view: "assistant" })} /> : null}
+      {state.view === "settings" ? (
+        <div id="main-content" tabIndex={-1} style={{ width: "100%", height: "100%" }}>
+          <SettingsView onBack={() => state.set({ view: "assistant" })} />
+        </div>
+      ) : null}
       <CommandPalette />
     </>
   );
+}
+
+function SkipLink({ label }: { label: string }) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <a
+      href="#main-content"
+      onClick={(event) => {
+        const target = document.getElementById("main-content");
+        if (!target) return;
+        event.preventDefault();
+        target.focus();
+      }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      style={{
+        position: "fixed",
+        insetInlineStart: 8,
+        top: focused ? 8 : -80,
+        zIndex: 10_000,
+        padding: "8px 12px",
+        border: "1px solid var(--border)",
+        borderRadius: 4,
+        background: "var(--surface-raised)",
+        color: "var(--text)",
+      }}
+    >
+      {label}
+    </a>
+  );
+}
+
+function interfaceCopy(locale: string) {
+  if (locale === "en") return {
+    skip: "Skip to main content",
+    initializing: "Initializing the local service…",
+    bootstrapFailed: "The local service could not be initialized.",
+    retry: "Retry",
+  };
+  if (locale === "zh-Hant") return {
+    skip: "跳至主要內容",
+    initializing: "正在初始化本機服務…",
+    bootstrapFailed: "無法初始化本機服務。",
+    retry: "重試",
+  };
+  return {
+    skip: "跳到主要内容",
+    initializing: "正在初始化本机服务…",
+    bootstrapFailed: "本机服务初始化失败。",
+    retry: "重试",
+  };
 }

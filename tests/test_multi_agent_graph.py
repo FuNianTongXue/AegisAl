@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from app.langgraph.multi_agent_graph import AssistantMultiAgentSupervisor
+from app.agent.translation_policy import issue_stored_translation_attestation
 from app.memory import LongTermMemoryService
 
 
@@ -25,12 +26,12 @@ class FakeRuntimeGraph:
             "generated_at": "2026-07-31T08:00:00+08:00",
         }
         if self.stored_translation:
-            answer["translation"] = {
-                "status": "completed",
-                "translation_status": "stored",
-                "target_language": "zh-Hans",
-                "storage_stage": "before-persist",
-            }
+            answer["translation"] = issue_stored_translation_attestation(
+                answer,
+                target_language="zh-Hans",
+                record_count=1,
+                source="test-catalog",
+            )
         return answer
 
     @staticmethod

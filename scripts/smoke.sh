@@ -19,6 +19,7 @@ from app.api.routes.application import app
 from app.langgraph.assistant_graph import knowledge_graph
 from app.intelligence import build_knowledge_graph, intelligence_service
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 assert app.title == "SecFlow Knowledge Security Assistant"
 original_query = intelligence_service.query
@@ -57,15 +58,29 @@ assert [node["id"] for node in collector_graph.graph_spec()["nodes"]] == [
     "validate_config",
     "fetch_records",
     "normalize_records",
+    "translate_records",
     "persist_records",
     "compose_result",
 ]
-credential_result = collector_service.collect("cve")
+with patch.object(collector_service, "_collect_cve", return_value=[]):
+    credential_result = collector_service.collect("cve")
 assert credential_result["status"] == "warning"
-assert [item["node"] for item in credential_result["trace"]] == ["validate_config", "compose_result"]
+assert [item["node"] for item in credential_result["trace"]] == [
+    "collector.validate_config",
+    "collector.query_api",
+    "collector.compose_result",
+]
 
 try:
-    year_result = knowledge_graph.invoke("2021 年最新 CVE 漏洞有哪些？", 5)
+    year_result = knowledge_graph.invoke(
+        "2021 年最新 CVE 漏洞有哪些？",
+        5,
+        intent_plan={
+            "intent": "vulnerability_year_lookup",
+            "reason": "deterministic release smoke route",
+            "confidence": 1.0,
+        },
+    )
     assert year_result["mode"] == "vulnerability_year_lookup"
     assert year_result["fields"]["年份过滤"] == "2021"
     assert "sources" not in year_result

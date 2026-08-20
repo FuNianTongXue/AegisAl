@@ -1,9 +1,9 @@
 import { Check, Copy, Download, ExternalLink, FileText, FolderOpen, LoaderCircle, RefreshCcw, ShieldCheck } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { useI18n } from "../i18n";
+import { clientLocaleTag, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { saveBinaryArtifact } from "../lib/platform";
 import { useAppStore } from "../store/appStore";
@@ -27,6 +27,7 @@ export function ChatMessage({
   autoExpandThinking?: boolean;
   showExecutionDetails?: boolean;
 }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const sources = turn.result?.evidence_sources || turn.result?.sources || [];
   const toolCalls = useMemo(() => (turn.trace || []).filter(isToolTrace), [turn.trace]);
@@ -44,12 +45,12 @@ export function ChatMessage({
             <div className="user-turn-chips">
               <span className="user-attachment-chip" title={turn.workspace.path}>
                 <FolderOpen size={12} />
-                <strong>{turn.workspace.name}</strong>
-                <small>{turn.workspace.path}</small>
+                <strong dir="auto">{turn.workspace.name}</strong>
+                <small dir="auto">{turn.workspace.path}</small>
               </span>
             </div>
           ) : null}
-          <div className="user-bubble">{turn.content}</div>
+          <div className="user-bubble" dir="auto">{turn.content}</div>
         </div>
         <ProfileAvatar profile={profile} userId={userId} className="chat-user-avatar" />
       </article>
@@ -89,17 +90,18 @@ export function ChatMessage({
         {sources.length ? <Sources sources={sources} /> : null}
         {!compact && !running && turn.state !== "error" ? (
           <div className="message-actions">
-            <button title="复制" onClick={() => void navigator.clipboard.writeText(turn.content).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200); })}>{copied ? <Check /> : <Copy />}</button>
-            <button title="重新生成" onClick={onRegenerate}><RefreshCcw /></button>
+            <button type="button" title={t("复制")} aria-label={t("复制")} onClick={() => void navigator.clipboard.writeText(turn.content).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200); })}>{copied ? <Check /> : <Copy />}</button>
+            {onRegenerate ? <button type="button" title={t("重新生成")} aria-label={t("重新生成")} onClick={onRegenerate}><RefreshCcw /></button> : null}
           </div>
         ) : null}
-        {turn.state === "error" ? <div className="message-error"><span>处理请求时发生错误。</span><button onClick={onRegenerate}><RefreshCcw size={13} />重试</button></div> : null}
+        {turn.state === "error" ? <div className="message-error" role="alert"><span>{t("处理请求时发生错误。")}</span>{onRegenerate ? <button type="button" onClick={onRegenerate}><RefreshCcw size={13} />{t("重试")}</button> : null}</div> : null}
       </div>
     </article>
   );
 }
 
 function AssistantMeta({ turn, toolCalls }: { turn: ChatTurn; toolCalls: TraceItem[] }) {
+  const { locale } = useI18n();
   const result = turn.result;
   if (!result) return null;
   const mcpCount = toolCalls.filter((item) => item.node.includes("mcp") || item.tool_name?.toLowerCase().includes("mcp")).length;
@@ -109,19 +111,20 @@ function AssistantMeta({ turn, toolCalls }: { turn: ChatTurn; toolCalls: TraceIt
   return (
     <div className="assistant-meta" aria-label="回答运行信息">
       <strong>{elapsedMs ? `已工作 ${formatElapsed(elapsedMs)}` : "已完成"}</strong>
-      <span>{model}</span>
+      <span translate="no">{model}</span>
       <span>{toolCalls.length} Tools</span>
       {mcpCount ? <span>{mcpCount} MCP</span> : null}
-      {tokenCount ? <span>{tokenCount.toLocaleString("zh-CN")} Tokens</span> : null}
+      {tokenCount ? <span>{new Intl.NumberFormat(clientLocaleTag(locale)).format(tokenCount)} Tokens</span> : null}
     </div>
   );
 }
 
 function CodeBlock({ language, code }: { language: string; code: string }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   return (
     <div className="code-block-wrap">
-      <header><span>{language}</span><button onClick={() => void navigator.clipboard.writeText(code).then(() => setCopied(true))}>{copied ? <Check /> : <Copy />}</button></header>
+      <header><span translate="no">{language}</span><button type="button" title={t("复制代码")} aria-label={t("复制代码")} onClick={() => void navigator.clipboard.writeText(code).then(() => setCopied(true))}>{copied ? <Check /> : <Copy />}</button></header>
       <pre className="code-block"><code>{code}</code></pre>
     </div>
   );
@@ -149,11 +152,28 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
   const { t, locale } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const titleId = useId();
+  const detailId = useId();
+  const firstAction = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
   const threadId = String(interrupt.thread_id || "");
   const question = interrupt.question || interrupt.message || "";
   const detail = interrupt.detail || "";
   const formats = (interrupt.formats || []).filter(Boolean);
   const isDownload = interrupt.kind === "report_download_confirmation" || formats.length > 0;
+
+  useEffect(() => {
+    if (!threadId) return;
+    previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      if (previouslyFocused.current?.isConnected) previouslyFocused.current.focus();
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    if (threadId) firstAction.current?.focus();
+  }, [interrupt.interrupt_id, threadId]);
+
   if (!threadId) return null;
 
   const decide = async (decision: "confirm" | "cancel", format?: string) => {
@@ -200,40 +220,50 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
   }[String(interrupt.kind || "")] || t("确认生成报告");
 
   return (
-    <div className="report-action-card">
-      {question ? <strong>{question}</strong> : null}
-      {detail ? <p>{detail}</p> : null}
+    <div
+      className="report-action-card"
+      role="alertdialog"
+      aria-live="assertive"
+      aria-busy={busy}
+      aria-labelledby={question ? titleId : undefined}
+      aria-label={question ? undefined : confirmLabel}
+      aria-describedby={detail ? detailId : undefined}
+    >
+      {question ? <strong id={titleId}>{question}</strong> : null}
+      {detail ? <p id={detailId}>{detail}</p> : null}
       <div className="report-action-buttons">
         {isDownload && formats.length > 1 ? (
-          <button className="primary" disabled={busy} onClick={() => void decide("confirm", "all")}>
+          <button ref={firstAction} type="button" className="primary" disabled={busy} onClick={() => void decide("confirm", "all")}>
             {busy ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
             {t("全部格式 ZIP")}
           </button>
         ) : null}
         {isDownload
-          ? formats.map((format) => (
-              <button key={format} className="primary" disabled={busy} onClick={() => void decide("confirm", format)}>
+          ? formats.map((format, index) => (
+              <button ref={formats.length === 1 && index === 0 ? firstAction : undefined} key={format} type="button" className="primary" disabled={busy} onClick={() => void decide("confirm", format)}>
                 {busy ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
                 {format.toUpperCase()}
               </button>
             ))
           : (
-              <button className="primary" disabled={busy} onClick={() => void decide("confirm")}>
+              <button ref={firstAction} type="button" className="primary" disabled={busy} onClick={() => void decide("confirm")}>
                 {busy ? <LoaderCircle size={14} className="spin" /> : <FileText size={14} />}
                 {confirmLabel}
               </button>
             )}
-        <button className="secondary" disabled={busy} onClick={() => void decide("cancel")}>{t("取消")}</button>
+        <button ref={isDownload && !formats.length ? firstAction : undefined} type="button" className="secondary" disabled={busy} onClick={() => void decide("cancel")}>{t("取消")}</button>
       </div>
-      {error ? <div className="message-error"><span>{error}</span></div> : null}
+      {error ? <div className="message-error" role="alert"><span>{error}</span></div> : null}
     </div>
   );
 }
 
 /** Download actions for generated report artifacts on chat turns. */
 function ArtifactDownloads({ items }: { items: AssistantArtifact[] }) {
+  const { t } = useI18n();
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
+  const [announcement, setAnnouncement] = useState("");
 
   // Route through the native save panel (Tauri) so the user can choose the
   // destination directory and rename the file; a bare <a download> inside the
@@ -244,25 +274,35 @@ function ArtifactDownloads({ items }: { items: AssistantArtifact[] }) {
     if (!path) return;
     setPending(path);
     setError("");
+    setAnnouncement(`${t("正在下载")} ${fileName}…`);
     try {
       const response = await api.raw(path);
       await saveBinaryArtifact(fileName, await response.blob());
+      setAnnouncement(`${fileName} ${t("已保存")}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      setAnnouncement("");
     } finally {
       setPending("");
     }
   };
 
   return (
-    <div className="report-artifacts">
+    <div className="report-artifacts" role="region" aria-label={t("可下载的报告文件")} aria-live="polite" aria-busy={Boolean(pending)}>
       {items.map((item) => (
-        <button key={item.id || item.download_path} disabled={Boolean(pending)} onClick={() => void download(item)}>
+        <button
+          key={item.id || item.download_path}
+          type="button"
+          disabled={Boolean(pending)}
+          aria-label={`${pending === String(item.download_path) ? t("正在下载") : t("下载")} ${item.file_name}`}
+          onClick={() => void download(item)}
+        >
           {pending === String(item.download_path) ? <LoaderCircle size={13} className="spin" /> : <Download size={13} />}
-          <span>{item.file_name}</span>
+          <span className="artifact-file-name" title={item.file_name} dir="auto" style={{ minWidth: 0, maxWidth: "min(460px, 60vw)", overflowWrap: "anywhere", textAlign: "left" }}>{item.file_name}</span>
         </button>
       ))}
-      {error ? <div className="message-error"><span>{error}</span></div> : null}
+      <span style={VISUALLY_HIDDEN_STYLE}>{announcement}</span>
+      {error ? <div className="message-error" role="alert"><span>{error}</span></div> : null}
     </div>
   );
 }
@@ -285,3 +325,15 @@ const isAgenticTurn = (turn: ChatTurn) => {
 };
 const safeHost = (url?: string) => { try { return url ? new URL(url).hostname : ""; } catch { return ""; } };
 const formatElapsed = (value: number) => value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(1)}s`;
+
+const VISUALLY_HIDDEN_STYLE = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0, 0, 0, 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+} as const;

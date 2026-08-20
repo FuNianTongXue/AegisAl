@@ -1,5 +1,18 @@
 export const isTauri = () => "__TAURI_INTERNALS__" in window;
 
+export async function openExternalUrl(url: string) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("仅允许打开公开网页链接。");
+  }
+  if (isTauri()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(parsed.toString());
+    return;
+  }
+  window.open(parsed.toString(), "_blank", "noopener,noreferrer");
+}
+
 /** Open a clean task workspace without replacing the task in this window. */
 export async function openNewTaskWindow() {
   if (!isTauri()) {

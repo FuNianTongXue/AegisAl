@@ -129,7 +129,7 @@ def get_scan_capabilities(capability_token: str) -> dict[str, Any]:
         "schema_version": CODE_SCAN_MCP_SCHEMA_VERSION,
         "server": code_scan_mcp.name,
         "process_id": os.getpid(),
-        "transport": "sse",
+        "transport": "stdio",
         "read_only": True,
         "supported_languages": list(status.get("supportedLanguages") or []),
         "allowed_tools": sorted(allowed_tools),
@@ -148,8 +148,8 @@ async def code_scan_mcp_spec() -> dict[str, Any]:
     return {
         "id": CODE_SCAN_MCP_SERVER_ID,
         "name": code_scan_mcp.name,
-        "transport": "sse",
-        "endpoint": "loopback-managed",
+        "transport": "stdio",
+        "endpoint": "managed-child-process",
         "tools": [
             {
                 "name": tool.name,
@@ -286,14 +286,37 @@ def _validate_cancel_marker(value: str) -> Path | None:
     clean = str(value or "").strip()
     if not clean:
         return None
-    marker = Path(clean).expanduser().resolve(strict=False)
-    temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    if "\x00" in clean:
+        raise ValueError("Code Scan MCP cancel marker is invalid")
+    configured_root = os.getenv("SECFLOW_CODE_SCAN_CANCEL_ROOT", "").strip()
+    if not configured_root:
+        raise ValueError("Code Scan MCP cancel root is not configured")
+    unresolved_root = Path(configured_root).expanduser()
+    unresolved_marker = Path(clean).expanduser()
+    if not unresolved_root.is_absolute() or not unresolved_marker.is_absolute():
+        raise ValueError("Code Scan MCP cancel marker must use an absolute private path")
+    if unresolved_root.is_symlink() or unresolved_marker.is_symlink():
+        raise ValueError("Code Scan MCP cancel marker cannot traverse a symlink")
     try:
-        marker.relative_to(temp_root)
-    except ValueError as exc:
-        raise ValueError("Code Scan MCP cancel marker must be inside the system temporary directory") from exc
+        cancel_root = unresolved_root.resolve(strict=True)
+        marker_parent = unresolved_marker.parent.resolve(strict=True)
+        marker = unresolved_marker.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("Code Scan MCP cancel marker path is unavailable") from exc
+    if (
+        not cancel_root.is_dir()
+        or not cancel_root.name.startswith("secflow-code-scan-runtime-")
+        or marker_parent.is_symlink()
+        or not marker_parent.is_dir()
+        or marker_parent.parent != cancel_root
+        or not marker_parent.name.startswith("secflow-code-scan-cancel-")
+        or marker.parent != marker_parent
+    ):
+        raise ValueError("Code Scan MCP cancel marker must be inside its private runtime directory")
     if marker.name != "cancel":
         raise ValueError("Code Scan MCP cancel marker name is invalid")
+    if marker.exists() and not marker.is_file():
+        raise ValueError("Code Scan MCP cancel marker must be a regular file")
     return marker
 
 
@@ -323,15 +346,9 @@ def _public_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the independent SecFlow Code Scan MCP service.")
-    parser.add_argument("--transport", choices=("sse",), default="sse")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--transport", choices=("stdio",), default="stdio")
     parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
-    if args.host not in {"127.0.0.1", "localhost", "::1"}:
-        raise SystemExit("Code Scan MCP may only bind to a loopback address")
-    code_scan_mcp.settings.host = args.host
-    code_scan_mcp.settings.port = args.port
     if args.parent_pid:
         threading.Thread(
             target=_watch_parent,
@@ -339,7 +356,7 @@ def main(argv: list[str] | None = None) -> None:
             daemon=True,
             name="secflow-code-scan-parent-watch",
         ).start()
-    code_scan_mcp.run(transport="sse")
+    code_scan_mcp.run(transport="stdio")
 
 
 def _watch_parent(parent_pid: int) -> None:

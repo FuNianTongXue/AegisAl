@@ -18,8 +18,7 @@ from app.agent.assistant_service import (
 from app.langgraph.assistant_graph import knowledge_graph
 from app.langgraph.checkpoints import InterruptStateConflictError
 from app.langgraph.multi_agent_graph import assistant_multi_agent_supervisor
-from app.mcp.component_query import artifact_store as component_artifact_store
-from app.mcp.sbom import artifact_store as sbom_artifact_store
+from app.assistant_artifacts import component_artifact_store, sbom_artifact_store
 from app.memory import memory_service
 from app.models import (
     ApiResponse,
@@ -59,16 +58,12 @@ async def ask_stream(payload: AskRequest) -> StreamingResponse:
     async def stream():
         queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
-        emitted_content = [False]
 
         def emit_trace(item: dict[str, Any]) -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, ("trace", item))
+            del item
 
         def emit_content(delta: str) -> None:
-            if not delta:
-                return
-            emitted_content[0] = True
-            loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
+            del delta
 
         def run_graph() -> None:
             try:
@@ -78,9 +73,12 @@ async def ask_stream(payload: AskRequest) -> StreamingResponse:
                     event_sink=emit_trace,
                     content_sink=emit_content,
                 )
-                if not emitted_content[0]:
-                    for delta in assistant_content_chunks(str(result.get("summary") or "")):
-                        loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
+                final_trace = result.get("trace") if isinstance(result.get("trace"), list) else []
+                for item in final_trace:
+                    if isinstance(item, dict):
+                        loop.call_soon_threadsafe(queue.put_nowait, ("trace", dict(item)))
+                for delta in assistant_content_chunks(str(result.get("summary") or "")):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
                 loop.call_soon_threadsafe(queue.put_nowait, ("result", result))
             except Exception as exc:  # noqa: BLE001
                 message = sanitize_public_text(str(exc)).strip() or "Assistant response generation failed."
@@ -109,20 +107,32 @@ async def ask_stream(payload: AskRequest) -> StreamingResponse:
 
 
 @router.get("/artifacts/{artifact_id}")
-def download_artifact(artifact_id: str) -> FileResponse:
+def download_artifact(
+    artifact_id: str,
+    user_id: str = Query(default="default", min_length=1, max_length=120),
+) -> FileResponse:
     path: Path
     try:
-        path = component_artifact_store.resolve(artifact_id)
-        file_name = f"SecFlow-{artifact_id}.xlsx"
+        path = component_artifact_store.resolve(artifact_id, user_id=user_id)
+        file_name = str(
+            component_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
+            or "SecFlow-component-vulnerabilities.xlsx"
+        )
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except KeyError:
         try:
-            path = sbom_artifact_store.resolve(artifact_id)
-            file_name = f"SecFlow-{artifact_id}.xlsx"
+            path = sbom_artifact_store.resolve(artifact_id, user_id=user_id)
+            file_name = str(
+                sbom_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
+                or "SecFlow-project-SBOM.xlsx"
+            )
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         except KeyError as exc:
             try:
-                path, file_name, media_type = report_artifact_store.resolve(artifact_id)
+                path, file_name, media_type = report_artifact_store.resolve(
+                    artifact_id,
+                    user_id=user_id,
+                )
             except KeyError:
                 raise HTTPException(status_code=404, detail=f"Unknown assistant artifact: {artifact_id}") from exc
     return FileResponse(path, media_type=media_type, filename=file_name, headers={"Cache-Control": "no-store"})

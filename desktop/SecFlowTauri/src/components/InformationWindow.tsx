@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect } from "react";
 
+import { useI18n } from "../i18n";
 import { isTauri } from "../lib/platform";
 import { useAppStore } from "../store/appStore";
 import { InformationPanel } from "./InformationPanel";
@@ -7,12 +8,16 @@ import { InformationPanel } from "./InformationPanel";
 export function InformationWindow() {
   const theme = useAppStore((state) => state.theme);
   const fontScale = useAppStore((state) => state.fontScale);
+  const { locale } = useI18n();
 
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = theme;
+    root.lang = locale;
     root.style.setProperty("--font-scale", String(fontScale));
-  }, [fontScale, theme]);
+    const dark = theme === "dark" || (theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", dark ? "#171718" : "#fafbfd");
+  }, [fontScale, locale, theme]);
 
   useLayoutEffect(() => {
     document.documentElement.dataset.secflowWindow = "information";
@@ -50,9 +55,10 @@ export function InformationWindow() {
   }, []);
 
   return (
-    <div className="information-window-shell">
+    <main className="information-window-shell" aria-label="信息中心">
+      <h1 className="sr-only">信息中心</h1>
       <InformationPanel open onClose={() => void hideInformationWindow()} variant="window" />
-    </div>
+    </main>
   );
 }
 

@@ -1,6 +1,6 @@
 ---
 name: secflow-project-sbom
-description: Build an auditable CycloneDX-compatible SBOM JSON and Excel workbook from a user-authorized project, own project-license identification through a capability-scoped MCP and OSI License API, optionally match versioned components, and answer read-only follow-ups from stored SBOM facts. Use when the user wants a software bill of materials, project dependency inventory, supply-chain component inventory, license inventory, equivalent workbook, or existing SBOM result details. Do not use for ordinary code vulnerability scans or frozen evaluation corpora.
+description: "Build an auditable CycloneDX-compatible SBOM JSON and Excel workbook from a user-authorized project, own project-license identification through a capability-scoped MCP and OSI License API, optionally match versioned components, and answer read-only follow-ups from stored SBOM facts. Use when the user wants a software bill of materials, project dependency inventory, supply-chain component inventory, license inventory, equivalent workbook, or existing SBOM result details. Do not use for ordinary code vulnerability scans or frozen evaluation corpora."
 ---
 
 # SecFlow Project SBOM
