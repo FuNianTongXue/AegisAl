@@ -99,7 +99,7 @@ def build_scan_sarif(report_json: dict[str, Any]) -> SarifReportOutput:
                 "tool": {
                     "driver": {
                         "name": "AegisAl",
-                        "informationUri": "https://github.com/FuNianTongXue/secflow-knowledge-security-assistant",
+                        "informationUri": "https://github.com/FuNianTongXue/AegisAl",
                         "semanticVersion": "1.0.0",
                         "rules": list(rules.values()),
                     }

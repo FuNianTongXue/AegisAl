@@ -21,7 +21,7 @@ from app.intelligence import build_knowledge_graph, intelligence_service
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-assert app.title == "AegisAl Knowledge Security Assistant"
+assert app.title == "AegisAl"
 original_query = intelligence_service.query
 
 def mocked_query(query, limit=10, sources=None):

@@ -162,7 +162,7 @@ def _build_docx(document: dict[str, Any], mermaid: dict[str, Any]) -> bytes:
 
     header = section.header.paragraphs[0]
     header.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    header_run = header.add_run("神盾  /  安全扫描报告" if chinese_report else "AEGISAI  /  SECURITY SCAN REPORT")
+    header_run = header.add_run("AegisAl  /  安全扫描报告" if chinese_report else "AegisAl  /  SECURITY SCAN REPORT")
     _set_run_font(header_run, body_font, east_asia_font, qn, size=8, color=RGBColor(98, 112, 137), bold=True)
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT

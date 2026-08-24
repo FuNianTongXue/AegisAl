@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 产品 | 神盾 / AegisAl Knowledge Security Assistant |
+| 产品 | AegisAl |
 | 版本 | 1.3.4（Tauri 跨平台源码基线） |
 | 客户端 | Tauri 2 + React/TypeScript |
 | 后端 | Python 3、FastAPI、LangGraph |

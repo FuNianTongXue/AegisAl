@@ -42,7 +42,7 @@
 | macOS Apple Silicon (`arm64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-ARM64-7天试用版.dmg` | `bfc9e33b8d5fe40d741a18e0b246ee58ad0bb2248c28a86a9b8cd52309a34589` |
 | macOS Intel (`x86_64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-x86_64-7天试用版.dmg` | `16ae1aedc0e2e0c9bb018ef670ce9b583c32885442d468551a405a9a02d53402` |
 
-两个包均为 ad-hoc 签名，未进行 Apple 公证。首次成功启动后连续可用 168 小时。安装包和对应 `.sha256` 文件见 [v1.3.4 源码 / v1.3.3 试用客户端 Release](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.3.4-trial-7days)。
+两个包均为 ad-hoc 签名，未进行 Apple 公证。首次成功启动后连续可用 168 小时。安装包和对应 `.sha256` 文件见 [v1.3.4 源码 / v1.3.3 试用客户端 Release](https://github.com/FuNianTongXue/AegisAl/releases/tag/v1.3.4-trial-7days)。
 
 ## 演示与架构
 

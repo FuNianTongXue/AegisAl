@@ -116,9 +116,9 @@ REPORT_MCP_SERVER_IDS = (
 )
 
 app = FastAPI(
-    title="AegisAl Knowledge Security Assistant",
+    title="AegisAl",
     version=APP_VERSION,
-    description="A source-available LangGraph knowledge security assistant by ShenSiQi.",
+    description="A source-available LangGraph security agent by ShenSiQi.",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -195,7 +195,7 @@ def _registered_mcp_server_specs(server_ids: tuple[str, ...]) -> list[dict[str, 
 @app.get("/")
 def root():
     return {
-        "service": "aegisai-knowledge-security-assistant",
+        "service": "aegisal",
         "client": "AegisAl Tauri Desktop",
         "api_docs": "/docs",
     }
@@ -205,7 +205,7 @@ def root():
 def health():
     return {
         "ok": True,
-        "service": "aegisai-knowledge-security-assistant",
+        "service": "aegisal",
         "contract_version": MACOS_API_CONTRACT_VERSION,
         "author": "ShenSiQi",
         "task_execution": task_agent_service.execution_status(),

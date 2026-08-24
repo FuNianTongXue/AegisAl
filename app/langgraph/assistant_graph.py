@@ -313,7 +313,7 @@ class KnowledgeSecurityGraph:
     @staticmethod
     def graph_spec() -> dict[str, Any]:
         return {
-            "name": "Knowledge Security Assistant LangGraph",
+            "name": "AegisAl LangGraph",
             "nodes": [
                 {"id": "classify_query", "label": "识别问题意图"},
                 {"id": "load_memory_context", "label": "加载长期记忆"},

@@ -1,4 +1,4 @@
-# 神盾 AegisAl Knowledge Security Assistant
+# AegisAl
 
 <p align="center">
   <img src="docs/assets/aegisal-logo.png" width="168" alt="神盾 AegisAl Logo">
@@ -48,7 +48,7 @@
 | macOS Apple Silicon (`arm64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-ARM64-7天试用版.dmg` | `bfc9e33b8d5fe40d741a18e0b246ee58ad0bb2248c28a86a9b8cd52309a34589` |
 | macOS Intel (`x86_64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-x86_64-7天试用版.dmg` | `16ae1aedc0e2e0c9bb018ef670ce9b583c32885442d468551a405a9a02d53402` |
 
-安装包及对应校验文件见 [v1.3.4 源码 / v1.3.3 试用客户端 Release](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.3.4-trial-7days)。
+安装包及对应校验文件见 [v1.3.4 源码 / v1.3.3 试用客户端 Release](https://github.com/FuNianTongXue/AegisAl/releases/tag/v1.3.4-trial-7days)。
 
 ## 功能演示
 
@@ -132,8 +132,8 @@ docs/                     架构、产品、API、许可和 1.3.4 发布资料
 ### 后端
 
 ```bash
-git clone https://github.com/FuNianTongXue/secflow-knowledge-security-assistant.git
-cd secflow-knowledge-security-assistant
+git clone https://github.com/FuNianTongXue/AegisAl.git
+cd AegisAl
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

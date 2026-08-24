@@ -19,11 +19,11 @@ class AlwaysUsableTrial:
 
 class ApiStructureTests(unittest.TestCase):
     def test_openapi_uses_current_public_brand(self) -> None:
-        self.assertEqual(application.app.openapi()["info"]["title"], "AegisAl Knowledge Security Assistant")
+        self.assertEqual(application.app.openapi()["info"]["title"], "AegisAl")
         documented = json.loads(
             (Path(__file__).resolve().parents[1] / "docs" / "openapi.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(documented["info"]["title"], "AegisAl Knowledge Security Assistant")
+        self.assertEqual(documented["info"]["title"], "AegisAl")
 
     def test_vulnerability_read_routes_forward_requested_language(self) -> None:
         localized = {
