@@ -1,7 +1,7 @@
 """Verified, offline machine-translation runtime used by Translation MCP.
 
 The runtime deliberately has no HTTP client and accepts no provider settings.
-Its model files are part of the signed SecFlow application bundle and are
+Its model files are part of the signed AegisAl application bundle and are
 verified against ``manifest.json`` before CTranslate2 loads them.
 """
 
@@ -73,7 +73,7 @@ class OfflineTranslationIntegrityError(OfflineTranslationUnavailable):
 
 
 class UnsupportedTranslationLanguage(OfflineTranslationError):
-    """The requested target is outside the languages bundled with SecFlow."""
+    """The requested target is outside the languages bundled with AegisAl."""
 
 
 @dataclass(frozen=True, slots=True)

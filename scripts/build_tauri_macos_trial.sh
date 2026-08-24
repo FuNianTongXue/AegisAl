@@ -14,7 +14,7 @@ PY
 [ -n "$VERSION" ] || { echo "Unable to read client version from desktop/SecFlowTauri/package.json" >&2; exit 1; }
 TRIAL_CONFIG="$TAURI_DIR/src-tauri/tauri.trial.conf.json"
 TRIAL_IDENTIFIER="ai.secflow.security-agent.trial7days"
-TRIAL_PRODUCT_NAME="安全智脑 7 天试用版"
+TRIAL_PRODUCT_NAME="神盾 7 天试用版"
 TARGET_TRIPLE="${SECFLOW_TAURI_TARGET:-aarch64-apple-darwin}"
 
 SECFLOW_TAURI_TRIAL_BUILD=1 \

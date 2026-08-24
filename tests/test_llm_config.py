@@ -13,11 +13,106 @@ from app.llm import (
     list_llm_models,
     llm_public_config,
     save_llm_config,
+    test_llm_config as run_llm_config_test,
 )
+from app.models import LLMConfigRequest, LLMModelsRequest
 from app.storage import StateStore, default_state
 
 
 class LLMConfigTests(unittest.TestCase):
+    def test_blank_reasoning_effort_request_is_treated_as_unset(self) -> None:
+        request = LLMConfigRequest(
+            provider="openai",
+            model="gpt-5.6-sol",
+            reasoning_effort="   ",
+        )
+
+        self.assertIsNone(request.reasoning_effort)
+
+    def test_non_empty_invalid_reasoning_effort_request_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            LLMConfigRequest(
+                provider="openai",
+                model="gpt-5.6-sol",
+                reasoning_effort="extreme",
+            )
+
+    def test_legacy_reasoning_effort_is_normalized_for_public_saved_and_active_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            state = default_state()
+            state["llm"].update(
+                {
+                    "provider": "deepseek",
+                    "catalog_provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "endpoint": "https://api.deepseek.com/v1",
+                    "api_key": "test-key",
+                    "enabled": True,
+                    "wire_api": "chat",
+                    "reasoning_effort": "legacy-invalid",
+                }
+            )
+            local_store.write(state)
+
+            with patch("app.llm.store", local_store):
+                public = llm_public_config()
+                active = active_model_from_env()
+                saved = save_llm_config({"reasoning_effort": ""})
+                persisted = local_store.read()["llm"]
+
+        self.assertEqual(public["reasoning_effort"], "none")
+        self.assertEqual(active["reasoningEffort"], "none")
+        self.assertEqual(saved["reasoning_effort"], "none")
+        self.assertEqual(persisted["reasoning_effort"], "none")
+
+    def test_openai_blank_legacy_effort_uses_the_shared_medium_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            state = default_state()
+            state["llm"].update(
+                {
+                    "provider": "openai",
+                    "catalog_provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "endpoint": "https://api.openai.com/v1",
+                    "reasoning_effort": "",
+                    "enabled": True,
+                }
+            )
+            local_store.write(state)
+            with patch("app.llm.store", local_store):
+                public = llm_public_config()
+
+        self.assertEqual(public["reasoning_effort"], "medium")
+
+    def test_reasoning_effort_tracks_the_selected_models_supported_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                save_llm_config(
+                    {
+                        "provider": "openai",
+                        "model": "gpt-5.6-sol",
+                        "reasoning_effort": "max",
+                    }
+                )
+                fixed = save_llm_config(
+                    {
+                        "provider": "deepseek",
+                        "model": "deepseek-reasoner",
+                        "endpoint": "https://api.deepseek.com/v1",
+                        "enabled": True,
+                    }
+                )
+                active = active_model_from_env()
+                persisted = local_store.read()["llm"]
+
+        self.assertEqual(fixed["reasoning_options"], [{"value": "high", "fixed": True}])
+        self.assertEqual(fixed["reasoning_effort"], "high")
+        self.assertEqual(active["reasoningEffort"], "high")
+        self.assertEqual(persisted["reasoning_effort"], "high")
+
     def test_ollama_catalog_uses_local_models_without_an_api_key(self) -> None:
         active_model = {
             "name": "Ollama:qwen3:8b",
@@ -447,6 +542,74 @@ class LLMConfigTests(unittest.TestCase):
             self.assertNotIn("sk-test-secret-123456", str(public))
             self.assertEqual(public["api_key_masked"], "sk-t********3456")
 
+    def test_saved_api_key_can_be_explicitly_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                save_llm_config(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "model": "third-party-model",
+                        "endpoint": "https://gateway.example/v1",
+                        "api_key": "third-party-secret",
+                        "enabled": True,
+                    }
+                )
+                config = save_llm_config({"clear_api_key": True})
+                active = active_model_from_env()
+
+            self.assertFalse(config["has_api_key"])
+            self.assertEqual(active["apiKey"], "")
+
+    def test_model_requests_accept_long_third_party_keys(self) -> None:
+        long_key = "header.payload." + ("signature" * 256)
+        config = LLMConfigRequest(
+            provider="custom",
+            catalog_provider="custom",
+            model="third-party-model",
+            endpoint="https://gateway.example/v1",
+            api_key=long_key,
+        )
+        catalog = LLMModelsRequest(
+            provider="custom",
+            catalog_provider="custom",
+            endpoint="https://gateway.example/v1",
+            api_key=long_key,
+        )
+
+        self.assertEqual(config.api_key, long_key)
+        self.assertEqual(catalog.api_key, long_key)
+
+    def test_model_catalog_does_not_reuse_a_key_marked_for_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("app.llm.store", local_store),
+                patch("app.llm._fetch_provider_models") as fetch_models,
+            ):
+                save_llm_config(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "model": "third-party-model",
+                        "endpoint": "https://gateway.example/v1",
+                        "api_key": "third-party-secret",
+                        "enabled": True,
+                    }
+                )
+                catalog = list_llm_models(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "endpoint": "https://gateway.example/v1",
+                        "clear_api_key": True,
+                    }
+                )
+
+            fetch_models.assert_not_called()
+            self.assertEqual(catalog["source"], "fallback")
+
     def test_provider_switch_does_not_reuse_previous_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             local_store = StateStore(Path(temp_dir) / "state.json")
@@ -471,6 +634,69 @@ class LLMConfigTests(unittest.TestCase):
 
             self.assertEqual(config["provider"], "claude")
             self.assertFalse(config["has_api_key"])
+
+    def test_endpoint_switch_does_not_reuse_previous_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with patch("app.llm.store", local_store):
+                save_llm_config(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "model": "third-party-model",
+                        "endpoint": "https://old-gateway.example/v1",
+                        "api_key": "old-gateway-secret",
+                        "enabled": True,
+                    }
+                )
+                config = save_llm_config(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "model": "third-party-model",
+                        "endpoint": "https://new-gateway.example/v1",
+                        "enabled": True,
+                    }
+                )
+
+            self.assertEqual(config["endpoint"], "https://new-gateway.example/v1")
+            self.assertFalse(config["has_api_key"])
+
+    def test_connection_test_does_not_send_previous_key_to_a_new_endpoint(self) -> None:
+        captured_model: dict = {}
+
+        def diagnose(model: dict, _messages: list[dict], **_kwargs) -> dict:
+            captured_model.update(model)
+            return {"status": "failed", "message": "API Key 未配置"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_store = StateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("app.llm.store", local_store),
+                patch("app.llm.diagnose_chat_completion", side_effect=diagnose),
+            ):
+                save_llm_config(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "model": "third-party-model",
+                        "endpoint": "https://old-gateway.example/v1",
+                        "api_key": "old-gateway-secret",
+                        "enabled": True,
+                    }
+                )
+                run_llm_config_test(
+                    {
+                        "provider": "custom",
+                        "catalog_provider": "custom",
+                        "model": "third-party-model",
+                        "endpoint": "https://new-gateway.example/v1",
+                        "enabled": True,
+                    }
+                )
+
+        self.assertEqual(captured_model["endpoint"], "https://new-gateway.example/v1")
+        self.assertEqual(captured_model["apiKey"], "")
 
     def test_model_list_without_key_returns_fallback_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

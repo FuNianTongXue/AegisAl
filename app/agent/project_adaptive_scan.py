@@ -27,7 +27,7 @@ _RULE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}\Z")
 _SIMPLE_PATTERN_RE = re.compile(r"[A-Za-z0-9_$.:>#<*\[\]'\" \t,(){}+\-/]+\Z")
 
 
-PROJECT_ADAPTIVE_SCAN_SYSTEM_PROMPT = """你是 SecFlow 上传项目的自适应代码扫描节点。
+PROJECT_ADAPTIVE_SCAN_SYSTEM_PROMPT = """你是神盾上传项目的自适应代码扫描节点。
 先使用冻结的静态规则与 AST/CFG/调用图/DFG/污点证据，再决定是否需要项目级 Overlay。
 只能依据输入中的 evidence_id；不得把模型推测写成已验证的漏报或误报，不得修改全局规则和冻结评测基线。
 允许输出：项目级简单 Semgrep taint 规则、预处理宏、提升现有复核候选、把现有主告警降到复核区。
@@ -310,7 +310,7 @@ def validate_project_overlay(candidate: dict[str, Any], request: dict[str, Any])
             {
                 "id": rule_id,
                 "language": language,
-                "message": _bounded_text(raw_rule.get("message"), 240) or "SecFlow 项目级污点路径",
+                "message": _bounded_text(raw_rule.get("message"), 240) or "神盾项目级污点路径",
                 "sources": sources,
                 "sinks": sinks,
                 "sanitizers": sanitizers,
@@ -426,7 +426,7 @@ def project_overlay_rule_file(overlay: dict[str, Any], language: str) -> Iterato
         rule = {
             "id": f"secflow.project.{item['id']}",
             "languages": [_semgrep_language(language)],
-            "message": str(item.get("message") or "SecFlow 项目级污点路径"),
+            "message": str(item.get("message") or "神盾项目级污点路径"),
             "severity": "WARNING",
             "mode": "taint",
             "pattern-sources": [{"pattern": value} for value in item.get("sources") or []],

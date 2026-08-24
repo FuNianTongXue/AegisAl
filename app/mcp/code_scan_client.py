@@ -128,7 +128,9 @@ class CodeScanMCPClient:
             raise CodeScanMCPError("Code Scan MCP returned no structured scan result")
         result["_scan_mcp"] = {
             "schema_version": int(payload.get("schema_version") or 1),
-            "server": str(payload.get("server") or "SecFlow Code Scan MCP"),
+            "server": str(payload.get("server") or "AegisAl Code Scan MCP").replace(
+                "SecFlow Code Scan MCP", "AegisAl Code Scan MCP"
+            ),
             "tool": str(payload.get("tool") or "scan_language"),
             "transport": "stdio",
             "endpoint": "managed-child-process",

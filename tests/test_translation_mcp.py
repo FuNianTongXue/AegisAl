@@ -95,6 +95,145 @@ class TranslationMCPContractTests(unittest.TestCase):
             self.assertEqual(result.payload["finding"][key], payload["finding"][key])
         self.assert_free_offline_contract(result)
 
+    def test_translates_structured_table_labels_and_prose_cells(self) -> None:
+        payload = {
+            "summary": "Vulnerability records are ready.",
+            "tables": [
+                {
+                    "id": "recent-vulnerabilities",
+                    "title": "Recent vulnerability records",
+                    "caption": "Editable vulnerability records",
+                    "columns": [
+                        {"key": "identifier", "label": "Vulnerability ID"},
+                        {"key": "status", "label": "Review status"},
+                        {"key": "finding", "label": "Finding"},
+                    ],
+                    "rows": [
+                        {
+                            "identifier": "CVE-2026-1234",
+                            "name": "Manual review required",
+                            "risk_state": "needs_review",
+                            "status": "Needs immediate remediation",
+                            "finding": "Remote attackers can execute arbitrary code in OpenSSL before 3.2.1.",
+                            "componentCoordinate": "pkg:maven/org.openssl/openssl@3.2.1",
+                            "source_path": "src/security/check.py",
+                            "version": "3.2.1",
+                            "code": "verify(request)",
+                            "sha256": "a" * 64,
+                            "任务编号": "task 123",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ):
+            result = translate_json_payload(payload, target_language="zh-Hans")
+
+        table = result.payload["tables"][0]
+        row = table["rows"][0]
+        self.assertEqual(result.translation_status, "translated")
+        self.assertRegex(table["title"], r"[\u3400-\u9fff]")
+        self.assertRegex(table["caption"], r"[\u3400-\u9fff]")
+        self.assertRegex(table["columns"][1]["label"], r"[\u3400-\u9fff]")
+        self.assertRegex(row["name"], r"[\u3400-\u9fff]")
+        self.assertRegex(row["risk_state"], r"[\u3400-\u9fff]")
+        self.assertRegex(row["status"], r"[\u3400-\u9fff]")
+        self.assertRegex(row["finding"], r"[\u3400-\u9fff]")
+        self.assertEqual(row["identifier"], "CVE-2026-1234")
+        for key in (
+            "componentCoordinate", "source_path", "version", "code", "sha256", "任务编号",
+        ):
+            self.assertEqual(row[key], payload["tables"][0]["rows"][0][key])
+        self.assertIn("OpenSSL", row["finding"])
+        self.assertIn("3.2.1", row["finding"])
+        self.assert_free_offline_contract(result)
+
+    def test_translates_array_table_rows_without_touching_machine_values(self) -> None:
+        payload = {
+            "table": {
+                "columns": [
+                    "Vulnerability ID",
+                    "Description",
+                    "Reference link",
+                    "Source path",
+                    "Version",
+                    "Code sample",
+                    "Digest",
+                    "Component coordinate",
+                    "Updated at",
+                ],
+                "data": [[
+                    "GHSA-abcd-efgh-ijkl",
+                    "A crafted request causes denial of service.",
+                    "https://example.test/advisory/GHSA-abcd-efgh-ijkl",
+                    "src/security/check.py",
+                    "3.2.1",
+                    "verify(request)",
+                    "a" * 64,
+                    "pkg:maven/org.openssl/openssl@3.2.1",
+                    "2026-08-23T12:34:56Z",
+                ]],
+            }
+        }
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ):
+            result = translate_json_payload(payload, target_language="zh-Hans")
+
+        table = result.payload["table"]
+        row = table["data"][0]
+        for column in table["columns"]:
+            self.assertRegex(column, r"[\u3400-\u9fff]")
+        self.assertRegex(row[1], r"[\u3400-\u9fff]")
+        for index in (0, 2, 3, 4, 5, 6, 7, 8):
+            self.assertEqual(row[index], payload["table"]["data"][0][index])
+
+    def test_binds_translated_string_columns_to_object_row_keys(self) -> None:
+        payload = {
+            "tables": [{
+                "columns": ["Finding title", "Vulnerability ID"],
+                "rows": [{"id": "CVE-2026-8181", "title": "Manual review required"}],
+            }]
+        }
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ):
+            result = translate_json_payload(payload, target_language="zh-Hans")
+
+        table = result.payload["tables"][0]
+        self.assertEqual([column["key"] for column in table["columns"]], ["title", "id"])
+        self.assertTrue(all(re.search(r"[\u3400-\u9fff]", column["label"]) for column in table["columns"]))
+        self.assertEqual(table["rows"][0]["id"], "CVE-2026-8181")
+        self.assertRegex(table["rows"][0]["title"], r"[\u3400-\u9fff]")
+
+    def test_translates_table_cards_used_by_the_desktop_renderer(self) -> None:
+        payload = {
+            "cards": [{
+                "type": "records-table",
+                "title": "Review queue",
+                "columns": [{"key": "status", "label": "Review status"}],
+                "rows": [{"status": "Needs manual review"}],
+            }]
+        }
+
+        with patch(
+            "app.mcp.translation.offline_translation_engine.translate_batch",
+            side_effect=_complete_local_translation,
+        ):
+            result = translate_json_payload(payload, target_language="zh-Hans")
+
+        card = result.payload["cards"][0]
+        self.assertRegex(card["columns"][0]["label"], r"[\u3400-\u9fff]")
+        self.assertRegex(card["rows"][0]["status"], r"[\u3400-\u9fff]")
+
     def test_preserves_all_security_evidence_segments_exactly(self) -> None:
         code_block = '```python\nos.system(user_input)\n```'
         evidence = (
@@ -224,15 +363,13 @@ class TranslationMCPContractTests(unittest.TestCase):
     def test_localized_payload_with_machine_string_value_is_passthrough(self) -> None:
         payload = {
             "summary": "请输入组件名称和明确版本。",
-            "fields": {"确认漏洞数量": "0"},
+            "fields": {"意图": "llm_direct", "确认漏洞数量": "0"},
         }
 
-        with patch(
-            "app.mcp.translation.offline_translation_engine.translate_batch",
-            side_effect=lambda texts, *, target_language: list(texts),
-        ):
+        with patch("app.mcp.translation.offline_translation_engine.translate_batch") as engine:
             result = translate_json_payload(payload, target_language="zh-Hans")
 
+        engine.assert_not_called()
         self.assertEqual(result.payload, payload)
         self.assertEqual(result.translation_status, "passthrough")
         self.assertEqual(result.unresolved_fields, 0)

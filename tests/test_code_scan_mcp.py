@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +16,8 @@ from app.agent.task_agent import TaskAgentGraph, TaskAgentService
 from app.agent.task_store import AgentTaskStore
 from app.api.routes import application
 from app.mcp.code_scan import (
+    CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT,
+    _compact_scan_result_for_transport,
     _parent_process_is_alive,
     _validate_cancel_marker,
     _watch_parent,
@@ -66,6 +69,111 @@ def completed_scan_result(language: str = "python") -> dict:
 
 
 class CodeScanMCPTests(unittest.TestCase):
+    def test_transport_compaction_keeps_findings_and_bounds_file_details(self) -> None:
+        graph = {
+            "node_count": 12,
+            "edge_count": 11,
+            "nodes": [{"id": "node-1", "snippet": "large preview"}],
+            "edges": [{"from": "node-1", "to": "node-2"}],
+            "truncated": False,
+        }
+        parse_error_files = [
+            {
+                "file_name": f"src/Broken{index}.java",
+                "language": "java",
+                "syntax": {
+                    "file": f"src/Broken{index}.java",
+                    "language": "java",
+                    "parser": "tree-sitter",
+                    "parser_mode": "native",
+                    "parse_error": True,
+                    "raw_parse_error": True,
+                    "recovered_parse_error": False,
+                    "parser_error_nodes": 2,
+                    "ast_node_count": 12,
+                    "ast_graph": graph,
+                    "cfg_graph": graph,
+                    "dfg_graph": graph,
+                    "functions": ["large", "per-file", "preview"],
+                },
+            }
+            for index in range(CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT + 2)
+        ]
+        normal_files = [
+            {
+                "file_name": f"src/Healthy{index}.java",
+                "language": "java",
+                "syntax": {"parse_error": False, "ast_graph": graph, "cfg_graph": graph, "dfg_graph": graph},
+            }
+            for index in range(3)
+        ]
+        findings = [{"id": "finding-1", "evidence": "must remain unchanged"}]
+        review_findings = [{"id": "review-1", "path": [{"line": 7}]}]
+        raw = {
+            "files": [*normal_files, *parse_error_files],
+            "syntax_summary": {
+                "parsed_files": len(normal_files),
+                "parse_error_files": len(parse_error_files),
+                "parse_error_file_names": [item["file_name"] for item in parse_error_files],
+                "ast_node_count": 12_345,
+            },
+            "findings": findings,
+            "review_findings": review_findings,
+        }
+
+        compacted = _compact_scan_result_for_transport(raw)
+
+        self.assertIs(compacted["findings"], findings)
+        self.assertIs(compacted["review_findings"], review_findings)
+        self.assertEqual(compacted["syntax_summary"]["ast_node_count"], 12_345)
+        self.assertEqual(
+            compacted["syntax_summary"]["parse_error_file_name_count"],
+            CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT + 2,
+        )
+        self.assertEqual(len(compacted["files"]), CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT)
+        self.assertTrue(all(item["syntax"]["parse_error"] for item in compacted["files"]))
+        self.assertNotIn("functions", compacted["files"][0]["syntax"])
+        compacted_graph = compacted["files"][0]["syntax"]["ast_graph"]
+        self.assertEqual(
+            compacted_graph,
+            {"node_count": 12, "edge_count": 11, "preview_omitted": True},
+        )
+        audit = compacted["transport_compaction"]
+        self.assertEqual(audit["source_file_count"], len(raw["files"]))
+        self.assertEqual(audit["retained_file_details"], CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT)
+        self.assertEqual(audit["omitted_file_details"], len(normal_files) + 2)
+        self.assertEqual(audit["omitted_parse_error_file_details"], 2)
+        self.assertEqual(audit["graph_previews_omitted"], len(raw["files"]) * 3)
+        self.assertTrue(compacted["result_truncated"])
+        self.assertEqual(raw["files"][3]["syntax"]["ast_graph"]["nodes"][0]["id"], "node-1")
+
+    def test_transport_compaction_does_not_scale_with_healthy_file_count(self) -> None:
+        raw = {
+            "files": [
+                {
+                    "file_name": f"src/Healthy{index}.java",
+                    "language": "java",
+                    "syntax": {"parse_error": False},
+                }
+                for index in range(10_000)
+            ],
+            "syntax_summary": {
+                "parsed_files": 10_000,
+                "parse_error_files": 0,
+                "parse_error_file_names": [],
+            },
+            "findings": [],
+            "review_findings": [],
+        }
+
+        compacted = _compact_scan_result_for_transport(raw)
+        encoded = json.dumps(compacted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+        self.assertEqual(compacted["files"], [])
+        self.assertEqual(compacted["syntax_summary"]["parsed_files"], 10_000)
+        self.assertEqual(compacted["transport_compaction"]["omitted_file_details"], 10_000)
+        self.assertLess(len(encoded), 4_096)
+
     def test_code_scan_cli_rejects_retired_sse_transport(self) -> None:
         with self.assertRaises(SystemExit):
             code_scan_main(["--transport", "sse"])
@@ -142,7 +250,7 @@ class CodeScanMCPTests(unittest.TestCase):
         self.assertNotIn("capability_token", scan_tool["input_schema"]["properties"])
         self.assertNotIn("capability_token", scan_tool["input_schema"].get("required") or [])
         self.assertNotIn("identify_project_licenses", {item["name"] for item in spec["tools"]})
-        self.assertEqual(license_spec["name"], "SecFlow License MCP")
+        self.assertEqual(license_spec["name"], "AegisAl License MCP")
         self.assertEqual(set(license_tool["input_schema"]["properties"]), {"workspace_path"})
 
     def test_license_identification_combines_spdx_manifest_and_license_file_evidence(self) -> None:
@@ -388,7 +496,7 @@ class CodeScanMCPTests(unittest.TestCase):
         self.assertIn(task["result"]["license_scan"]["coverage_status"], {"complete", "partial"})
         self.assertEqual(set(task["result"]["scan_mcp"]["tools"]), {"scan_language"})
         self.assertTrue(task["result"]["license_mcp"]["enabled"])
-        self.assertEqual(task["result"]["license_mcp"]["server"], "SecFlow License MCP")
+        self.assertEqual(task["result"]["license_mcp"]["server"], "AegisAl License MCP")
         self.assertEqual(task["result"]["license_mcp"]["invocation_count"], 1)
         self.assertNotEqual(task["result"]["scan_mcp"]["invocations"][0]["process_id"], os.getpid())
         self.assertEqual(

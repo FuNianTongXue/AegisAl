@@ -8,7 +8,7 @@ import { useAppStore } from "../store/appStore";
 import type { AgentTask } from "../types";
 import { InspectorPanel } from "./InspectorPanel";
 
-describe("InspectorPanel execution plan", () => {
+describe("InspectorPanel runtime status", () => {
   beforeEach(() => {
     useAppStore.setState({
       activeTaskId: "",
@@ -39,7 +39,8 @@ describe("InspectorPanel execution plan", () => {
 
     render(<InspectorPanel />);
     expect(screen.getAllByText("Supervisor 规划报告任务").length).toBeGreaterThan(0);
-    expect(screen.getByText("正在规划报告任务")).toBeInTheDocument();
+    expect(screen.queryByText("正在规划报告任务")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /思考过程/ })).not.toBeInTheDocument();
 
     act(() => {
       useAppStore.getState().updateTurn("assistant-trace", {
@@ -52,7 +53,7 @@ describe("InspectorPanel execution plan", () => {
         }],
       });
     });
-    expect(screen.getByText("规划完成")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
   });
 
   it("merges task plans with their latest execution events", () => {
@@ -82,6 +83,7 @@ describe("InspectorPanel execution plan", () => {
 
     render(<InspectorPanel />);
     expect(screen.getAllByText("静态规则扫描").length).toBeGreaterThan(0);
-    expect(screen.getByText("正在检查安全规则")).toBeInTheDocument();
+    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.queryByText("正在检查安全规则")).not.toBeInTheDocument();
   });
 });

@@ -63,10 +63,10 @@ class ScanReportCharts(BaseModel):
 
 
 report_chart_mcp = FastMCP(
-    "SecFlow Report Chart MCP",
+    "AegisAl Report Chart MCP",
     instructions=(
         "Transform verified dependency and code-scan facts into bounded, auditable chart data and "
-        "line-addressable code blocks for SecFlow HTML and PDF reports. Never infer findings that "
+        "line-addressable code blocks for AegisAl HTML and PDF reports. Never infer findings that "
         "are absent from the input."
     ),
 )

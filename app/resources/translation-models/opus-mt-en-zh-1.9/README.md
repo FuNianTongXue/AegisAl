@@ -1,7 +1,7 @@
-# SecFlow offline English-Chinese translation model
+# AegisAl offline English-Chinese translation model
 
 This directory contains the inference-only files from the Argos Translate
-English to Chinese package version 1.9. SecFlow loads the CTranslate2 model
+English to Chinese package version 1.9. AegisAl loads the CTranslate2 model
 directly and does not use Argos, Stanza, a network translation service, an API
 key, or an LLM token budget at runtime.
 
@@ -29,5 +29,5 @@ pins the known upstream archive and core model digests so changing the manifest
 cannot silently replace the translator.
 
 The bundled package intentionally excludes the upstream Stanza tokenizer data.
-SecFlow tokenizes with the included SentencePiece model, which is the only
+AegisAl tokenizes with the included SentencePiece model, which is the only
 tokenizer required by the direct CTranslate2 inference path.

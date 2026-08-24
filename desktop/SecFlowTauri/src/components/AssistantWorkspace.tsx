@@ -1,4 +1,4 @@
-import { Bot, Bug, FileCheck2, FolderSearch2, PackageSearch, Shield, Sparkles, X } from "lucide-react";
+import { Bug, FileCheck2, PackageSearch, Shield, Sparkles, X } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { useActiveTaskStream, waitForBackendReady } from "../hooks/useBackend";
@@ -7,9 +7,9 @@ import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
 import type { AgentTask, AskResult, ChatTurn, TraceItem, WorkspaceActionResult } from "../types";
 import { ChatMessage } from "./ChatMessage";
-import { InformationCenterMark } from "./InformationCenterMark";
-import { KineticGrid } from "./KineticGrid";
 import { PromptComposer } from "./PromptComposer";
+import { AceternityGlowingCard, AceternitySparklesStage } from "./aceternity-ui/AceternityEffects";
+import { BeautifulApprovalCard } from "./beautiful-ui/BeautifulUI";
 
 /** Slash commands that unambiguously specify a scan type or are non-scan actions. */
 const EXPLICIT_COMMANDS = ["/cve", "/report", "/scan", "/sbom", "/code-review"];
@@ -134,7 +134,7 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
       ...(attachment ? { workspace: { name: attachment.name, path: attachment.path } } : {}),
     };
     state.appendTurn(userTurn);
-    state.set({ view: "assistant", inspectorOpen: true });
+    state.set({ view: "assistant" });
     setBusy(true);
     controller.current = new AbortController();
 
@@ -272,6 +272,7 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
           user_id: state.userId,
           session_id: state.activeSessionId || undefined,
           response_language: locale,
+          emoji_mode: state.settings?.preferences.emoji_mode || "moderate",
           ...(intentHint ? { intent_hint: intentHint } : {}),
         },
         {
@@ -363,6 +364,29 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
     setVisibleTurnCount((current) => Math.min(state.turns.length, current + TURN_BATCH_SIZE));
   };
 
+  const saveStructuredData = useCallback(async (turn: ChatTurn, nextResult: AskResult) => {
+    const current = useAppStore.getState();
+    const sessionId = String(nextResult.session_id || current.activeSessionId || "").trim();
+    const exchangeId = resultExchangeId(turn, nextResult);
+    const tables = nextResult.structured_data_edits || [];
+    if (!sessionId || !exchangeId || !tables.length) {
+      throw new Error(t("当前记录尚未同步到会话，请稍后重试"));
+    }
+    const saved = await api.updateConversationTableEdits(
+      sessionId,
+      exchangeId,
+      current.userId,
+      tables,
+    );
+    current.updateTurn(turn.id, {
+      result: {
+        ...nextResult,
+        session_id: sessionId,
+        exchange_id: saved.exchange_id || exchangeId,
+        structured_data_edits: saved.tables,
+      },
+    });
+  }, [t]);
   return (
     <section
       className="assistant-workspace"
@@ -409,8 +433,11 @@ export function AssistantWorkspace({ visible = true }: { visible?: boolean }) {
                 <ChatMessage
                   key={turn.id}
                   turn={turn}
-                  showExecutionDetails={false}
+                  showExecutionDetails
                   onRegenerate={previous ? () => void send(previous.content, null) : undefined}
+                  onResultChange={turn.role === "assistant" && turn.result
+                    ? (result) => saveStructuredData(turn, result)
+                    : undefined}
                 />
               );
             })}
@@ -458,6 +485,13 @@ function previousUserTurn(turns: ChatTurn[], assistantIndex: number) {
   return undefined;
 }
 
+function resultExchangeId(turn: ChatTurn, result: AskResult) {
+  const explicit = String(result.exchange_id || "").trim();
+  if (explicit) return explicit;
+  const historical = /^(msg-\d+):assistant$/.exec(turn.id)?.[1];
+  return historical || "";
+}
+
 /** Builds the immediate "objective submitted" timeline step for non-streaming actions. */
 function submitTraceItem(status: "running" | "completed", startedAt: string | undefined, message: string): TraceItem {
   return {
@@ -494,12 +528,10 @@ function ScanTypeConfirm({
   }, []);
 
   return (
-    <div
+    <BeautifulApprovalCard
       className="scan-type-confirm"
-      role="alertdialog"
-      aria-live="assertive"
-      aria-labelledby={headingId}
-      aria-describedby={questionId}
+      labelledBy={headingId}
+      describedBy={questionId}
     >
       <div className="scan-type-confirm-header">
         <span id={headingId}>{t("请选择本次扫描的类型：")}</span>
@@ -522,7 +554,7 @@ function ScanTypeConfirm({
           <span>{t("完整扫描")}</span>
         </button>
       </div>
-    </div>
+    </BeautifulApprovalCard>
   );
 }
 
@@ -554,22 +586,27 @@ function AssistantEmptyState({
 }) {
   const { t } = useI18n();
   const suggestions = [
-    { icon: <FolderSearch2 />, title: t("扫描代码项目"), prompt: t("对我选择的项目进行完整代码安全扫描"), intentHint: undefined },
+    { title: t("扫描代码项目"), prompt: t("对我选择的项目进行完整代码安全扫描"), intentHint: undefined },
     {
-      icon: <Shield />,
       title: t("查询最新漏洞"),
       prompt: t("查询本月严重和高危组件漏洞"),
       intentHint: "component_vulnerability_catalog" as const,
     },
-    { icon: <Bot />, title: t("导出 SBOM"), prompt: t("导出项目 SBOM、许可和漏洞匹配清单"), intentHint: undefined },
+    { title: t("导出 SBOM"), prompt: t("导出项目 SBOM、许可和漏洞匹配清单"), intentHint: undefined },
   ];
   return (
-    <KineticGrid className="assistant-empty assistant-kinetic-stage">
-      <InformationCenterMark className="empty-icon" size={56} />
+    <AceternitySparklesStage className="assistant-empty assistant-aceternity-stage">
       <h1>{t("今天需要分析什么？")}</h1>
       <p>{t("安全问答、项目扫描、SBOM 和报告将由模型理解目标后选择对应 Agent。")}</p>
-      <div className="empty-suggestions">{suggestions.map((item) => <button key={item.title} onClick={() => onPrompt(item.prompt, item.intentHint)}>{item.icon}<span><strong>{item.title}</strong><small>{item.prompt}</small></span></button>)}</div>
-    </KineticGrid>
+      <div className="empty-suggestions">
+        {suggestions.map((item) => (
+          <AceternityGlowingCard key={item.title} onClick={() => onPrompt(item.prompt, item.intentHint)}>
+            <strong>{item.title}</strong>
+            <small>{item.prompt}</small>
+          </AceternityGlowingCard>
+        ))}
+      </div>
+    </AceternitySparklesStage>
   );
 }
 

@@ -41,7 +41,7 @@ def fetch_repositories(limit: int) -> list[dict[str, Any]]:
     )
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SecFlow-Java-Evaluation",
+        "User-Agent": "AegisAl-Java-Evaluation",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     token = os.getenv("GITHUB_TOKEN", "").strip()

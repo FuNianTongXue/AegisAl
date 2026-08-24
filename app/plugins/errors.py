@@ -1,4 +1,4 @@
-"""Errors raised by the SecFlow plugin runtime."""
+"""Errors raised by the AegisAl plugin runtime."""
 
 from __future__ import annotations
 

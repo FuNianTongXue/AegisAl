@@ -13,12 +13,14 @@ import {
   Trash2,
   Workflow,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 
 import { clientLocaleTag, type ClientLocale, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { openNewTaskWindow } from "../lib/platform";
 import { useAppStore } from "../store/appStore";
+import { BRAND_NAME_ZH, brandDisplayText } from "../branding";
 import type { AgentTask, ConversationSummary } from "../types";
 import { BrandMark } from "./BrandMark";
 import { ProfileAvatar } from "./ProfileAvatar";
@@ -135,7 +137,7 @@ export function AppSidebar() {
       </div>
       <div className="sidebar-brand">
         <BrandMark />
-        <strong>安全智脑</strong>
+        <strong>{BRAND_NAME_ZH}</strong>
       </div>
       <button className="sidebar-command primary" aria-label={t("新建任务")} onClick={() => void openNewTaskWindow()}>
         <Plus size={17} />
@@ -216,7 +218,7 @@ export function AppSidebar() {
             {state.conversations.length ? state.conversations.slice(0, visibleConversationCount).map((conversation) => (
               <ItemMenu
                 key={conversation.id}
-                title={conversation.title || conversation.preview || t("未命名对话")}
+                title={brandDisplayText(conversation.title || conversation.preview) || t("未命名对话")}
                 meta={formatRelative(conversation.updated_at, locale, t)}
                 active={state.activeSessionId === (conversation.session_id || conversation.id)}
                 busy={openingSessionId === (conversation.session_id || conversation.id)}
@@ -224,7 +226,7 @@ export function AppSidebar() {
                 onArchive={() => void api.archiveConversation(conversation.session_id || conversation.id, state.userId, true).then(() => state.set({ conversations: state.conversations.filter((item) => item.id !== conversation.id) }))}
                 onDelete={() => {
                   const sessionId = conversation.session_id || conversation.id;
-                  if (!window.confirm(t("确定删除对话“{name}”？此操作无法撤销。", { name: conversation.title || conversation.preview || t("未命名对话") }))) return;
+                  if (!window.confirm(t("确定删除对话“{name}”？此操作无法撤销。", { name: brandDisplayText(conversation.title || conversation.preview) || t("未命名对话") }))) return;
                   void api.deleteConversation(sessionId, state.userId).then(() => state.removeConversation(sessionId, conversation.id));
                 }}
               />
@@ -240,7 +242,7 @@ export function AppSidebar() {
                 <small aria-hidden="true">{state.conversations.length - visibleConversationCount}</small>
               </button>
             ) : null}
-            {conversationError ? <p className="sidebar-empty" role="alert">{conversationError}</p> : null}
+            {conversationError ? <p className="sidebar-empty" role="alert">{brandDisplayText(conversationError)}</p> : null}
           </SidebarSection>
         )}
 
@@ -273,16 +275,112 @@ function SidebarSection({ title, open, onToggle, icon, children }: React.PropsWi
 
 function ItemMenu({ title, meta, active, busy = false, onOpen, onArchive, onDelete }: { title: string; meta: string; active: boolean; busy?: boolean; onOpen: () => void; onArchive: () => void; onDelete: () => void }) {
   const { t } = useI18n();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<{ left: number; top: number } | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!menuOpen || !triggerRef.current || !menuRef.current) return;
+
+    const positionMenu = () => {
+      if (!triggerRef.current || !menuRef.current) return;
+      const anchor = triggerRef.current.getBoundingClientRect();
+      const menu = menuRef.current.getBoundingClientRect();
+      const menuWidth = menu.width || 126;
+      const menuHeight = menu.height || 72;
+      const viewportMargin = 8;
+      const gap = 4;
+      const opensUp = anchor.bottom + gap + menuHeight > window.innerHeight - viewportMargin;
+      const top = opensUp
+        ? Math.max(viewportMargin, anchor.top - gap - menuHeight)
+        : Math.min(window.innerHeight - viewportMargin - menuHeight, anchor.bottom + gap);
+      const left = Math.max(
+        viewportMargin,
+        Math.min(anchor.right - menuWidth, window.innerWidth - viewportMargin - menuWidth),
+      );
+      setMenuPosition({ left, top });
+    };
+
+    positionMenu();
+    menuRef.current.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const closeOnScroll = () => setMenuOpen(false);
+    window.addEventListener("resize", positionMenu);
+    window.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      window.removeEventListener("resize", positionMenu);
+      window.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setMenuOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePress, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePress, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
+
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "Home") items[0].focus();
+    else if (event.key === "End") items.at(-1)?.focus();
+    else if (event.key === "ArrowDown") items[(currentIndex + 1 + items.length) % items.length].focus();
+    else items[(currentIndex - 1 + items.length) % items.length].focus();
+  };
+
   return (
     <div className={`sidebar-item ${active ? "active" : ""}`}>
       <button className="item-main" onClick={onOpen} disabled={busy} aria-busy={busy || undefined}><span>{title}</span><small>{busy ? t("正在加载…") : meta}</small></button>
-      <details className="item-menu">
-        <summary aria-label={t("更多操作")}><MoreHorizontal size={14} /></summary>
-        <div className="context-menu">
-          <button onClick={onArchive}><Archive size={14} />{t("归档")}</button>
-          <button className="danger" onClick={onDelete}><Trash2 size={14} />{t("删除")}</button>
-        </div>
-      </details>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="item-menu-trigger"
+        aria-label={t("更多操作")}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        onClick={() => {
+          setMenuPosition(null);
+          setMenuOpen((value) => !value);
+        }}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+      {menuOpen ? createPortal(
+        <div
+          ref={menuRef}
+          className="context-menu sidebar-context-menu"
+          role="menu"
+          aria-label={t("更多操作")}
+          onKeyDown={handleMenuKeyDown}
+          style={{
+            left: menuPosition?.left ?? 0,
+            top: menuPosition?.top ?? 0,
+            visibility: menuPosition ? "visible" : "hidden",
+          }}
+        >
+          <button role="menuitem" onClick={() => { setMenuOpen(false); onArchive(); }}><Archive size={14} />{t("归档")}</button>
+          <button role="menuitem" className="danger" onClick={() => { setMenuOpen(false); onDelete(); }}><Trash2 size={14} />{t("删除")}</button>
+        </div>,
+        document.body,
+      ) : null}
     </div>
   );
 }

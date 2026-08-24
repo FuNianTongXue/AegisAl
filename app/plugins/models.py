@@ -1,4 +1,4 @@
-"""Immutable models shared by the SecFlow plugin runtime."""
+"""Immutable models shared by the AegisAl plugin runtime."""
 
 from __future__ import annotations
 

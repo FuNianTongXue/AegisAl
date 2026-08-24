@@ -6,6 +6,7 @@ import { configForProvider, selectedProviderId } from "../lib/modelControls";
 import { useAppStore } from "../store/appStore";
 import type { LlmConfig, UserProfile } from "../types";
 import { BrandMark } from "./BrandMark";
+import { BRAND_NAME_ZH, BRAND_SECURITY_AGENT, brandDisplayText } from "../branding";
 import { ModelProviderPicker } from "./ModelProviderPicker";
 import { ModelSelectControl } from "./ModelSelectControl";
 import { WizardProgress } from "./WizardProgress";
@@ -101,10 +102,6 @@ export function InitialSetupView() {
   };
 
   const finish = async () => {
-    if (!verified) {
-      setStatus("请先测试并确认模型连接可用。");
-      return;
-    }
     setBusy(true);
     setStatus("正在保存模型配置…");
     try {
@@ -119,13 +116,13 @@ export function InitialSetupView() {
 
   return (
     <main className="initial-setup">
-      <section className="initial-setup-card" aria-label="安全智脑初始引导">
+      <section className="initial-setup-card" aria-label={`${BRAND_NAME_ZH} 初始引导`}>
         <aside className="initial-setup-aside">
-          <div className="initial-setup-brand"><BrandMark size={46} /><span><strong>安全智脑</strong><small>SecFlow Security Agent</small></span></div>
-          <div className="initial-setup-intro"><span className="setup-kicker">首次配置</span><h1>欢迎使用安全智脑</h1><p>两步完成本机身份与推理模型接入，随后即可开始漏洞分析、项目扫描和报告生成。</p></div>
+          <div className="initial-setup-brand"><BrandMark size={46} /><span><strong>{BRAND_NAME_ZH}</strong><small>{BRAND_SECURITY_AGENT}</small></span></div>
+          <div className="initial-setup-intro"><span className="setup-kicker">首次配置</span><h1>欢迎使用{BRAND_NAME_ZH}</h1><p>两步完成本机身份与推理模型接入，随后即可开始漏洞分析、项目扫描和报告生成。</p></div>
           <ul>
             <li><Check /><span><strong>信息仅存本机</strong><small>个人资料和密钥不会公开展示</small></span></li>
-            <li><Check /><span><strong>连接后再启用</strong><small>避免无效模型影响普通咨询</small></span></li>
+            <li><Check /><span><strong>连接测试独立</strong><small>临时网络异常不会阻止保存配置</small></span></li>
           </ul>
         </aside>
         <div className="initial-setup-workflow">
@@ -141,11 +138,11 @@ export function InitialSetupView() {
                   <label>部门<input maxLength={120} name="department" autoComplete="organization" value={profile.department} onChange={(event) => updateProfile("department", event.target.value)} /></label>
                   <label>角色<select name="role" autoComplete="off" value={profile.role} onChange={(event) => updateProfile("role", event.target.value)}><option value="">请选择角色</option>{roles.map((role) => <option value={role} key={role}>{role}</option>)}</select></label>
                 </div>
-                <footer><span aria-live="polite">{status}</span><button className="primary" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <ArrowRight />}保存并继续</button></footer>
+                <footer><span aria-live="polite">{brandDisplayText(status)}</span><button className="primary" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <ArrowRight />}保存并继续</button></footer>
               </form>
             ) : (
               <form onSubmit={(event) => { event.preventDefault(); void finish(); }}>
-                <div className="initial-setup-heading"><KeyRound /><div><h2>接入模型</h2><p>选择厂商、填写凭证，并在保存前验证模型可用性。</p></div></div>
+                <div className="initial-setup-heading"><KeyRound /><div><h2>接入模型</h2><p>选择厂商并填写凭证；连接测试可独立执行，不影响本机保存。</p></div></div>
                 <div className="initial-model-stack">
                   <section className="initial-model-section">
                     <div className="initial-model-section-heading"><strong>选择模型厂商</strong><small>与设置页使用同一份厂商目录和映射规则。</small></div>
@@ -158,13 +155,13 @@ export function InitialSetupView() {
                 </div>
                 <div className="settings-form-grid initial-credential-grid">
                   <label>Base URL<input required name="model_endpoint" type="url" inputMode="url" autoComplete="off" spellCheck={false} value={config.endpoint} placeholder="例如 https://api.example.com/v1…" onChange={(event) => updateConfig({ endpoint: event.target.value })} /></label>
-                  <label>API Key<input required={selectedProvider !== "ollama" && !config.api_key_configured} name="model_api_key" type="password" autoComplete="off" spellCheck={false} value={config.api_key || ""} placeholder={selectedProvider === "ollama" ? "本地 Ollama 无需密钥…" : config.api_key_configured ? "已配置，留空保持不变…" : "输入模型厂商 API Key…"} onChange={(event) => updateConfig({ api_key: event.target.value })} /></label>
+                  <label>API Key<input required={selectedProvider !== "ollama" && !config.api_key_configured} maxLength={8192} name="model_api_key" type="password" autoComplete="off" spellCheck={false} value={config.api_key || ""} placeholder={selectedProvider === "ollama" ? "本地 Ollama 无需密钥…" : config.api_key_configured ? "已配置，留空保持不变…" : "输入模型厂商 API Key…"} onChange={(event) => updateConfig({ api_key: event.target.value })} /></label>
                 </div>
                 <footer>
                   <button className="ghost" type="button" onClick={() => { setStep(1); setStatus(""); }} disabled={busy}><ArrowLeft />返回</button>
-                  <span className={verified ? "success" : ""} aria-live="polite">{status}</span>
+                  <span className={verified ? "success" : ""} aria-live="polite">{brandDisplayText(status)}</span>
                   <button className="secondary" type="button" onClick={() => void testConnection()} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <KeyRound />}测试连接</button>
-                  <button className="primary" type="submit" disabled={busy || !verified}><Lock />保存并进入工作区</button>
+                  <button className="primary" type="submit" disabled={busy}><Lock />保存并进入工作区</button>
                 </footer>
               </form>
             )}

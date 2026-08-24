@@ -10,6 +10,7 @@ import pytest
 
 from app.assistant_artifacts import ComponentArtifactStore
 from app.mcp.protocol import (
+    CodeScanMCPClient,
     MCPArtifactContract,
     MCPPluginService,
     MCPServerDefinition,
@@ -133,3 +134,114 @@ def test_download_capability_is_bound_to_user() -> None:
         with pytest.raises(KeyError):
             store.resolve(artifact.id, user_id="bob")
         assert "user_id=alice" in artifact.download_path
+
+
+def test_large_code_scan_is_batched_and_merged_without_losing_findings() -> None:
+    calls: list[dict] = []
+
+    def scan_batch(**kwargs):
+        arguments = kwargs["arguments"]
+        calls.append(arguments)
+        batch_index = len(calls)
+        paths = list(arguments["source_paths"])
+        files = []
+        if batch_index == 2:
+            files.append(
+                {
+                    "file_name": paths[0],
+                    "syntax": {
+                        "file": paths[0],
+                        "language": "java",
+                        "parse_error": True,
+                        "parser_mode": "native",
+                        "parser_error_nodes": 1,
+                    },
+                }
+            )
+        return {
+            "schema_version": 1,
+            "server": "AegisAl Code Scan MCP",
+            "tool": "scan_language",
+            "process_id": 4321,
+            "language": "java",
+            "started_at": f"start-{batch_index}",
+            "completed_at": f"end-{batch_index}",
+            "duration_ms": 10,
+            "input_sha256": str(batch_index) * 64,
+            "output_sha256": str(batch_index + 3) * 64,
+            "result": {
+                "status": "completed",
+                "mode": "bundled-cli",
+                "cli_status": "completed",
+                "files": files,
+                "syntax_summary": {
+                    "languages": ["java"],
+                    "parsed_files": len(paths),
+                    "parse_error_files": len(files),
+                    "ast_node_count": len(paths) * 10,
+                },
+                "findings": [
+                    {"id": f"finding-{path}", "file_name": path, "line": 1}
+                    for path in paths
+                ],
+                "review_findings": [],
+                "diagnostics": [f"batch {batch_index}"],
+                "transport_compaction": {
+                    "source_file_count": len(paths),
+                    "retained_file_details": len(files),
+                    "omitted_file_details": len(paths) - len(files),
+                    "parse_error_file_limit": 500,
+                },
+            },
+            "_mcp_runtime": {
+                "call_id": f"call-{batch_index}",
+                "transport": "stdio",
+                "input_sha256": str(batch_index) * 64,
+                "output_sha256": str(batch_index + 3) * 64,
+                "result_size_bytes": 1_000,
+                "plugin_id": "secflow.mcp",
+                "plugin_version": "1.3.3",
+                "config_hash": "config",
+                "generation": 2,
+                "status": "completed",
+            },
+        }
+
+    with TemporaryDirectory() as directory:
+        workspace = Path(directory)
+        source_paths = [f"src/File{index}.java" for index in range(5)]
+        for relative in source_paths:
+            path = workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("class Demo {}\n", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"SECFLOW_CODE_SCAN_BATCH_MAX_FILES": "2"}),
+            patch("app.mcp.protocol.call_mcp_tool", side_effect=scan_batch),
+        ):
+            result = CodeScanMCPClient().scan_language(
+                workspace_path=str(workspace),
+                language="java",
+                source_paths=source_paths,
+                manifest_files=["pom.xml", "CMakeLists.txt"],
+                dependency_scan={"dependencies": []},
+                rule_paths=["java.yml"],
+                complete_scan=True,
+                cancelled=lambda: False,
+            )
+
+    assert [len(item["source_paths"]) for item in calls] == [2, 2, 1]
+    assert calls[0]["manifest_files"] == ["pom.xml", "CMakeLists.txt"]
+    assert calls[1]["manifest_files"] == ["CMakeLists.txt"]
+    assert result["scan_batches"] == 3
+    assert result["scanned_source_files"] == 5
+    assert result["syntax_summary"]["parsed_files"] == 5
+    assert result["syntax_summary"]["ast_node_count"] == 50
+    assert result["finding_count"] == 5
+    assert result["transport_compaction"]["source_file_count"] == 5
+    assert {item["id"] for item in result["findings"]} == {
+        f"finding-{path}" for path in source_paths
+    }
+    assert len(result["files"]) == 1
+    assert result["_scan_mcp"]["batch_count"] == 3
+    assert result["_scan_mcp"]["batch_call_ids"] == ["call-1", "call-2", "call-3"]
+    assert result["_scan_mcp"]["result_size_bytes"] == 3_000

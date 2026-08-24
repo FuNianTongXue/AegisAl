@@ -1,12 +1,12 @@
 [package]
-name = "secflow-tauri"
-version = "1.3.3"
-description = "SecFlow cross-platform Security Agent client"
+name = "aegisal-tauri"
+version = "1.3.4"
+description = "AegisAl cross-platform Security Agent client"
 authors = ["ShenSiQi"]
 edition = "2021"
 
 [lib]
-name = "secflow_tauri_lib"
+name = "aegisal_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

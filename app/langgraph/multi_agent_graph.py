@@ -18,13 +18,21 @@ from app.agent.plugins import (
 )
 from app.agent.specialist_agents import AssistantAgentContext
 from app.agent.translation_policy import (
+    catalog_partial_translation_audit_is_recoverable,
     fail_closed_translation_payload,
     failed_translation_audit,
+    host_localization_attestation_is_publishable,
+    issue_host_localization_attestation,
+    issue_partial_catalog_translation_attestation,
     issue_stored_translation_attestation,
+    partial_catalog_translation_attestation_is_publishable,
+    partial_catalog_translation_is_publishable,
+    partial_catalog_translation_status,
     stored_translation_attestation_is_publishable,
     translation_audit_is_publishable,
     translation_unavailable_message,
 )
+from app.catalog_translation import partial_catalog_summary, recover_partial_catalog_records
 from app.composition import secflow_runtime
 from app.dependencies import BUILD_MANIFEST_SOURCE_TYPES, CODE_EXTENSIONS, attachment_kind
 from app.langgraph.report_graph import looks_like_report_request
@@ -39,6 +47,7 @@ class MultiAgentState(TypedDict, total=False):
     user_id: str
     session_id: str
     response_language: str
+    emoji_mode: str
     attachments: list[dict[str, Any]]
     workspace_path: str
     task_context: dict[str, Any]
@@ -98,6 +107,7 @@ class AssistantMultiAgentSupervisor:
         user_id: str,
         session_id: str,
         response_language: str,
+        emoji_mode: str = "moderate",
         attachments: list[dict[str, Any]],
         runtime_graph: Any,
         memory: Any,
@@ -121,6 +131,7 @@ class AssistantMultiAgentSupervisor:
                     user_id=user_id,
                     session_id=session_id,
                     response_language=response_language,
+                    emoji_mode=emoji_mode,
                     attachments=attachments,
                     runtime_graph=runtime_graph,
                     memory=memory,
@@ -141,6 +152,7 @@ class AssistantMultiAgentSupervisor:
             "user_id": user_id or "default",
             "session_id": session_id or "default",
             "response_language": response_language or "zh-Hans",
+            "emoji_mode": emoji_mode if emoji_mode in {"off", "moderate", "active"} else "moderate",
             "attachments": list(attachments),
             "workspace_path": str(workspace_path or ""),
             "task_context": dict(task_context or {}),
@@ -183,7 +195,7 @@ class AssistantMultiAgentSupervisor:
         if task_graph is not None:
             subgraphs.append(task_graph.graph_spec())
         return {
-            "name": "SecFlow Multi-Agent Supervisor",
+            "name": "AegisAl Multi-Agent Supervisor",
             "architecture": "supervisor-specialists",
             "schema_version": "secflow.multi-agent/v1",
             "agents": [
@@ -376,9 +388,24 @@ class AssistantMultiAgentSupervisor:
         answer = self._result_aggregator_agent.aggregate(dict(state.get("answer") or {}))
         target_language = str(state.get("response_language") or "zh-Hans")
         stored_audit = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
-        stored_translation_verified = self._translation_audit_is_stored(answer, target_language)
-        state["stored_translation_verified"] = stored_translation_verified
-        if not stored_translation_verified:
+        stored_translation_verified = stored_translation_attestation_is_publishable(answer, target_language)
+        host_localization_verified = host_localization_attestation_is_publishable(answer, target_language)
+        partial_catalog_verified = partial_catalog_translation_attestation_is_publishable(
+            answer,
+            target_language,
+        )
+        sanitized_partial_catalog_verified = partial_catalog_translation_is_publishable(
+            answer,
+            target_language,
+        )
+        localization_verified = (
+            stored_translation_verified
+            or host_localization_verified
+            or partial_catalog_verified
+            or sanitized_partial_catalog_verified
+        )
+        state["stored_translation_verified"] = localization_verified
+        if not localization_verified:
             self._handoff(
                 state,
                 "result_aggregator_agent",
@@ -413,11 +440,41 @@ class AssistantMultiAgentSupervisor:
                 record_count=int(stored_audit["record_count"]),
                 source=str(stored_audit.get("source") or "vulnerability-catalog"),
             )
+        elif host_localization_verified:
+            answer["translation"] = issue_host_localization_attestation(
+                answer,
+                target_language=target_language,
+                source=str(stored_audit.get("source") or "host-rendered-response"),
+            )
+        elif partial_catalog_verified:
+            answer["translation"] = issue_partial_catalog_translation_attestation(
+                answer,
+                target_language=target_language,
+                catalog_status=stored_audit,
+                source=str(stored_audit.get("source") or "component-vulnerability-catalog"),
+            )
+        elif sanitized_partial_catalog_verified:
+            answer["translation"] = partial_catalog_translation_status(
+                stored_audit,
+                target_language=target_language,
+                record_count=int(stored_audit["record_count"]),
+                ready_records=int(stored_audit["ready_records"]),
+                source=str(stored_audit.get("source") or "component-vulnerability-catalog"),
+            )
         return state
 
     @staticmethod
     def _translation_audit_is_stored(answer: dict[str, Any], target_language: Any) -> bool:
-        return stored_translation_attestation_is_publishable(answer, target_language)
+        return stored_translation_attestation_is_publishable(
+            answer,
+            target_language,
+        ) or host_localization_attestation_is_publishable(
+            answer,
+            target_language,
+        ) or partial_catalog_translation_attestation_is_publishable(
+            answer,
+            target_language,
+        ) or partial_catalog_translation_is_publishable(answer, target_language)
 
     @classmethod
     def _answer_uses_stored_translation(cls, state: MultiAgentState) -> bool:
@@ -442,9 +499,49 @@ class AssistantMultiAgentSupervisor:
             )
             audit = dict(result.audit)
             translation_completed = translation_audit_is_publishable(audit)
+            translation_partial = (
+                answer.get("mode") == "component_vulnerability_catalog"
+                and isinstance(answer.get("records"), list)
+                and bool(answer["records"])
+                and catalog_partial_translation_audit_is_recoverable(
+                    audit,
+                    target_language,
+                )
+            )
             if translation_completed:
                 answer = public_answer_payload(result.payload)
                 answer["translation"] = audit
+            elif translation_partial:
+                candidate_records = (
+                    result.payload.get("records")
+                    if isinstance(result.payload.get("records"), list)
+                    else []
+                )
+                records = recover_partial_catalog_records(
+                    answer["records"],
+                    candidate_records,
+                    target_language=target_language,
+                )
+                ready_records = sum(
+                    record.get("translation_status") == "translated"
+                    for record in records
+                )
+                answer["summary"] = partial_catalog_summary(
+                    result.payload.get("summary"),
+                    answer.get("summary"),
+                    target_language=target_language,
+                )
+                answer["records"] = records
+                answer["trace"] = []
+                answer["translation"] = partial_catalog_translation_status(
+                    audit,
+                    target_language=target_language,
+                    record_count=len(records),
+                    ready_records=ready_records,
+                )
+                answer = public_answer_payload(answer)
+                existing_trace = []
+                state["trace"] = []
             else:
                 translation_blocked = True
                 existing_trace = []
@@ -464,11 +561,15 @@ class AssistantMultiAgentSupervisor:
                     "Translation Agent 已调用翻译 MCP 处理汇总 JSON："
                     f"目标语言 {result.audit['target_language']}，"
                     f"翻译 {result.audit['translated_fields']} 个字段。"
-                ) if translation_completed else translation_unavailable_message(target_language),
+                ) if translation_completed else (
+                    "Translation Agent 返回部分离线译文；已保留核验记录，待补译字段使用中文占位。"
+                    if translation_partial
+                    else translation_unavailable_message(target_language)
+                ),
                 "completed" if translation_completed else "warning",
                 presentation=tool_call_presentation(
                     "translate_json_payload",
-                    state="completed" if translation_completed else "error",
+                    state="completed" if (translation_completed or translation_partial) else "error",
                     title="Translation MCP",
                     input_summary={
                         "content_scope": "multi_agent_response",
@@ -480,7 +581,7 @@ class AssistantMultiAgentSupervisor:
                         "translation_status": result.audit["translation_status"],
                         "output_sha256": result.audit["output_sha256"],
                     },
-                    error="" if translation_completed else "翻译结果不完整，未标记为已完成。",
+                    error="" if (translation_completed or translation_partial) else "翻译结果不可用。",
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - do not discard a verified specialist result.
@@ -559,6 +660,7 @@ class AssistantMultiAgentSupervisor:
             user_id=state["user_id"],
             session_id=state["session_id"],
             response_language=state["response_language"],
+            emoji_mode=state.get("emoji_mode", "moderate"),
             attachments=list(state.get("attachments") or []),
             workspace_path=str(state.get("workspace_path") or ""),
             task_context=dict(state.get("task_context") or {}),

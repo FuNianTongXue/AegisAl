@@ -6,15 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
-import type { InformationSource, LlmConfig, ModelUsageSnapshot, SettingsSnapshot, UserProfile } from "../types";
+import type { InformationSource, LlmConfig, ModelUsageSnapshot, PreferenceSettings, SettingsSnapshot, UserProfile } from "../types";
 import { SettingsView } from "./SettingsView";
 
 const informationSource: InformationSource = {
   id: "freebuf",
   name: "FreeBuf",
   kind: "rss",
-  group: "安全媒体",
+  group: "精选来源",
   catalog: "curated",
+  source_image_version: "freebuf-v2",
   enabled: true,
   status: "success",
   item_count: 12,
@@ -91,7 +92,7 @@ describe("SettingsView source separation", () => {
     expect(onBack).toHaveBeenCalledOnce();
   });
 
-  it("uses the open-lock control to save and relock model settings", async () => {
+  it("saves and relocks model settings without requiring a successful connection test", async () => {
     const config: LlmConfig = {
       provider: "custom",
       catalog_provider: "sub2api",
@@ -109,7 +110,7 @@ describe("SettingsView source separation", () => {
       configured: true,
       api_key_configured: true,
     }));
-    vi.spyOn(api, "testLlmConfig").mockResolvedValue({ status: "success", configured: true, latency_ms: 120 });
+    const testSpy = vi.spyOn(api, "testLlmConfig").mockRejectedValue(new Error("第三方连接暂时不可用"));
 
     render(<SettingsView />);
     fireEvent.click(screen.getByRole("button", { name: "接入凭证" }));
@@ -119,6 +120,7 @@ describe("SettingsView source separation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "解锁模型配置" }));
     expect(endpoint).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "replacement-third-party-key" } });
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
     const enabled = screen.getByRole("checkbox", { name: "启用模型" });
     expect(enabled).not.toBeDisabled();
@@ -130,11 +132,145 @@ describe("SettingsView source separation", () => {
     expect(screen.queryByRole("button", { name: "保存并启用" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存并锁定模型配置" }));
 
-    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith("default", expect.objectContaining({ enabled: true })));
-    expect(await screen.findByText("模型配置已验证、保存并启用")).toBeInTheDocument();
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith("default", expect.objectContaining({
+      api_key: "replacement-third-party-key",
+      enabled: true,
+    })));
+    expect(testSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("模型配置已保存并启用")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "接入凭证" }));
     expect(screen.getByRole("textbox", { name: "Base URL" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "解锁模型配置" })).toBeInTheDocument();
+  });
+
+  it("normalizes a historical blank reasoning effort before saving and relocking", async () => {
+    const config: LlmConfig = {
+      provider: "openai",
+      catalog_provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-5.6-sol",
+      wire_api: "responses",
+      reasoning_effort: "" as never,
+      reasoning_options: [{ value: "none" }, { value: "medium" }, { value: "high" }],
+      max_tokens: 1800,
+      timeout_ms: 60000,
+      enabled: true,
+      api_key_configured: true,
+    };
+    useAppStore.setState({ llm: config });
+    const saveSpy = vi.spyOn(api, "saveLlmConfig").mockImplementation(async (_userId, value) => ({
+      ...value,
+      configured: true,
+      api_key_configured: true,
+    }));
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "解锁模型配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "最大输出 Token" }), { target: { value: "1900" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并锁定模型配置" }));
+
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith("default", expect.objectContaining({
+      max_tokens: 1900,
+      reasoning_effort: "medium",
+    })));
+    expect(await screen.findByText("模型配置已保存并启用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "解锁模型配置" })).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "最大输出 Token" })).toBeDisabled();
+  });
+
+  it("relocks unchanged model settings locally without calling the backend", () => {
+    useAppStore.setState({
+      llm: {
+        provider: "custom",
+        endpoint: "https://gateway.example/v1",
+        model: "third-party-model",
+        max_tokens: 1800,
+        timeout_ms: 60000,
+        enabled: true,
+        api_key_configured: true,
+      },
+    });
+    const saveSpy = vi.spyOn(api, "saveLlmConfig");
+    const testSpy = vi.spyOn(api, "testLlmConfig");
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "接入凭证" }));
+    const endpoint = screen.getByRole("textbox", { name: "Base URL" });
+
+    fireEvent.click(screen.getByRole("button", { name: "解锁模型配置" }));
+    expect(endpoint).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "锁定模型配置" }));
+
+    expect(endpoint).toBeDisabled();
+    expect(screen.getByRole("button", { name: "解锁模型配置" })).toBeInTheDocument();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(testSpy).not.toHaveBeenCalled();
+  });
+
+  it("explicitly clears a stored API key without sending a replacement", async () => {
+    const config: LlmConfig = {
+      provider: "custom",
+      catalog_provider: "custom",
+      endpoint: "https://gateway.example/v1",
+      model: "third-party-model",
+      max_tokens: 1800,
+      timeout_ms: 60000,
+      enabled: true,
+      api_key_configured: true,
+    };
+    useAppStore.setState({ llm: config });
+    const saveSpy = vi.spyOn(api, "saveLlmConfig").mockResolvedValue({
+      ...config,
+      has_api_key: false,
+      api_key_configured: false,
+    });
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "解锁模型配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "接入凭证" }));
+    const apiKey = screen.getByLabelText("API Key");
+    expect(apiKey).toHaveAttribute("maxlength", "8192");
+    fireEvent.click(screen.getByRole("button", { name: "清除已保存的 API Key" }));
+
+    expect(screen.getByText("保存后将清除已配置的 API Key")).toBeInTheDocument();
+    expect(apiKey).toHaveAttribute("placeholder", "保存后移除当前密钥…");
+    fireEvent.click(screen.getByRole("button", { name: "保存并锁定模型配置" }));
+
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith("default", expect.objectContaining({
+      api_key: "",
+      clear_api_key: true,
+    })));
+    expect(await screen.findByText("模型配置已保存并启用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "解锁模型配置" })).toBeInTheDocument();
+  });
+
+  it("keeps model settings unlocked and dirty when saving fails", async () => {
+    useAppStore.setState({
+      llm: {
+        provider: "custom",
+        catalog_provider: "custom",
+        endpoint: "https://gateway.example/v1",
+        model: "third-party-model",
+        max_tokens: 1800,
+        timeout_ms: 60000,
+        enabled: true,
+      },
+    });
+    vi.spyOn(api, "saveLlmConfig").mockRejectedValue(new Error("模型配置保存失败"));
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "解锁模型配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "接入凭证" }));
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "third-party-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并锁定模型配置" }));
+
+    expect(await screen.findByText("模型配置保存失败")).toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存并锁定模型配置" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "用户资料" }));
+    expect(window.confirm).toHaveBeenCalledOnce();
   });
 
   it("keeps model actions horizontally grouped and places connection testing with credentials", () => {
@@ -165,7 +301,7 @@ describe("SettingsView source separation", () => {
     const { container } = render(<SettingsView />);
 
     fireEvent.click(screen.getByRole("button", { name: "引导" }));
-    expect(screen.getByRole("list", { name: "安全智脑使用引导" })).toHaveClass("wizard-progress");
+    expect(screen.getByRole("list", { name: "神盾使用引导" })).toHaveClass("wizard-progress");
     expect(screen.getByRole("heading", { name: "连接你的模型" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
@@ -180,29 +316,34 @@ describe("SettingsView source separation", () => {
       platform: { system: "Darwin", architecture: "arm64", adapter: "macos" },
       summary: { agent_count: 2, mcp_server_count: 2, mcp_tool_count: 2, skill_count: 1 },
       agents: [
-        { agent_id: "report_planner", label: "Report Planner Agent", capabilities: ["report-plan"] },
+        { agent_id: "report_planner", label: "SecFlow Report Planner Agent", capabilities: ["SecFlow report-plan"] },
         { agent_id: "qa", label: "QA Agent", capabilities: ["report-validation"] },
       ],
       mcp_servers: [
-        { id: "report-template", name: "SecFlow Template MCP", transport: "in-process", tool_count: 1, tools: [{ name: "resolve_report_template" }] },
-        { id: "report-excel", name: "SecFlow Excel MCP", transport: "in-process", tool_count: 1, tools: [{ name: "render_excel_report" }] },
+        { id: "report-template", name: "SecFlow Template MCP", transport: "in-process", tool_count: 1, tools: [{ name: "secflow_report_template" }] },
+        { id: "report-excel", name: "AegisAl Excel MCP", transport: "in-process", tool_count: 1, tools: [{ name: "render_excel_report" }] },
       ],
-      skills: [{ id: "secflow-report-generation", name: "报告生成", description: "统一报告工作流", source: "built-in" }],
+      skills: [{ id: "secflow-report-generation", name: "报告生成", description: "统一 SecFlow 报告工作流", source: "SecFlow built-in" }],
     });
 
     render(<SettingsView />);
     fireEvent.click(screen.getByRole("button", { name: "Agent" }));
 
     expect(await screen.findByRole("heading", { name: "Agent" })).toBeInTheDocument();
-    expect(await screen.findByText("Report Planner Agent")).toBeInTheDocument();
-    expect(screen.queryByText("SecFlow Template MCP")).not.toBeInTheDocument();
+    expect(await screen.findByText("AegisAl Report Planner Agent")).toBeInTheDocument();
+    expect(screen.getByText("AegisAl report-plan")).toBeInTheDocument();
+    expect(screen.queryByText("AegisAl Template MCP")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "MCP" }));
-    expect(await screen.findByText("SecFlow Template MCP")).toBeInTheDocument();
-    expect(screen.getByText("SecFlow Excel MCP")).toBeInTheDocument();
+    expect(await screen.findByText("AegisAl Template MCP")).toBeInTheDocument();
+    expect(screen.getByText("AegisAl Excel MCP")).toBeInTheDocument();
+    expect(screen.getByText("AegisAl_report_template")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
     expect(await screen.findByText("报告生成")).toBeInTheDocument();
+    expect(screen.getByText("统一 AegisAl 报告工作流")).toBeInTheDocument();
+    expect(screen.getByText("AegisAl built-in")).toBeInTheDocument();
+    expect(screen.queryByText(/SecFlow/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Platform Adapter：macOS · arm64/i)).toBeInTheDocument();
   });
 
@@ -262,6 +403,45 @@ describe("SettingsView source separation", () => {
     expect(screen.getByRole("combobox", { name: "Client language" })).toHaveValue("en");
     await waitFor(() => expect(preferenceSpy).toHaveBeenCalledWith(expect.objectContaining({ language: "en" })));
     expect(useAppStore.getState().settings?.preferences.language).toBe("en");
+  });
+
+  it("switches the emoji mode and persists it with the existing preferences", async () => {
+    const preferenceSpy = vi.spyOn(api, "savePreferences").mockImplementation(async (preferences) => preferences);
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "外观" }));
+
+    const moderate = screen.getByRole("button", { name: "适度" });
+    const active = screen.getByRole("button", { name: "活泼" });
+    expect(moderate).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(active);
+
+    expect(active).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(preferenceSpy).toHaveBeenCalledWith({
+      ...settings.preferences,
+      emoji_mode: "active",
+    }));
+    expect(useAppStore.getState().settings?.preferences.emoji_mode).toBe("active");
+  });
+
+  it("keeps the last emoji selection when preference saves resolve out of order", async () => {
+    const resolvers: Array<(preferences: PreferenceSettings) => void> = [];
+    vi.spyOn(api, "savePreferences").mockImplementation((preferences) => new Promise((resolve) => {
+      resolvers.push(() => resolve(preferences));
+    }));
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "外观" }));
+    fireEvent.click(screen.getByRole("button", { name: "活泼" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.getByRole("button", { name: "关闭" })).toHaveAttribute("aria-pressed", "true");
+
+    resolvers[1]({ ...settings.preferences, emoji_mode: "off" });
+    resolvers[0]({ ...settings.preferences, emoji_mode: "active" });
+
+    await waitFor(() => expect(useAppStore.getState().settings?.preferences.emoji_mode).toBe("off"));
+    expect(screen.getByRole("button", { name: "关闭" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("uploads and removes an avatar while synchronizing the shared profile", async () => {
@@ -334,7 +514,7 @@ describe("SettingsView source separation", () => {
     const informationSpy = vi.spyOn(api, "information").mockResolvedValue({
       items: [],
       sources: [informationSource],
-      source_summary: { total: 513, enabled: 10, opml_total: 503, opml_enabled: 0, opml_enabled_limit: 50 },
+      source_summary: { total: 508, enabled: 10, opml_total: 505, opml_enabled: 0, opml_enabled_limit: 50 },
     });
     const toggleSpy = vi.spyOn(api, "updateInformationSource").mockResolvedValue({ ...informationSource, enabled: false, status: "idle" });
 
@@ -351,9 +531,33 @@ describe("SettingsView source separation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /咨询订阅/ }));
     expect(await screen.findByText("FreeBuf")).toBeInTheDocument();
-    expect(screen.getByText("513")).toBeInTheDocument();
+    expect(screen.getByText("508")).toBeInTheDocument();
+    expect(screen.queryByText("OPML 已启用")).not.toBeInTheDocument();
+    expect(document.querySelector<HTMLImageElement>('img[src$="/api/information/source-images/freebuf?v=freebuf-v2"]')).not.toBeNull();
     fireEvent.click(screen.getByRole("checkbox", { name: "FreeBuf订阅" }));
     await waitFor(() => expect(toggleSpy).toHaveBeenCalledWith("freebuf", false));
+  });
+
+  it("maps legacy brand text in consultation source display fields", async () => {
+    vi.spyOn(api, "information").mockResolvedValue({
+      items: [],
+      sources: [{
+        ...informationSource,
+        id: "legacy-brand-source",
+        name: "SecFlow 官方资讯",
+        group: "SecFlow 来源",
+        message: "SecFlow 连接正常",
+      }],
+      source_summary: { total: 1, enabled: 1, opml_total: 0, opml_enabled: 0, opml_enabled_limit: 50 },
+    });
+
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: /咨询订阅/ }));
+
+    expect(await screen.findByText("AegisAl 官方资讯")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "AegisAl 来源" })).toBeInTheDocument();
+    expect(screen.getByText(/AegisAl 来源 · 12 条 · AegisAl 连接正常/)).toBeInTheDocument();
+    expect(screen.queryByText(/SecFlow/i)).not.toBeInTheDocument();
   });
 
   it("loads actual model token usage and switches between 7 and 30 days", async () => {

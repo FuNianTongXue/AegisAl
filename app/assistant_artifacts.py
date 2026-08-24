@@ -197,7 +197,7 @@ class SBOMArtifactStore(WorkbookArtifactStore):
         super().__init__(
             root,
             artifact_prefix="sbom-xlsx",
-            default_name="SecFlow-project-SBOM.xlsx",
+            default_name="AegisAl-project-SBOM.xlsx",
             retain=retain,
         )
 

@@ -904,7 +904,7 @@ class ReportStoreTests(unittest.TestCase):
             self.assertTrue(pdf_name.endswith(".pdf"))
             self.assertEqual(html_type, "text/html; charset=utf-8")
             self.assertEqual(pdf_type, "application/pdf")
-            self.assertIn("安全智脑报告", html_path.read_text(encoding="utf-8"))
+            self.assertIn("神盾报告", html_path.read_text(encoding="utf-8"))
             self.assertTrue(pdf_path.read_bytes().startswith(b"%PDF"))
             self.assertTrue(md_path.read_text(encoding="utf-8").startswith("# "))
 
@@ -1075,7 +1075,7 @@ flowchart LR
 
         self.assertEqual(detail["content"], downloaded)
         self.assertIn("<!-- secflow-report-style:v2 -->", downloaded)
-        self.assertIn("> 安全智脑根据本次上传与扫描事实自动生成", downloaded)
+        self.assertIn("> 神盾根据本次上传与扫描事实自动生成", downloaded)
         self.assertIn("| 扫描项 | 结果 |", downloaded)
         self.assertIn("| 附件数量 | 2 |", downloaded)
         self.assertNotIn("- 附件数量：2", downloaded.split("## 1. 执行摘要", 1)[0])
@@ -1154,9 +1154,9 @@ flowchart LR
         self.assertLess(rendered.index('"PingFang SC"'), rendered.index('"Apple Color Emoji"'))
 
     def test_pdf_latin_runs_can_use_native_report_font(self) -> None:
-        rendered = _pdf_inline_markdown("安全 SecFlow 2026", "SecFlowLatin")
+        rendered = _pdf_inline_markdown("安全 AegisAl 2026", "AegisAlLatin")
 
-        self.assertIn('安全<font name="SecFlowLatin"> SecFlow 2026</font>', rendered)
+        self.assertIn('安全<font name="AegisAlLatin"> AegisAl 2026</font>', rendered)
 
     def test_report_generation_time_uses_china_standard_time(self) -> None:
         self.assertEqual(

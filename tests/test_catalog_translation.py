@@ -66,7 +66,7 @@ class CatalogTranslationBackoffTests(unittest.TestCase):
                 ]
             },
             audit={
-                "server": "SecFlow Translation MCP",
+                "server": "AegisAl Translation MCP",
                 "tool": "translate_json_payload",
                 "transport": "stdio",
                 "status": "failed",

@@ -17,12 +17,12 @@ SUPPORTED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 SUPPORTED_LANGUAGES = {"zh-Hans", "zh-Hant", "en", "ko", "ja", "es", "fr", "de", "it", "ru"}
 LEGAL_DOCUMENT_IDS = {"terms", "privacy"}
 LEGAL_CURRENT_DATE = "2026年7月20日"
-APP_NAME = "安全智脑"
-APP_SUBTITLE = "Security AI Assistant"
-APP_VERSION = os.getenv("SECFLOW_APP_VERSION", "1.3.3").strip() or "1.3.3"
+APP_NAME = "神盾"
+APP_SUBTITLE = "AegisAl Security Assistant"
+APP_VERSION = os.getenv("SECFLOW_APP_VERSION", "1.3.4").strip() or "1.3.4"
 APP_RELEASE_CHANNEL = os.getenv("SECFLOW_APP_RELEASE_CHANNEL", "内测版").strip() or "内测版"
 APP_VERSION_LABEL = f"v{APP_VERSION} {APP_RELEASE_CHANNEL}"
-APP_COPYRIGHT = "© 2026 安全智脑 Security AI. All Rights Reserved."
+APP_COPYRIGHT = "© 2026 神盾 AegisAl. All Rights Reserved."
 LANGUAGE_ALIASES = {
     "zh-hans": "zh-Hans",
     "zh_cn": "zh-Hans",
@@ -98,6 +98,7 @@ def default_preference_settings() -> dict[str, Any]:
         "language": "zh-Hans",
         "dark_mode": False,
         "font_size": "default",
+        "emoji_mode": "moderate",
         "launch_at_login": False,
         "auto_check_updates": True,
         "updated_at": "",
@@ -109,10 +110,10 @@ def default_legal_documents() -> dict[str, dict[str, Any]]:
         "terms": {
             "id": "terms",
             "title": "服务协议",
-            "heading": "安全智脑服务协议",
+            "heading": "神盾服务协议",
             "updated_at": LEGAL_CURRENT_DATE,
             "effective_at": LEGAL_CURRENT_DATE,
-            "intro": "欢迎使用安全智脑（以下简称“本软件”）。本协议是您与安全智脑团队之间关于使用本软件服务所订立的协议。请您仔细阅读本协议的全部内容，您一旦安装、复制或以其他方式使用本软件，即表示您已阅读并同意接受本协议各项条款的约束。",
+            "intro": "欢迎使用神盾 AegisAl（以下简称“本软件”）。本协议是您与神盾团队之间关于使用本软件服务所订立的协议。请您仔细阅读本协议的全部内容，您一旦安装、复制或以其他方式使用本软件，即表示您已阅读并同意接受本协议各项条款的约束。",
             "sections": [
                 {
                     "heading": "一、协议的接受与修改",
@@ -123,7 +124,7 @@ def default_legal_documents() -> dict[str, dict[str, Any]]:
                 {
                     "heading": "二、服务内容",
                     "paragraphs": [
-                        "安全智脑是一款基于人工智能技术的网络安全辅助工具，主要功能包括但不限于：",
+                        "神盾是一款基于人工智能技术的网络安全辅助工具，主要功能包括但不限于：",
                         "1. 智能问答：提供网络安全领域的知识问答服务；",
                         "2. 情报采集：聚合多源安全情报信息；",
                         "3. 知识图谱：安全领域实体关系可视化展示；",
@@ -149,7 +150,7 @@ def default_legal_documents() -> dict[str, dict[str, Any]]:
                 {
                     "heading": "五、知识产权",
                     "paragraphs": [
-                        "本软件的一切知识产权，包括但不限于著作权、专利权、商标权等，均归安全智脑团队所有。未经授权，您不得对本软件进行复制、修改、分发、反编译等。",
+                        "本软件的一切知识产权，包括但不限于著作权、专利权、商标权等，均归神盾团队所有。未经授权，您不得对本软件进行复制、修改、分发、反编译等。",
                     ],
                 },
                 {
@@ -176,10 +177,10 @@ def default_legal_documents() -> dict[str, dict[str, Any]]:
         "privacy": {
             "id": "privacy",
             "title": "隐私政策",
-            "heading": "安全智脑隐私政策",
+            "heading": "神盾隐私政策",
             "updated_at": LEGAL_CURRENT_DATE,
             "effective_at": LEGAL_CURRENT_DATE,
-            "intro": "安全智脑非常重视用户的隐私保护。本隐私政策将帮助您了解我们如何收集、使用、存储和保护您的个人信息。请您在使用本软件前仔细阅读本政策。",
+            "intro": "神盾 AegisAl 非常重视用户的隐私保护。本隐私政策将帮助您了解我们如何收集、使用、存储和保护您的个人信息。请您在使用本软件前仔细阅读本政策。",
             "sections": [
                 {
                     "heading": "一、我们收集的信息",
@@ -389,6 +390,8 @@ def update_preference_settings(update: dict[str, Any]) -> dict[str, Any]:
         current["language"] = normalize_language(str(update["language"]))
     if "font_size" in update and update["font_size"] is not None:
         current["font_size"] = str(update["font_size"]).strip() or "default"
+    if "emoji_mode" in update and update["emoji_mode"] in {"off", "moderate", "active"}:
+        current["emoji_mode"] = update["emoji_mode"]
     for key in ("dark_mode", "launch_at_login", "auto_check_updates"):
         if key in update and update[key] is not None:
             current[key] = bool(update[key])

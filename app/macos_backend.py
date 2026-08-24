@@ -30,7 +30,7 @@ def main() -> None:
         return
     from app.api.routes.application import app
 
-    parser = argparse.ArgumentParser(description="SecFlow embedded macOS backend")
+    parser = argparse.ArgumentParser(description="AegisAl embedded macOS backend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18781)
     parser.add_argument("--parent-pid", type=int)

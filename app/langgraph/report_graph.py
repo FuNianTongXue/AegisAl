@@ -14,7 +14,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.translation_agent import translation_agent
-from app.agent.translation_policy import translation_audit_is_publishable
+from app.agent.translation_policy import failed_translation_audit, translation_audit_is_publishable
 from app.composition import invoke_generation_pinned_graph
 from app.privacy import sanitize_public_text
 from app.langgraph.checkpoints import (
@@ -452,10 +452,12 @@ class ReportCapabilitySubgraph:
 
     @staticmethod
     def _translate_scan_json(state: ReportSubgraphState) -> ReportSubgraphState:
+        source_json = dict(state.get("scan_json") or {})
+        target_language = str(state.get("response_language") or "zh-Hans")
         try:
             result = translation_agent.translate_json(
-                state.get("scan_json") or {},
-                target_language=str(state.get("response_language") or "zh-Hans"),
+                source_json,
+                target_language=target_language,
                 user_id=str(state.get("user_id") or "default"),
                 session_id=str(state.get("session_id") or "default"),
                 content_scope="report_source",
@@ -463,11 +465,14 @@ class ReportCapabilitySubgraph:
             translated = result.payload
             audit = dict(result.audit)
             if (
-                audit.get("target_language") != str(state.get("response_language") or "zh-Hans")
+                audit.get("target_language") != target_language
                 or not translation_audit_is_publishable(audit)
             ):
-                raise RuntimeError(
-                    "翻译 MCP 未生成完整的目标语言报告数据"
+                return ReportCapabilitySubgraph._report_translation_fallback(
+                    state,
+                    source_json,
+                    audit,
+                    "翻译 MCP 未生成完整的目标语言报告数据",
                 )
             source_hash = str(((translated.get("audit") or {}).get("payload_sha256") or ""))
             if not source_hash:
@@ -504,20 +509,59 @@ class ReportCapabilitySubgraph:
             )
         except Exception as exc:  # noqa: BLE001
             message = sanitize_public_text(str(exc)).strip() or "翻译 MCP 未返回可校验 JSON"
-            state["error"] = f"Translation Agent 调用失败，报告未生成：{message}"
-            return _trace(
+            return ReportCapabilitySubgraph._report_translation_fallback(
                 state,
-                "report.translation_agent",
-                state["error"],
-                "warning",
-                presentation=tool_call_presentation(
-                    "translate_json_payload",
-                    state="error",
-                    title="Translation MCP",
-                    input_summary={"content_scope": "report_source"},
-                    error=message,
-                ),
+                source_json,
+                failed_translation_audit(target_language, message),
+                message,
             )
+
+    @staticmethod
+    def _report_translation_fallback(
+        state: ReportSubgraphState,
+        source_json: dict[str, Any],
+        audit: dict[str, Any],
+        reason: str,
+    ) -> ReportSubgraphState:
+        """Keep verified report facts usable when the single translation pass is incomplete."""
+
+        source_hash = str(((source_json.get("audit") or {}).get("payload_sha256") or ""))
+        fallback_audit = {
+            **dict(audit or {}),
+            "status": "partial",
+            "translation_status": "fallback",
+            "target_language": str(state.get("response_language") or "zh-Hans"),
+            "fallback_used": True,
+            "fallback_source": "verified_scan_json",
+            "publication_status": "source_facts",
+            "input_sha256": str((audit or {}).get("input_sha256") or source_hash),
+            "output_sha256": source_hash or str((audit or {}).get("output_sha256") or ""),
+            "error": sanitize_public_text(reason).strip(),
+        }
+        state["scan_json"] = source_json
+        state["report_translation"] = fallback_audit
+        _append_format_audit(state, fallback_audit)
+        return _trace(
+            state,
+            "report.translation_agent",
+            "Translation Agent 未完成目标语言转换，已回退到已核验的原始报告 JSON，报告继续生成。",
+            "warning",
+            presentation=tool_call_presentation(
+                "translate_json_payload",
+                state="error",
+                title="Translation MCP",
+                input_summary={
+                    "content_scope": "report_source",
+                    "target_language": fallback_audit["target_language"],
+                },
+                output={
+                    "translation_status": "fallback",
+                    "fallback_source": "verified_scan_json",
+                    "payload_sha256": source_hash,
+                },
+                error=fallback_audit["error"],
+            ),
+        )
 
     @staticmethod
     def _build_charts(state: ReportSubgraphState) -> ReportSubgraphState:
@@ -530,7 +574,7 @@ class ReportCapabilitySubgraph:
             )
             state["report_charts"] = charts
             state["report_mcp"] = {
-                "server": "SecFlow Report Chart MCP",
+                "server": "AegisAl Report Chart MCP",
                 "tool": "build_scan_report_charts",
                 "transport": str((charts.get("_mcp_runtime") or {}).get("transport") or "stdio"),
                 "endpoint": "managed-child-process",
@@ -564,7 +608,7 @@ class ReportCapabilitySubgraph:
             state["report_charts"] = {}
             message = sanitize_public_text(str(exc)).strip() or "未知 MCP 错误"
             state["report_mcp"] = {
-                "server": "SecFlow Report Chart MCP",
+                "server": "AegisAl Report Chart MCP",
                 "tool": "build_scan_report_charts",
                 "transport": "stdio",
                 "endpoint": "managed-child-process",
@@ -605,7 +649,7 @@ class ReportCapabilitySubgraph:
                 raise ValueError("SARIF MCP output hash verification failed")
             state["report_sarif"] = result
             audit = _format_mcp_audit(
-                server="SecFlow SARIF MCP",
+                server="AegisAl SARIF MCP",
                 tool="build_scan_sarif",
                 invoked_at=invoked_at,
                 input_sha256=str(result.get("input_sha256") or ""),
@@ -643,7 +687,7 @@ class ReportCapabilitySubgraph:
             state["report_sarif"] = {}
             return _format_mcp_failure(
                 state,
-                server="SecFlow SARIF MCP",
+                server="AegisAl SARIF MCP",
                 tool="build_scan_sarif",
                 invoked_at=invoked_at,
                 node="report.sarif_mcp",
@@ -688,7 +732,7 @@ class ReportCapabilitySubgraph:
             state["report_template"] = template
             encoded = json.dumps(template, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             audit = _format_mcp_audit(
-                server="SecFlow Template MCP",
+                server="AegisAl Template MCP",
                 tool="resolve_report_template",
                 invoked_at=invoked_at,
                 input_sha256=str(plan.get("source_sha256") or ""),
@@ -713,7 +757,7 @@ class ReportCapabilitySubgraph:
         except Exception as exc:  # noqa: BLE001
             return _format_mcp_failure(
                 state,
-                server="SecFlow Template MCP",
+                server="AegisAl Template MCP",
                 tool="resolve_report_template",
                 invoked_at=invoked_at,
                 node="report.template_mcp",
@@ -846,7 +890,7 @@ class ReportCapabilitySubgraph:
             state["report_mermaid"] = result
             encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             audit = _format_mcp_audit(
-                server="SecFlow Mermaid MCP",
+                server="AegisAl Mermaid MCP",
                 tool="build_report_mermaid",
                 invoked_at=invoked_at,
                 input_sha256=str(result.get("input_sha256") or ""),
@@ -886,7 +930,7 @@ class ReportCapabilitySubgraph:
                 release_mcp_artifacts(result)
             return _format_mcp_failure(
                 state,
-                server="SecFlow Mermaid MCP",
+                server="AegisAl Mermaid MCP",
                 tool="build_report_mermaid",
                 invoked_at=invoked_at,
                 node="report.mermaid_mcp",
@@ -915,7 +959,7 @@ class ReportCapabilitySubgraph:
             draft["content"] = content
             state["report_draft"] = draft
             audit = _format_mcp_audit(
-                server="SecFlow Markdown MCP",
+                server="AegisAl Markdown MCP",
                 tool="render_markdown_report",
                 invoked_at=invoked_at,
                 input_sha256=str(result.get("input_sha256") or ""),
@@ -941,7 +985,7 @@ class ReportCapabilitySubgraph:
         except Exception as exc:  # noqa: BLE001
             return _format_mcp_failure(
                 state,
-                server="SecFlow Markdown MCP",
+                server="AegisAl Markdown MCP",
                 tool="render_markdown_report",
                 invoked_at=invoked_at,
                 node="report.markdown_mcp",
@@ -952,7 +996,7 @@ class ReportCapabilitySubgraph:
     def _render_word(state: ReportSubgraphState) -> ReportSubgraphState:
         return _render_binary_mcp(
             state,
-            server="SecFlow Word MCP",
+            server="AegisAl Word MCP",
             tool="render_word_report",
             node="report.word_mcp",
             report_format="docx",
@@ -988,7 +1032,7 @@ class ReportCapabilitySubgraph:
     def _render_excel(state: ReportSubgraphState) -> ReportSubgraphState:
         return _render_binary_mcp(
             state,
-            server="SecFlow Excel MCP",
+            server="AegisAl Excel MCP",
             tool="render_excel_report",
             node="report.excel_mcp",
             report_format="xlsx",
@@ -1000,7 +1044,7 @@ class ReportCapabilitySubgraph:
     def _render_pdf(state: ReportSubgraphState) -> ReportSubgraphState:
         return _render_binary_mcp(
             state,
-            server="SecFlow PDF MCP",
+            server="AegisAl PDF MCP",
             tool="render_pdf_report",
             node="report.pdf_mcp",
             report_format="pdf",
@@ -1025,7 +1069,7 @@ class ReportCapabilitySubgraph:
                     raise ValueError(f"Missing pending {report_format.upper()} Host artifact")
                 artifacts[report_format] = read_mcp_artifact(pending)
             saved = _store_for_state(state).save_json_report(
-                str(draft.get("title") or "SecFlow 安全报告"),
+                str(draft.get("title") or "神盾安全报告"),
                 str(draft.get("content") or ""),
                 report_source=state.get("scan_json") or {},
                 mode=str(draft.get("mode") or "dependency_vulnerability_report"),
@@ -1144,6 +1188,7 @@ class ReportCapabilitySubgraph:
             "report_plan": dict(state.get("report_plan") or {}),
             "report_template": dict(state.get("report_template") or {}),
             "report_qa": dict(state.get("report_qa") or {}),
+            "report_translation": dict(state.get("report_translation") or {}),
             "report_mcp": dict(state.get("report_mcp") or {}),
             "report_mcps": list(state.get("report_mcps") or []),
             "error": sanitize_public_text(state.get("error") or ""),
@@ -1171,6 +1216,7 @@ def report_outcome_answer(outcome: dict[str, Any]) -> dict[str, Any]:
         "chart_data": {},
         "artifacts": list(outcome.get("artifacts") or []),
         "report": report or None,
+        "translation": dict(outcome.get("report_translation") or {}),
         "report_mcps": list(outcome.get("report_mcps") or []),
         "interrupt": outcome.get("interrupt"),
         "confidence": 1.0,

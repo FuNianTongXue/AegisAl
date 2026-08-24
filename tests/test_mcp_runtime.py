@@ -324,6 +324,29 @@ class MCPRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 arguments={"left": 1, "right": 2},
             )
 
+    async def test_server_lock_wait_is_included_in_call_timeout(self) -> None:
+        session = FakeSession()
+        runtime = MCPRuntime(connector=FakeConnector(session))
+        self.addAsyncCleanup(runtime.close)
+        await runtime.register_server(local_config(self.root, timeout_seconds=1.0))
+        tool_id = namespaced_tool_id("math-tools", "add")
+        await runtime.tools.set_agent_allowlist("calculator", [tool_id])
+        state, _descriptor = await runtime.registry.resolve(tool_id)
+        await state.call_lock.acquire()
+        try:
+            with self.assertRaises(MCPToolTimeoutError):
+                await runtime.tools.call(
+                    agent_id="calculator",
+                    tool_id=tool_id,
+                    arguments={"left": 1, "right": 2},
+                    timeout_seconds=0.02,
+                )
+        finally:
+            state.call_lock.release()
+
+        self.assertEqual(session.calls, [])
+        self.assertEqual(runtime.tools.audit_records[-1].status, "timed_out")
+
     async def test_explicit_cancellation_revokes_tools_and_closes_process_session(self) -> None:
         never = asyncio.Event()
         session = FakeSession(wait=never)

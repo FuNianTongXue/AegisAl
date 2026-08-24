@@ -31,6 +31,7 @@ from app.models import (
     AssistantTaskActionRequest,
     AssistantWorkspaceActionRequest,
     AssistantConversationArchiveRequest,
+    AssistantStructuredDataEditRequest,
     ApiResponse,
     AppPreferenceSettingsUpdate,
     AskRequest,
@@ -71,6 +72,9 @@ from app.agent.assistant_service import (
     invoke_assistant_question,
     invoke_assistant_task_action,
     invoke_assistant_workspace_action,
+    public_stream_trace_event,
+    public_stream_trace_identity,
+    public_stream_trace_items,
     resume_assistant_operation,
     translate_assistant_answer,
 )
@@ -112,7 +116,7 @@ REPORT_MCP_SERVER_IDS = (
 )
 
 app = FastAPI(
-    title="SecFlow Knowledge Security Assistant",
+    title="AegisAl Knowledge Security Assistant",
     version=APP_VERSION,
     description="A source-available LangGraph knowledge security assistant by ShenSiQi.",
 )
@@ -191,8 +195,8 @@ def _registered_mcp_server_specs(server_ids: tuple[str, ...]) -> list[dict[str, 
 @app.get("/")
 def root():
     return {
-        "service": "secflow-knowledge-security-assistant",
-        "client": "SecFlow Tauri Desktop",
+        "service": "aegisai-knowledge-security-assistant",
+        "client": "AegisAl Tauri Desktop",
         "api_docs": "/docs",
     }
 
@@ -201,7 +205,7 @@ def root():
 def health():
     return {
         "ok": True,
-        "service": "secflow-knowledge-security-assistant",
+        "service": "aegisai-knowledge-security-assistant",
         "contract_version": MACOS_API_CONTRACT_VERSION,
         "author": "ShenSiQi",
         "task_execution": task_agent_service.execution_status(),
@@ -469,6 +473,7 @@ def dashboard(
     start_date: date | None = None,
     end_date: date | None = None,
     response_language: str = Query(default="zh-Hans", max_length=24),
+    refresh: bool = Query(default=False),
 ):
     try:
         return ok(
@@ -476,6 +481,7 @@ def dashboard(
                 start_date=start_date,
                 end_date=end_date,
                 response_language=response_language,
+                force_refresh=refresh,
             ),
             "Dashboard batch snapshot loaded.",
         )
@@ -765,7 +771,7 @@ def download_assistant_artifact(
         path = component_artifact_store.resolve(artifact_id, user_id=user_id)
         file_name = str(
             component_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
-            or "SecFlow-component-vulnerabilities.xlsx"
+            or "AegisAl-component-vulnerabilities.xlsx"
         )
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except KeyError:
@@ -773,7 +779,7 @@ def download_assistant_artifact(
             path = sbom_artifact_store.resolve(artifact_id, user_id=user_id)
             file_name = str(
                 sbom_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
-                or "SecFlow-project-SBOM.xlsx"
+                or "AegisAl-project-SBOM.xlsx"
             )
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         except KeyError as exc:
@@ -800,7 +806,7 @@ def export_vulnerability_components(payload: VulnerabilityComponentExportRequest
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", str(metadata["identifier"])).strip("-") or "vulnerability"
-    filename = f"SecFlow-{stem[:120]}-component-ranges.xlsx"
+    filename = f"AegisAl-{stem[:120]}-component-ranges.xlsx"
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -846,11 +852,28 @@ async def ask_stream(payload: AskRequest):
     async def stream():
         queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        emitted_trace: set[str] = set()
+
+        def enqueue(event_name: str, data: dict) -> None:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (event_name, data))
+            except RuntimeError:
+                # The client may disconnect while the worker thread is finishing.
+                pass
 
         def emit_trace(item: dict) -> None:
-            del item
+            event = public_stream_trace_event(item)
+            if event is None:
+                return
+            identity = public_stream_trace_identity(event)
+            if identity in emitted_trace:
+                return
+            emitted_trace.add(identity)
+            enqueue("trace", event)
 
         def emit_content(delta: str) -> None:
+            # Model deltas are untrusted until translation/publication policy has
+            # accepted the complete answer. Only final accepted chunks are sent.
             del delta
 
         def run_graph() -> None:
@@ -862,20 +885,17 @@ async def ask_stream(payload: AskRequest):
                     content_sink=emit_content,
                     allow_workspace_recovery=True,
                 )
-                # Agent/model deltas are untrusted until the final translation
-                # and publication policy has accepted the complete result.
-                # Emit only the final public payload; no-op callbacks keep graph
-                # integrations compatible without retaining unbounded content.
-                final_trace = result.get("trace") if isinstance(result.get("trace"), list) else []
+                result = dict(result)
+                final_trace = public_stream_trace_items(result.get("trace"))
+                result["trace"] = final_trace
                 for item in final_trace:
-                    if isinstance(item, dict):
-                        loop.call_soon_threadsafe(queue.put_nowait, ("trace", dict(item)))
+                    emit_trace(item)
                 for delta in _assistant_content_chunks(str(result.get("summary") or "")):
-                    loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
-                loop.call_soon_threadsafe(queue.put_nowait, ("result", result))
+                    enqueue("content", {"delta": delta})
+                enqueue("result", result)
             except Exception as exc:  # noqa: BLE001 - stream failures must be delivered to the client.
                 message = sanitize_public_text(str(exc)).strip() or "Assistant response generation failed."
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", {"message": message}))
+                enqueue("error", {"message": message})
 
         worker = asyncio.create_task(asyncio.to_thread(run_graph))
         try:
@@ -1350,6 +1370,37 @@ def assistant_conversation_detail(
         return ok(memory_service.get_conversation(user_id, session_id), "Conversation loaded.")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+
+@app.patch("/api/assistant/conversations/{session_id}/exchanges/{exchange_id}/table-edits", response_model=ApiResponse)
+def update_assistant_conversation_table_edits(
+    session_id: str,
+    exchange_id: str,
+    payload: AssistantStructuredDataEditRequest,
+    user_id: str = Query(default="default", min_length=1, max_length=120),
+):
+    if not session_id or len(session_id) > 120:
+        raise HTTPException(status_code=422, detail="Invalid session ID.")
+    if not exchange_id or len(exchange_id) > 200:
+        raise HTTPException(status_code=422, detail="Invalid exchange ID.")
+    try:
+        update_tables = (
+            memory_service.update_short_term_exchange_table_edits
+            if session_id.startswith("information:")
+            else memory_service.update_exchange_table_edits
+        )
+        tables = update_tables(
+            user_id,
+            session_id,
+            exchange_id,
+            [table.model_dump(mode="json", exclude_none=True) for table in payload.tables],
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation exchange not found.") from exc
+    return ok(
+        {"exchange_id": exchange_id, "tables": tables},
+        "Conversation table edits saved.",
+    )
 
 
 @app.post("/api/assistant/conversations/{session_id}/archive", response_model=ApiResponse)

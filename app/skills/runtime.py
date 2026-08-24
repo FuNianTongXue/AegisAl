@@ -146,7 +146,7 @@ def activate_builtin_skills(context: PluginContext) -> None:
     for path in sorted(root.glob("*/SKILL.md")):
         definitions.append(SkillDefinition.from_path(path, root=root))
     if not definitions:
-        raise RuntimeError("No packaged SecFlow skills were discovered")
+        raise RuntimeError("No packaged AegisAl skills were discovered")
     names = [definition.name for definition in definitions]
     if len(names) != len(set(names)):
         raise ValueError("Packaged Skill names must be unique")

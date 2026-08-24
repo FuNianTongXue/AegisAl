@@ -327,7 +327,7 @@ class ProjectSBOMSubgraph:
                 presentation=tool_call_presentation(
                     "identify_project_licenses",
                     state="completed" if scan.get("coverage_status") in {"complete", "partial"} else "error",
-                    title="SecFlow License MCP identification",
+                    title="AegisAl License MCP identification",
                     input_summary={"workspace_name": Path(state["workspace_path"]).name},
                     output={
                         "license_count": int(scan.get("license_count") or 0),
@@ -473,7 +473,7 @@ class ProjectSBOMSubgraph:
             artifact = publish_mcp_workbook(
                 result,
                 kind="sbom",
-                default_file_name=f"SecFlow-{workspace_name}-SBOM.xlsx",
+                default_file_name=f"AegisAl-{workspace_name}-SBOM.xlsx",
                 generated_at=generated_at,
                 user_id=str(state.get("user_id") or "default"),
                 session_id=str(state.get("session_id") or ""),
@@ -509,7 +509,7 @@ class ProjectSBOMSubgraph:
             detail = f"客户端会通过 macOS 系统目录 API 定位当前用户桌面，不使用模型生成的绝对路径。文件：{artifact.get('file_name')}"
         else:
             question = "SBOM Excel 已生成，是否选择目录并下载？"
-            detail = str(artifact.get("file_name") or "SecFlow-project-SBOM.xlsx")
+            detail = str(artifact.get("file_name") or "AegisAl-project-SBOM.xlsx")
         response = interrupt(
             {
                 "kind": "sbom_excel_download_confirmation",

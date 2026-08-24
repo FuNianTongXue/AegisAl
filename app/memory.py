@@ -70,6 +70,7 @@ class LongTermMemoryService:
         # They must provide continuity while the small consultation window is
         # open without entering the durable conversation archive/profile.
         self._short_term_sessions: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._short_term_exchange_sequences: dict[tuple[str, str], int] = {}
         self._postgres_ready: bool | None = None
         self._postgres_error = ""
 
@@ -346,12 +347,48 @@ class LongTermMemoryService:
         conversation = str(session_id or "default").strip() or "default"
         entry = self._build_entry(owner, conversation, question, answer_data)
         with self._lock:
-            history = self._short_term_sessions.setdefault((owner, conversation), [])
-            entry["id"] = f"short-{len(history) + 1:04d}"
+            session_key = (owner, conversation)
+            history = self._short_term_sessions.setdefault(session_key, [])
+            next_sequence = max(
+                self._short_term_exchange_sequences.get(session_key, 0),
+                _max_exchange_sequence(history, "short"),
+            ) + 1
+            self._short_term_exchange_sequences[session_key] = next_sequence
+            entry["id"] = f"short-{next_sequence:04d}"
             history.append(entry)
             if len(history) > self.recent_limit:
                 del history[: len(history) - self.recent_limit]
         return deepcopy(entry)
+
+    def update_short_term_exchange_table_edits(
+        self,
+        user_id: str,
+        session_id: str,
+        exchange_id: str,
+        tables: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Update an Information Center table snapshot in process memory."""
+
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        clean_exchange_id = str(exchange_id or "").strip()
+        if not re.fullmatch(r"short-\d{1,20}", clean_exchange_id):
+            raise KeyError(clean_exchange_id)
+        normalized_tables = _normalized_structured_table_edits(tables)
+        with self._lock:
+            history = self._short_term_sessions.get((owner, conversation), [])
+            matches = [
+                entry
+                for entry in history
+                if str(entry.get("id") or "") == clean_exchange_id
+            ]
+            if len(matches) != 1:
+                raise KeyError(clean_exchange_id)
+            answer_payload = matches[0].get("answerPayload")
+            if not isinstance(answer_payload, dict):
+                raise ValueError("Stored assistant answer payload is invalid.")
+            answer_payload["structured_data_edits"] = deepcopy(normalized_tables)
+            return deepcopy(normalized_tables)
 
     def clear_short_term_session(self, user_id: str, session_id: str) -> dict[str, Any]:
         owner = str(user_id or "default").strip() or "default"
@@ -616,6 +653,11 @@ class LongTermMemoryService:
                 str(previous.get("question") or ""),
                 answer_data,
             )
+            _preserve_structured_data_edits(
+                previous.get("answerPayload"),
+                replacement["answerPayload"],
+                answer_data,
+            )
             replacement["id"] = str(previous.get("id") or "")
             history[target_index] = replacement
             state.setdefault("profiles", {})[user_id] = self._profile_from_history(user_id, history)
@@ -626,6 +668,55 @@ class LongTermMemoryService:
             }
             self._write_json_state(state)
             return True
+
+    def update_exchange_table_edits(
+        self,
+        user_id: str,
+        session_id: str,
+        exchange_id: str,
+        tables: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Persist edited display snapshots without mutating translated source data."""
+
+        owner = str(user_id or "default").strip() or "default"
+        conversation = str(session_id or "default").strip() or "default"
+        clean_exchange_id = str(exchange_id or "").strip()
+        if not re.fullmatch(r"msg-\d{1,20}", clean_exchange_id):
+            raise KeyError(clean_exchange_id)
+        normalized_tables = _normalized_structured_table_edits(tables)
+
+        if self._use_postgres():
+            try:
+                return self._pg_update_exchange_table_edits(
+                    owner,
+                    conversation,
+                    clean_exchange_id,
+                    normalized_tables,
+                )
+            except (KeyError, ValueError):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._mark_postgres_failed(exc)
+                raise
+
+        with self._lock:
+            state = self._read_json_state()
+            history = state.setdefault("users", {}).get(owner, [])
+            matches = [
+                entry
+                for entry in history
+                if str(entry.get("sessionId") or "default") == conversation
+                and str(entry.get("id") or "") == clean_exchange_id
+            ]
+            if len(matches) != 1:
+                raise KeyError(clean_exchange_id)
+            entry = matches[0]
+            answer_payload = entry.get("answerPayload")
+            if not isinstance(answer_payload, dict):
+                raise ValueError("Stored assistant answer payload is invalid.")
+            answer_payload["structured_data_edits"] = deepcopy(normalized_tables)
+            self._write_json_state(state)
+            return deepcopy(normalized_tables)
 
     def clear_history(self, user_id: str = "default") -> dict[str, Any]:
         if self._use_postgres():
@@ -820,21 +911,38 @@ class LongTermMemoryService:
             if not row:
                 return False
             entry = self._build_entry(user_id, session_id, str(row["question"] or ""), answer_data)
-            conn.execute(
+            replacement_payload = json.dumps(entry["answerPayload"], ensure_ascii=False)
+            preserve_edits = "structured_data_edits" not in answer_data
+            updated = conn.execute(
                 """
-                update secflow_knowledge_conversation_exchanges
+                update secflow_knowledge_conversation_exchanges as exchange
                 set answer = %s, mode = %s, confidence = %s,
-                    fields = %s::jsonb, answer_payload = %s::jsonb,
+                    fields = %s::jsonb,
+                    answer_payload = case
+                        when %s
+                          and jsonb_typeof(exchange.answer_payload -> 'structured_data_edits') = 'array'
+                          and exchange.answer_payload -> 'structured_data_edits' <> '[]'::jsonb
+                        then jsonb_set(
+                            %s::jsonb,
+                            '{structured_data_edits}',
+                            exchange.answer_payload -> 'structured_data_edits',
+                            true
+                        )
+                        else %s::jsonb
+                    end,
                     sources = %s::jsonb, topics = %s::jsonb,
                     importance = %s, compressed_summary = %s, created_at = now()
                 where id = %s and user_id = %s and session_id = %s
+                returning id
                 """,
                 (
                     entry["answer"],
                     entry["mode"],
                     entry["confidence"],
                     json.dumps(entry["fields"], ensure_ascii=False),
-                    json.dumps(entry["answerPayload"], ensure_ascii=False),
+                    preserve_edits,
+                    replacement_payload,
+                    replacement_payload,
                     json.dumps(entry["sources"], ensure_ascii=False),
                     json.dumps(entry["topics"], ensure_ascii=False),
                     entry["importance"],
@@ -843,7 +951,9 @@ class LongTermMemoryService:
                     user_id,
                     session_id,
                 ),
-            )
+            ).fetchone()
+            if not updated:
+                return False
             conn.execute(
                 """
                 update secflow_knowledge_conversations
@@ -853,6 +963,38 @@ class LongTermMemoryService:
                 (user_id, session_id),
             )
         return True
+
+    def _pg_update_exchange_table_edits(
+        self,
+        user_id: str,
+        session_id: str,
+        exchange_id: str,
+        tables: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        database_id = int(exchange_id.removeprefix("msg-"))
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                """
+                update secflow_knowledge_conversation_exchanges
+                set answer_payload = jsonb_set(
+                    answer_payload,
+                    '{structured_data_edits}',
+                    %s::jsonb,
+                    true
+                )
+                where id = %s and user_id = %s and session_id = %s
+                returning id
+                """,
+                (
+                    json.dumps(tables, ensure_ascii=False),
+                    database_id,
+                    user_id,
+                    session_id,
+                ),
+            ).fetchone()
+            if not row:
+                raise KeyError(exchange_id)
+        return deepcopy(tables)
 
     def _replace_postgres_profile(self, user_id: str, history: list[dict[str, Any]]) -> None:
         profile = self._profile_from_history(user_id, history)
@@ -910,7 +1052,7 @@ class LongTermMemoryService:
         users = state.setdefault("users", {})
         history = users.setdefault(entry["userId"], [])
         entry = deepcopy(entry)
-        entry["id"] = f"msg-{len(history) + 1:04d}"
+        entry["id"] = f"msg-{_max_exchange_sequence(history, 'msg') + 1:04d}"
         history.append(entry)
         if len(history) > self.max_history:
             users[entry["userId"]] = history[-self.max_history :]
@@ -1051,7 +1193,12 @@ class LongTermMemoryService:
                 "mode",
                 "summary",
                 "fields",
+                "table",
+                "tables",
+                "records",
+                "cards",
                 "vulnerability_card",
+                "component_detail",
                 "knowledge_graph",
                 "evidence_sources",
                 "chart_data",
@@ -1062,6 +1209,8 @@ class LongTermMemoryService:
                 "token_usage",
                 "confidence",
                 "trace",
+                "translation",
+                "structured_data_edits",
                 "generated_at",
             )
             if key in answer_data
@@ -1278,6 +1427,43 @@ class LongTermMemoryService:
         if len(text) <= limit:
             return text
         return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _normalized_structured_table_edits(tables: Any) -> list[dict[str, Any]]:
+    if not isinstance(tables, list) or not 1 <= len(tables) <= 12:
+        raise ValueError("Structured table edits must contain between 1 and 12 tables.")
+    if not all(isinstance(table, dict) for table in tables):
+        raise ValueError("Each structured table edit must be an object.")
+    normalized = deepcopy(tables)
+    try:
+        encoded = json.dumps(normalized, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Structured table edits must be valid JSON.") from exc
+    if len(encoded) > 1_000_000:
+        raise ValueError("Structured table edits cannot exceed 1 MB.")
+    return normalized
+
+
+def _max_exchange_sequence(history: list[dict[str, Any]], prefix: str) -> int:
+    pattern = re.compile(rf"{re.escape(prefix)}-(\d{{1,20}})")
+    maximum = 0
+    for entry in history:
+        match = pattern.fullmatch(str(entry.get("id") or ""))
+        if match:
+            maximum = max(maximum, int(match.group(1)))
+    return maximum
+
+
+def _preserve_structured_data_edits(
+    previous_payload: Any,
+    replacement_payload: dict[str, Any],
+    answer_data: dict[str, Any],
+) -> None:
+    if "structured_data_edits" in answer_data or not isinstance(previous_payload, dict):
+        return
+    edits = previous_payload.get("structured_data_edits")
+    if isinstance(edits, list) and edits:
+        replacement_payload["structured_data_edits"] = deepcopy(edits)
 
 
 memory_service = LongTermMemoryService()

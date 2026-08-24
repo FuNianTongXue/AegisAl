@@ -48,6 +48,7 @@ export interface PreferenceSettings {
   language: string;
   dark_mode: boolean;
   font_size: "small" | "default" | "large";
+  emoji_mode?: "off" | "moderate" | "active";
   launch_at_login?: boolean;
   auto_check_updates?: boolean;
 }
@@ -93,6 +94,7 @@ export interface LlmConfig {
   has_api_key?: boolean;
   api_key_configured?: boolean;
   api_key?: string;
+  clear_api_key?: boolean;
 }
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -224,8 +226,11 @@ export interface AssistantArtifact {
   id: string;
   file_name: string;
   media_type: string;
+  format?: string;
   size?: number;
   kind?: string;
+  status?: string;
+  generated_at?: string;
   download_path?: string;
   sha256?: string;
 }
@@ -247,6 +252,24 @@ export interface AssistantInterrupt {
   session_id?: string;
 }
 
+export interface AssistantDataTableColumn {
+  key: string;
+  label: string;
+  kind?: "date" | "link" | "number" | "status" | "tags" | "text";
+  editable?: boolean;
+}
+
+export interface AssistantDataTable {
+  id?: string;
+  type?: "table" | "data-table" | "records-table" | string;
+  title?: string;
+  caption?: string;
+  columns: Array<AssistantDataTableColumn | string>;
+  rows: Array<JsonObject | unknown[]>;
+  total?: number;
+  edited?: boolean;
+}
+
 export interface AskResult {
   answer: string;
   summary?: string;
@@ -256,11 +279,19 @@ export interface AskResult {
   trace?: TraceItem[];
   evidence_sources?: EvidenceSource[];
   sources?: EvidenceSource[];
+  fields?: JsonObject;
+  records?: JsonObject[];
   cards?: JsonObject[];
+  table?: AssistantDataTable;
+  tables?: AssistantDataTable[];
+  /** User-edited display snapshots; original translated evidence remains unchanged. */
+  structured_data_edits?: AssistantDataTable[];
+  exchange_id?: string;
   artifacts?: AssistantArtifact[];
   interrupt?: AssistantInterrupt;
   report?: ReportSummary;
   knowledge_graph?: JsonObject;
+  vulnerability_card?: JsonObject;
   component_detail?: JsonObject;
   usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
   token_usage?: number;
@@ -368,6 +399,7 @@ export interface InformationItem {
   url?: string;
   image_url?: string;
   source_image_url?: string;
+  source_image_version?: string;
 }
 
 export interface InformationSnapshot {
@@ -406,6 +438,7 @@ export interface InformationSource {
   region?: string;
   group?: string;
   catalog?: string;
+  source_image_version?: string;
   enabled: boolean;
   status: string;
   item_count: number;

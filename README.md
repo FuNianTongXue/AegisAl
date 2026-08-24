@@ -1,14 +1,20 @@
-# SecFlow Knowledge Security Assistant
+# 神盾 AegisAl Knowledge Security Assistant
+
+<p align="center">
+  <img src="docs/assets/aegisal-logo.png" width="168" alt="神盾 AegisAl Logo">
+</p>
 
 面向安全研发、漏洞知识库与代码审计场景的桌面安全智能体。当前主客户端采用 **Tauri 2 + React/TypeScript**，本地后端采用 **FastAPI + LangGraph + Python Worker**。
 
 > 作者：**ShenSiQi**  
-> 许可证：**SecFlow Source-Available Commercial Non-Redistribution License**  
+> 许可证：[**AegisAl Source-Available Commercial Non-Redistribution License**](LICENSE)
 > 本仓库源码可用于审阅、学习和评估，但未经书面商业授权，不得再分发、转售、SaaS 包装或商用交付。
 
 ## 当前版本
 
-`v1.3.3` 支持以下正式桌面构建：
+源码版本 `v1.3.4` 支持以下桌面构建目标：
+
+> **版本说明：** 本仓库的源码和文档基线为 `1.3.4`。按本次发布要求没有重新编译客户端，因此 Release 中的两个 7 天试用 DMG 仍是经过签名、架构和完整性验证的 `1.3.3` 构建；安装包内版本号及实际可执行代码均以 `1.3.3` 为准，不能视为 `1.3.4` 源码的二进制构建。
 
 | 平台 | 架构 | 构建入口 |
 | --- | --- | --- |
@@ -20,13 +26,49 @@
 
 ## 本次修复与优化
 
-- 漏洞库支持按完整 CVE 编号检索整个本地目录，而不是只过滤当前页。
-- 点击漏洞卡片会打开详情面板，展示漏洞描述、CVSS、严重等级、影响版本、修复信息和公开漏洞网站入口。
-- 漏洞列表不再显示“离线译文”和“简体中文”标签；需要中文展示的漏洞字段使用本地翻译能力统一处理，不调用用户模型、不消耗模型 Token。
-- 信息中心不再执行翻译，始终展示资讯源提供的原始标题与摘要；历史翻译失败缓存不会再生成“资讯翻译暂不可用”。
-- FastAPI 根路径改为服务信息 JSON，API 文档位于 `/docs`；仓库不再提供旧静态网页、pywebview、SwiftUI 兼容客户端或 Docker 部署版本。
-- 插件、Skills 与 MCP Runtime 增加统一注册、最小权限上下文、审计与错误隔离。
-- macOS 与 Windows Tauri 构建移除旧 `app/static` 资源依赖。
+- 普通问答支持关闭、适中、活跃三档表情策略，本地问候无需调用模型。
+- 思考与工具调用采用默认折叠的统一时间线，保留流式与执行动效。
+- 漏洞数据以翻译后的全量行列显示，支持搜索、分页、编辑和会话持久化。
+- 报告生成增加翻译 Agent 兜底，合并重复下载确认，并支持 Markdown、HTML、Word、PDF、Excel 与 SARIF。
+- 信息中心主题与主窗口同步，修复浅色遮挡文字和历史品牌显示。
+- 修复模型锁定、第三方 API Key、本机密钥恢复和解密失败覆盖状态问题。
+- 大项目扫描采用 5000 文件或 64 MiB 分批，不再按项目总容量拒绝几十 GB 的工作区。
+- 问答与项目扫描结果的状态头像统一使用 AegisAl Logo。
+
+完整变更、试用包边界与校验值见 [v1.3.4 发布说明](docs/RELEASE_NOTES_v1.3.4.md)。
+
+本次源码验证基线：前端 27 个测试文件、198 项测试通过；后端 903 项测试和 65 个子测试通过；TypeScript 检查与 Vite 生产构建通过。
+
+## 7 天试用版
+
+试用期从首次成功启动起连续计算 168 小时。两个安装包均为 ad-hoc 签名且未进行 Apple 公证；首次打开时可能需要在 macOS“隐私与安全性”中确认。Release 只提供试用版，不提供正式版安装包。
+
+| 平台 | 客户端构建 | 安装包 | SHA-256 |
+| --- | --- | --- | --- |
+| macOS Apple Silicon (`arm64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-ARM64-7天试用版.dmg` | `bfc9e33b8d5fe40d741a18e0b246ee58ad0bb2248c28a86a9b8cd52309a34589` |
+| macOS Intel (`x86_64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-x86_64-7天试用版.dmg` | `16ae1aedc0e2e0c9bb018ef670ce9b583c32885442d468551a405a9a02d53402` |
+
+安装包及对应校验文件见 [v1.3.4 源码 / v1.3.3 试用客户端 Release](https://github.com/FuNianTongXue/secflow-knowledge-security-assistant/releases/tag/v1.3.4-trial-7days)。
+
+## 功能演示
+
+### 普通问答
+
+表情策略、折叠思考过程、工具调用时间线与 AegisAl 状态 Logo：
+
+![神盾 AegisAl 普通问答演示](docs/assets/demos/aegisal-v1.3.4-assistant.gif)
+
+### 项目扫描
+
+风险概览、扫描结果与工具执行过程：
+
+![神盾 AegisAl 项目扫描演示](docs/assets/demos/aegisal-v1.3.4-scan.gif)
+
+### 漏洞情报与漏洞库
+
+漏洞情报总览、完整检索与详情查看：
+
+![神盾 AegisAl 漏洞情报与漏洞库演示](docs/assets/demos/aegisal-v1.3.4-intelligence.gif)
 
 ## 核心功能
 
@@ -40,10 +82,14 @@
 | 公开安全资讯 | 聚合公开 RSS/API，缓存、去重、分类、搜索并直接展示源站原文 |
 | 报告 | Markdown、Word、PDF、Excel、SARIF、Mermaid 和图表制品 |
 | 长期记忆 | 按 `user_id` 本地隔离、摘要压缩、重要性评分和跨会话召回 |
-| 插件与 Skills | 内置 SecFlow Skills、插件注册表、MCP 工具协议、权限与副作用边界 |
+| 插件与 Skills | 内置神盾 Skills、插件注册表、MCP 工具协议、权限与副作用边界 |
 | 桌面安全 | 回环 API、加密状态、系统凭证库、路径边界、符号链接隔离、包完整性检查 |
 
 ## 架构
+
+![神盾 AegisAl v1.3.4 源码架构图](docs/assets/aegisal-architecture-v1.3.4.png)
+
+架构图提供 [SVG](docs/assets/aegisal-architecture-v1.3.4.svg)、[PNG](docs/assets/aegisal-architecture-v1.3.4.png) 和可审阅的 [Graphviz 源文件](docs/assets/aegisal-architecture-v1.3.4.dot)。完整的组件边界、数据流和安全设计见 [架构文档](docs/ARCHITECTURE.md)。
 
 ```mermaid
 flowchart LR
@@ -70,13 +116,13 @@ app/
   langgraph/             Supervisor 与各能力子图
   mcp/                   扫描、组件、SBOM、翻译与报告工具
   plugins/               插件模型、注册表、运行时和权限边界
-  resources/skills/      SecFlow 内置 Skills 与 Agent 元数据
+  resources/skills/      神盾内置 Skills 与 Agent 元数据
   skills/                Skills 加载运行时
 config/semgrep/           多语言离线安全规则
 desktop/SecFlowTauri/     Tauri 2 + React/TypeScript 桌面客户端
 scripts/                  Tauri 打包、验证和安全评测脚本
 tests/                    Python 后端与安全回归测试
-docs/                     架构、产品、API、发行和评测文档
+docs/                     架构、产品、API、许可和 1.3.4 发布资料
 ```
 
 更完整的边界见 [架构文档](docs/ARCHITECTURE.md)、[产品功能](docs/PRODUCT_FEATURES.md) 和 [API 参考](docs/API_REFERENCE.md)。
@@ -187,4 +233,4 @@ Supervisor 根据意图和前置制品选择最小能力集合，专业 Agent �
 
 ## 许可证
 
-详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。GitHub 仓库公开不代表允许再分发或商业使用。
+本项目采用 [AegisAl Source-Available Commercial Non-Redistribution License](LICENSE)，第三方声明见 [NOTICE](NOTICE)。GitHub 仓库公开不代表允许再分发或商业使用；生产部署、企业内部非评估用途、SaaS、客户交付、转售及其他商业使用均须获得作者书面商业授权。

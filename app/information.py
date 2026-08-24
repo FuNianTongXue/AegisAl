@@ -61,6 +61,12 @@ class OfficialSourceBrand:
     image_hosts: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class FeaturedOpmlSourceBrand:
+    website: str
+    logo_url: str
+
+
 INFORMATION_RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 BUNDLED_OPML_PATH = INFORMATION_RESOURCE_DIR / "Chinese-Security-RSS.opml"
 WECHAT_RSS_HOST = "wechat2rss.xlab.app"
@@ -83,6 +89,33 @@ OFFICIAL_SOURCE_BRANDS = {
     "www.seebug.org": OfficialSourceBrand(
         logo_url="https://www.knownsec.com/static/favicon.ico",
         image_hosts=("knownsec.com",),
+    ),
+    "xlab.tencent.com": OfficialSourceBrand(
+        logo_url="https://xlab.tencent.com/cn/favicon.png?v=1.1",
+        image_hosts=("qpic.cn",),
+    ),
+}
+
+FEATURED_OPML_SOURCE_BRANDS = {
+    "腾讯安全应急响应中心": FeaturedOpmlSourceBrand(
+        website="https://security.tencent.com/",
+        logo_url="https://security.tencent.com/static/v2.0/images/favicon.ico",
+    ),
+    "阿里云应急响应": FeaturedOpmlSourceBrand(
+        website="https://help.aliyun.com/zh/acsg/emergency-response/",
+        logo_url="https://developer.aliyun.com/favicon.ico",
+    ),
+    "百度安全应急响应中心": FeaturedOpmlSourceBrand(
+        website="https://bsrc.baidu.com/",
+        logo_url="https://bsrc.baidu.com/statics/imgs/favicon.ico",
+    ),
+    "OPPO安全应急响应中心": FeaturedOpmlSourceBrand(
+        website="https://security.oppo.com/cn/",
+        logo_url="https://security.oppo.com/cn/favicon.ico",
+    ),
+    "小米安全中心": FeaturedOpmlSourceBrand(
+        website="https://trust.mi.com/zh-CN/misrc",
+        logo_url="https://trust.mi.com/favicon.png",
     ),
 }
 
@@ -116,83 +149,8 @@ CURATED_INFORMATION_SOURCES = (
         default_category="行业动态",
         website="https://www.freebuf.com/",
         region="国内",
-        source_image_url="https://www.freebuf.com/images/logo_b.png",
+        source_image_url="https://www.freebuf.com/favicon.ico",
         image_hosts=("image.3001.net",),
-    ),
-    InformationSourceDefinition(
-        id="aliyun_xz",
-        name="阿里云先知社区",
-        kind="rss",
-        url="https://xz.aliyun.com/feed",
-        default_category="攻击技术",
-        website="https://xz.aliyun.com/",
-        region="国内",
-        source_image_url="https://xz.aliyun.com/favicon.ico",
-        image_hosts=("alicdn.com",),
-    ),
-    InformationSourceDefinition(
-        id="tencent_security",
-        name="腾讯安全应急响应中心",
-        kind="rss",
-        url="https://security.tencent.com/index.php/feed/blog/0",
-        default_category="行业动态",
-        website="https://security.tencent.com/",
-        region="国内",
-        source_image_url="https://security.tencent.com/static/v2.0/images/favicon.ico",
-        image_hosts=("qpic.cn",),
-    ),
-    InformationSourceDefinition(
-        id="tencent_xlab",
-        name="腾讯玄武实验室",
-        kind="rss",
-        url="https://xlab.tencent.com/cn/feed/",
-        default_category="攻击技术",
-        website="https://xlab.tencent.com/cn/",
-        region="国内",
-        source_image_url="https://xlab.tencent.com/cn/favicon.png?v=1.1",
-        image_hosts=("qpic.cn",),
-    ),
-    InformationSourceDefinition(
-        id="microsoft_security",
-        name="Microsoft Security Blog",
-        kind="rss",
-        url="https://www.microsoft.com/en-us/security/blog/feed/",
-        default_category="行业动态",
-        website="https://www.microsoft.com/en-us/security/blog/",
-        region="国际",
-        source_image_url="https://www.microsoft.com/favicon.ico",
-        image_hosts=("microsoft.com",),
-    ),
-    InformationSourceDefinition(
-        id="talos",
-        name="Cisco Talos Intelligence",
-        kind="rss",
-        url="https://blog.talosintelligence.com/rss/",
-        default_category="攻击技术",
-        website="https://blog.talosintelligence.com/",
-        region="国际",
-        source_image_url="https://blog.talosintelligence.com/favicon.ico",
-        image_hosts=("storage.ghost.io",),
-    ),
-    InformationSourceDefinition(
-        id="portswigger_research",
-        name="PortSwigger Research",
-        kind="rss",
-        url="https://portswigger.net/research/rss",
-        default_category="攻击技术",
-        website="https://portswigger.net/research",
-        region="国际",
-        source_image_url="https://portswigger.net/content/images/logos/apple-touch-icon.png",
-    ),
-    InformationSourceDefinition(
-        id="sans_isc",
-        name="SANS Internet Storm Center",
-        kind="rss",
-        url="https://isc.sans.edu/rssfeed.xml",
-        default_category="攻击技术",
-        website="https://isc.sans.edu/",
-        region="国际",
-        source_image_url="https://isc.sans.edu/favicon-32x32.png",
     ),
 )
 
@@ -240,16 +198,26 @@ def load_bundled_opml_sources(path: Path = BUNDLED_OPML_PATH) -> tuple[Informati
             " ",
             html.unescape(str(node.attrib.get("title") or node.attrib.get("text") or "RSS 来源")),
         ).strip()[:120] or "RSS 来源"
+        featured_brand = FEATURED_OPML_SOURCE_BRANDS.get(title)
         website_candidate = html.unescape(str(node.attrib.get("htmlUrl") or "")).strip()
-        website = website_candidate if website_candidate.startswith(("http://", "https://")) else url
         host = (urlsplit(url).hostname or "").casefold()
         is_wechat = host == WECHAT_RSS_HOST
+        if featured_brand is not None:
+            website = featured_brand.website
+        elif is_wechat:
+            website = "https://mp.weixin.qq.com/"
+        elif website_candidate.startswith(("http://", "https://")):
+            website = website_candidate
+        else:
+            website = url
         website_host = (urlsplit(website).hostname or "").casefold()
         official_brand = OFFICIAL_SOURCE_BRANDS.get(website_host)
-        source_image_url = (
-            official_brand.logo_url
-            if official_brand is not None
-            else next(
+        if featured_brand is not None:
+            source_image_url = featured_brand.logo_url
+        elif official_brand is not None:
+            source_image_url = official_brand.logo_url
+        else:
+            source_image_url = next(
                 (
                     curated.source_image_url
                     for curated in CURATED_INFORMATION_SOURCES
@@ -263,7 +231,6 @@ def load_bundled_opml_sources(path: Path = BUNDLED_OPML_PATH) -> tuple[Informati
                 ),
                 urljoin(website, "/favicon.ico"),
             )
-        )
         image_hosts = (
             WECHAT_IMAGE_HOSTS
             if is_wechat
@@ -276,12 +243,12 @@ def load_bundled_opml_sources(path: Path = BUNDLED_OPML_PATH) -> tuple[Informati
                 name=title,
                 kind="rss",
                 url=url,
-                default_category="行业动态",
-                website="https://mp.weixin.qq.com/" if is_wechat else website,
+                default_category="漏洞披露" if featured_brand is not None else "行业动态",
+                website=website,
                 region="国内",
                 source_image_url=source_image_url,
                 image_hosts=image_hosts,
-                group="微信公众号" if is_wechat else "安全 RSS",
+                group="精选来源" if featured_brand is not None else ("微信公众号" if is_wechat else "安全 RSS"),
                 catalog="chinese-security-rss",
                 default_enabled=False,
                 refresh_interval_seconds=1_800 if is_wechat else 900,
@@ -811,7 +778,7 @@ def fetch_information_source(
 ) -> InformationFetchResult:
     headers = {
         "Accept": "application/json, application/atom+xml, application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.5",
-        "User-Agent": "SecFlow-Information/1.0 (+local defensive security intelligence client)",
+        "User-Agent": "AegisAl-Information/1.0 (+local defensive security intelligence client)",
     }
     if etag:
         headers["If-None-Match"] = etag
@@ -996,7 +963,7 @@ def _load_information_source_image(
     preferred_item: dict[str, Any] | None = None,
 ) -> InformationImageResult:
     with _information_source_logo_lock(source.id):
-        cached_source = _read_cached_information_source_logo(source.id)
+        cached_source = _read_cached_information_source_logo(source.id, source.source_image_url)
         if cached_source is not None:
             return cached_source
         retry_after = _information_source_logo_retry_after.get(source.id)
@@ -1008,17 +975,17 @@ def _load_information_source_image(
                 continue
             cached = _read_cached_information_image(image_url, "source")
             if cached is not None:
-                return _write_cached_information_source_logo(source.id, cached)
+                return _write_cached_information_source_logo(source.id, cached, source.source_image_url)
             try:
                 downloaded = _download_information_image(image_url, "source", source)
-                return _write_cached_information_source_logo(source.id, downloaded)
+                return _write_cached_information_source_logo(source.id, downloaded, source.source_image_url)
             except Exception:  # noqa: BLE001 - try the next known publisher mark.
                 continue
 
         for image_url in _discover_source_logo_candidates(source):
             try:
                 downloaded = _download_information_image(image_url, "source", source, allow_public=True)
-                return _write_cached_information_source_logo(source.id, downloaded)
+                return _write_cached_information_source_logo(source.id, downloaded, source.source_image_url)
             except Exception:  # noqa: BLE001 - malformed or unavailable website artwork is optional.
                 continue
 
@@ -1040,7 +1007,7 @@ def _download_information_image(
     timeout = httpx.Timeout(8.0, connect=4.0)
     headers = {
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) SecFlow-Information/1.0",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) AegisAl-Information/1.0",
     }
     image_host = (urlsplit(image_url).hostname or "").casefold()
     if source.group == "微信公众号" or any(
@@ -1070,7 +1037,34 @@ def _download_information_image(
     data = b"".join(chunks)
     if not data:
         raise ValueError("远端图片为空")
+    if not _looks_like_information_image(data, content_type):
+        raise ValueError("远端响应的内容不是有效图片")
     return _write_cached_information_image(image_url, data, content_type, kind)
+
+
+def _looks_like_information_image(data: bytes, content_type: str) -> bool:
+    """Reject HTML/error payloads served with a misleading image content type."""
+    normalized_type = content_type.casefold()
+    if normalized_type in {"image/x-icon", "image/vnd.microsoft.icon"}:
+        return data.startswith((b"\x00\x00\x01\x00", b"\x00\x00\x02\x00"))
+    if normalized_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if normalized_type in {"image/jpeg", "image/jpg", "image/pjpeg"}:
+        return data.startswith(b"\xff\xd8\xff")
+    if normalized_type == "image/gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if normalized_type == "image/webp":
+        return len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    if normalized_type in {"image/avif", "image/heif", "image/heic"}:
+        return len(data) >= 12 and data[4:8] == b"ftyp"
+    if normalized_type == "image/bmp":
+        return data.startswith(b"BM")
+    if normalized_type in {"image/tiff", "image/tif"}:
+        return data.startswith((b"II*\x00", b"MM\x00*"))
+    if normalized_type == "image/svg+xml":
+        prefix = data[:4_096].lstrip().casefold()
+        return prefix.startswith(b"<svg") or (prefix.startswith(b"<?xml") and b"<svg" in prefix)
+    return False
 
 
 def _image_url_allowed(value: str, source: InformationSourceDefinition) -> bool:
@@ -1099,8 +1093,8 @@ def _information_source_logo_lock(source_id: str) -> Lock:
         return _information_source_logo_locks.setdefault(source_id, Lock())
 
 
-def _source_logo_cache_paths(source_id: str) -> tuple[Path, Path, str]:
-    digest = hashlib.sha256(source_id.encode("utf-8")).hexdigest()
+def _source_logo_cache_paths(source_id: str, cache_version: str = "") -> tuple[Path, Path, str]:
+    digest = hashlib.sha256(f"{source_id}\0{cache_version}".encode("utf-8")).hexdigest()
     return (
         INFORMATION_SOURCE_LOGO_CACHE_DIR / f"{digest}.bin",
         INFORMATION_SOURCE_LOGO_CACHE_DIR / f"{digest}.mime",
@@ -1108,8 +1102,8 @@ def _source_logo_cache_paths(source_id: str) -> tuple[Path, Path, str]:
     )
 
 
-def _read_cached_information_source_logo(source_id: str) -> InformationImageResult | None:
-    data_path, mime_path, digest = _source_logo_cache_paths(source_id)
+def _read_cached_information_source_logo(source_id: str, cache_version: str = "") -> InformationImageResult | None:
+    data_path, mime_path, digest = _source_logo_cache_paths(source_id, cache_version)
     try:
         data = data_path.read_bytes()
         content_type = mime_path.read_text(encoding="ascii").strip()
@@ -1123,8 +1117,9 @@ def _read_cached_information_source_logo(source_id: str) -> InformationImageResu
 def _write_cached_information_source_logo(
     source_id: str,
     result: InformationImageResult,
+    cache_version: str = "",
 ) -> InformationImageResult:
-    data_path, mime_path, digest = _source_logo_cache_paths(source_id)
+    data_path, mime_path, digest = _source_logo_cache_paths(source_id, cache_version)
     with _information_image_cache_lock:
         INFORMATION_SOURCE_LOGO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         data_tmp = data_path.with_name(f"{data_path.name}.tmp")
@@ -1374,6 +1369,7 @@ def _project_information_item(item: dict[str, Any]) -> dict[str, Any]:
             "url",
             "image_url",
             "source_image_url",
+            "source_image_version",
             "image_checked_at",
             "published_at",
             "author",
@@ -1423,6 +1419,9 @@ def _build_snapshot(
             source_id,
             source.source_image_url if source is not None else "",
         )
+        item["source_image_version"] = hashlib.sha256(
+            str(item["source_image_url"]).encode("utf-8")
+        ).hexdigest()[:12]
     all_items.sort(key=lambda item: (str(item.get("published_at") or ""), str(item.get("id") or "")), reverse=True)
     counts = {name: 0 for name in CATEGORY_ORDER}
     counts["全部"] = len(all_items)
@@ -1538,7 +1537,7 @@ def _discover_source_logo_candidates(source: InformationSourceDefinition) -> lis
     timeout = httpx.Timeout(5.0, connect=3.0)
     headers = {
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.4",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) SecFlow-Information/1.0",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) AegisAl-Information/1.0",
     }
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers, trust_env=False) as client:
@@ -1657,6 +1656,7 @@ def _source_statuses(info: dict[str, Any]) -> dict[str, dict[str, Any]]:
             region=source.region,
             group=source.group,
             catalog=source.catalog,
+            source_image_version=hashlib.sha256(source.source_image_url.encode("utf-8")).hexdigest()[:12],
             secure_transport=urlsplit(source.url).scheme.casefold() == "https",
             enabled=enabled,
             status=str(status.get("status") or "idle"),
@@ -1752,7 +1752,7 @@ def enrich_information_images(
     )
     headers = {
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) SecFlow-Information/1.0",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) AegisAl-Information/1.0",
     }
     workers = min(8, len(candidates))
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers, trust_env=False) as client:

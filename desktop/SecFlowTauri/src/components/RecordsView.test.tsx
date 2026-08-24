@@ -78,17 +78,19 @@ describe("RecordsView", () => {
     expect(screen.getByText("远程攻击者可绕过证书验证。")).toBeInTheDocument();
     expect(screen.queryByText("Remote validation bypass in OpenSSL")).not.toBeInTheDocument();
     expect(screen.queryByText("A remote attacker can bypass certificate validation.")).not.toBeInTheDocument();
-    expect(api.dashboard).toHaveBeenCalledWith("zh-Hans");
+    expect(api.dashboard).toHaveBeenCalledWith("zh-Hans", false);
   });
 
-  it("hides translation implementation labels and pending mixed-language prose", async () => {
+  it("hides translation implementation labels and shows source facts while translation is pending", async () => {
     vi.spyOn(api, "dashboard").mockResolvedValue({
       records: [{
         id: "CVE-2026-76008",
-        title: "远程 URI 参数 Parsing vulnerability",
-        summary: "远程攻击者可以 trigger 基于堆栈的缓冲区溢出。",
+        title: "Remote URI parsing vulnerability",
+        title_original: "Remote URI parsing vulnerability",
+        summary: "A remote attacker can trigger a stack-based buffer overflow.",
+        summary_original: "A remote attacker can trigger a stack-based buffer overflow.",
         severity: "high",
-        content_language: "unknown",
+        content_language: "en",
         translation_status: "pending",
       }],
       stats: { total: 1, high: 1 },
@@ -100,12 +102,11 @@ describe("RecordsView", () => {
 
     render(<RecordsView />);
 
-    expect(await screen.findByText("漏洞内容准备中")).toBeInTheDocument();
-    expect(screen.getByText("暂无漏洞描述")).toBeInTheDocument();
+    expect(await screen.findByText("Remote URI parsing vulnerability")).toBeInTheDocument();
+    expect(screen.getByText("A remote attacker can trigger a stack-based buffer overflow.")).toBeInTheDocument();
     expect(screen.queryByText(/离线译文/)).not.toBeInTheDocument();
     expect(screen.queryByText("简体中文")).not.toBeInTheDocument();
-    expect(screen.queryByText("远程 URI 参数 Parsing vulnerability")).not.toBeInTheDocument();
-    expect(screen.queryByText("远程攻击者可以 trigger 基于堆栈的缓冲区溢出。")).not.toBeInTheDocument();
+    expect(screen.queryByText("漏洞内容准备中")).not.toBeInTheDocument();
   });
 
   it("searches the full catalog by CVE and opens public website details", async () => {
@@ -132,7 +133,7 @@ describe("RecordsView", () => {
     render(<RecordsView />);
     fireEvent.change(screen.getByRole("textbox", { name: "搜索漏洞记录" }), { target: { value: "CVE-2026-98765" } });
 
-    await waitFor(() => expect(search).toHaveBeenCalledWith("zh-Hans", "CVE-2026-98765"));
+    await waitFor(() => expect(search).toHaveBeenCalledWith("zh-Hans", "CVE-2026-98765", expect.any(AbortSignal)));
     expect(await screen.findByRole("heading", { name: "CVE-2026-98765" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "CVE-2026-0001" })).not.toBeInTheDocument();
 
@@ -177,6 +178,6 @@ describe("RecordsView", () => {
     expect(await screen.findByText("Original OpenSSL vulnerability title")).toBeInTheDocument();
     expect(screen.getByText("Original OpenSSL vulnerability description.")).toBeInTheDocument();
     expect(screen.queryByText("中文漏洞标题")).not.toBeInTheDocument();
-    expect(api.dashboard).toHaveBeenCalledWith("en");
+    expect(api.dashboard).toHaveBeenCalledWith("en", false);
   });
 });

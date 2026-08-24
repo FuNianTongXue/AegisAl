@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.collectors import collector_graph, collector_service
+from app.collectors import _nvd_record, collector_graph, collector_service
 from app.storage import StateStore, default_state
 
 
@@ -95,6 +95,26 @@ class CollectorGraphTests(unittest.TestCase):
         self.assertEqual(result["years"], [2026, 2025])
         self.assertEqual(result["fetched"], 1)
         self.assertEqual(len(result["errors"]), 1)
+
+    def test_nvd_title_is_truncated_at_a_complete_word_boundary(self) -> None:
+        prefix = "A vulnerability description with enough context " * 4
+        summary = f"{prefix}candidate should remain a complete word after truncation."
+        record = _nvd_record(
+            {
+                "id": "CVE-2026-9001",
+                "vulnStatus": "Analyzed",
+                "descriptions": [{"lang": "en", "value": summary}],
+            },
+            {"collection_name": "cve"},
+            None,
+        )
+
+        self.assertIsNotNone(record)
+        title = str(record["title"])
+        self.assertLessEqual(len(title), 160)
+        self.assertTrue(summary.startswith(title))
+        self.assertRegex(title, r"[A-Za-z.]$")
+        self.assertFalse(summary[len(title) :].startswith(tuple("abcdefghijklmnopqrstuvwxyz")))
 
 
 if __name__ == "__main__":

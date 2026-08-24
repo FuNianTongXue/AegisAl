@@ -13,9 +13,9 @@ from langgraph.types import Command, interrupt
 from app.agent.assistant_intent import assistant_intent_skill_metadata
 from app.agent.translation_policy import (
     catalog_translation_status_is_complete,
+    issue_host_localization_attestation,
     issue_stored_translation_attestation,
 )
-from app.catalog_snapshot import component_catalog_snapshot_store
 from app.composition import invoke_generation_pinned_graph
 from app.intelligence import intelligence_service
 from app.langgraph.checkpoints import (
@@ -32,12 +32,13 @@ from app.storage import now_iso
 from app.trace_ui import tool_call_presentation
 
 _CJK_TEXT = re.compile(r"[一-鿿]")  # CJK Unified Ideographs (一-鿿)
-_CATALOG_PREVIEW_RECORD_LIMIT = 8
+_CATALOG_PREVIEW_RECORD_LIMIT = 200
 
 
 class ComponentCatalogState(TypedDict, total=False):
     plugin_state: dict[str, Any]
     question: str
+    top_k: int
     user_id: str
     session_id: str
     response_language: str
@@ -45,7 +46,6 @@ class ComponentCatalogState(TypedDict, total=False):
     filters: dict[str, list[str]]
     intent_plan: dict[str, Any]
     catalog_result: dict[str, Any]
-    catalog_snapshot_id: str
     chart_data: dict[str, Any]
     artifacts: list[dict[str, Any]]
     cancelled: bool
@@ -77,7 +77,6 @@ class ComponentVulnerabilityCatalogSubgraph:
             "filters": dict(payload.get("filters") or {}),
             "intent_plan": dict(payload.get("intent_plan") or {}),
             "catalog_result": {},
-            "catalog_snapshot_id": "",
             "chart_data": {},
             "artifacts": [],
             "cancelled": False,
@@ -228,6 +227,10 @@ class ComponentVulnerabilityCatalogSubgraph:
     def _query_catalog(state: ComponentCatalogState) -> ComponentCatalogState:
         date_filter = state.get("date_filter") or {}
         filters = state.get("filters") or {}
+        # Catalog questions return a table, so the generic semantic-search
+        # ``top_k`` must not collapse the customer-visible dataset to 5-8 rows.
+        # Keep this aligned with the editable table API's 200-row contract.
+        preview_limit = _CATALOG_PREVIEW_RECORD_LIMIT
         try:
             result = intelligence_service.query_component_vulnerability_catalog(
                 str(date_filter.get("start_date") or ""),
@@ -235,16 +238,19 @@ class ComponentVulnerabilityCatalogSubgraph:
                 ecosystems=list(filters.get("ecosystems") or []),
                 severities=list(filters.get("severities") or []),
                 component_names=list(filters.get("component_names") or []),
-                include_realtime=True,
+                include_realtime=False,
+                limit=preview_limit,
                 response_language=str(state.get("response_language") or "zh-Hans"),
             )
             state["summary"] = _catalog_summary(result, str(state.get("response_language") or "zh-Hans"))
             records = [dict(record) for record in result.get("records") or [] if isinstance(record, dict)]
+            result["preview_pending_translations"] = sum(
+                1
+                for record in records
+                if str(record.get("summary") or "").strip()
+                and not _CJK_TEXT.search(str(record.get("summary") or ""))
+            )
             if len(records) > _CATALOG_PREVIEW_RECORD_LIMIT:
-                state["catalog_snapshot_id"] = component_catalog_snapshot_store.save(
-                    records,
-                    result_sha256=str(result.get("result_sha256") or ""),
-                )
                 result = {
                     **result,
                     "records": records[:_CATALOG_PREVIEW_RECORD_LIMIT],
@@ -315,7 +321,7 @@ class ComponentVulnerabilityCatalogSubgraph:
                 "detail": (
                     f"时间范围 {result.get('start_date')} 至 {result.get('end_date')}，"
                     f"共 {int(result.get('total') or 0)} 条漏洞、{int(result.get('component_count') or 0)} 个组件。"
-                    "确认后 Excel MCP 将使用当前固定结果生成工作簿，不会重新查询。"
+                    "确认后 Excel MCP 将按相同筛选条件流式读取本地加密目录，并校验结果数量后生成工作簿。"
                 ),
                 "options": ["confirm", "cancel"],
             }
@@ -328,26 +334,16 @@ class ComponentVulnerabilityCatalogSubgraph:
     @staticmethod
     def _generate_excel(state: ComponentCatalogState) -> ComponentCatalogState:
         result = state.get("catalog_result") or {}
-        try:
-            records = _fixed_catalog_records(state)
-        except (KeyError, OSError, ValueError):
-            state["error"] = "组件漏洞固定结果已过期，请重新执行查询后再生成 Excel。"
-            return _trace(state, "component_catalog.snapshot", state["error"], "warning")
-        # Translation is an ingestion concern. Export consumes the immutable
-        # catalog snapshot while the local offline worker backfills pending rows.
+        # Translation is an ingestion concern. The export worker only reuses
+        # persisted translations and never fans out report-time model calls.
         if str(state.get("response_language") or "").lower().startswith("zh"):
-            pending_translations = sum(
-                1
-                for record in records
-                if str(record.get("summary") or "").strip()
-                and not _CJK_TEXT.search(str(record.get("summary") or ""))
-            )
+            pending_translations = int(result.get("preview_pending_translations") or 0)
             if pending_translations:
                 _trace(
                     state,
                     "component_catalog.translation_cache",
                     (
-                        f"已直接复用情报库译文；{pending_translations} 条描述仍在后台补译，"
+                        f"已直接复用情报库译文；当前预览中 {pending_translations} 条描述仍在后台补译，"
                         "本次 Excel 保留核验原文，未重复执行离线翻译。"
                     ),
                     "warning",
@@ -364,17 +360,19 @@ class ComponentVulnerabilityCatalogSubgraph:
                 agent_id="component_agent",
                 tool_id="mcp__excel__export_component_vulnerability_catalog",
                 arguments={
-                    "records": records,
                     "start_date": str(result.get("start_date") or ""),
                     "end_date": str(result.get("end_date") or ""),
                     "filters": dict(result.get("filters") or {}),
+                    "response_language": str(state.get("response_language") or "zh-Hans"),
+                    "expected_total": int(result.get("total") or 0),
+                    "expected_result_sha256": str(result.get("result_sha256") or ""),
                     "generated_at": generated_at,
                 },
             )
             artifact = publish_mcp_workbook(
                 mcp_result,
                 kind="component",
-                default_file_name="SecFlow-component-vulnerabilities.xlsx",
+                default_file_name="AegisAl-component-vulnerabilities.xlsx",
                 generated_at=generated_at,
                 user_id=str(state.get("user_id") or "default"),
                 session_id=str(state.get("session_id") or ""),
@@ -390,7 +388,7 @@ class ComponentVulnerabilityCatalogSubgraph:
                     "export_component_vulnerability_catalog",
                     state="completed",
                     title="Excel MCP",
-                    input_summary={"record_count": len(records)},
+                    input_summary={"record_count": int(result.get("total") or 0)},
                     output={"artifact_id": artifact.get("id"), "sha256": artifact.get("sha256")},
                 ),
             )
@@ -453,6 +451,15 @@ class ComponentVulnerabilityCatalogSubgraph:
             }
         status = "interrupted" if envelope else ("cancelled" if state.get("cancelled") else ("failed" if state.get("error") else "completed"))
         result = dict(state.get("catalog_result") or {})
+        records_payload = public_answer_payload(
+            {
+                "records": [
+                    dict(record)
+                    for record in result.get("records") or []
+                    if isinstance(record, dict)
+                ]
+            }
+        )
         return {
             "status": status,
             "thread_id": thread_id,
@@ -470,6 +477,8 @@ class ComponentVulnerabilityCatalogSubgraph:
                 "结果指纹": str(result.get("result_sha256") or ""),
                 "语义规划器": str((state.get("intent_plan") or {}).get("planner") or "validated"),
             },
+            "records": list(records_payload.get("records") or []),
+            "total": int(result.get("total") or 0),
             "chart_data": dict(state.get("chart_data") or {}),
             "artifacts": list(state.get("artifacts") or []),
             "catalog_translation": dict(result.get("catalog_translation") or {}),
@@ -484,6 +493,12 @@ def component_catalog_outcome_answer(outcome: dict[str, Any]) -> dict[str, Any]:
         "mode": "component_vulnerability_catalog",
         "summary": str(outcome.get("summary") or (outcome.get("interrupt") or {}).get("question") or "组件漏洞目录等待确认。"),
         "fields": dict(outcome.get("fields") or {}),
+        "records": [
+            dict(record)
+            for record in outcome.get("records") or []
+            if isinstance(record, dict)
+        ],
+        "total": int(outcome.get("total") or 0),
         "vulnerability_card": {},
         "knowledge_graph": {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0},
         "chart_data": dict(outcome.get("chart_data") or {}),
@@ -504,7 +519,25 @@ def component_catalog_outcome_answer(outcome: dict[str, Any]) -> dict[str, Any]:
             record_count=record_count,
             source="component-vulnerability-catalog",
         )
+    elif _host_localized_catalog_preview_is_publishable(outcome, answer, language):
+        answer["translation"] = issue_host_localization_attestation(
+            answer,
+            target_language=language,
+            source="component-catalog-preview",
+        )
     return answer
+
+
+def _host_localized_catalog_preview_is_publishable(
+    outcome: dict[str, Any],
+    answer: dict[str, Any],
+    language: str,
+) -> bool:
+    normalized = str(language or "").strip().lower().replace("_", "-")
+    if normalized not in {"zh", "zh-cn", "zh-sg", "zh-hans"} or outcome.get("error"):
+        return False
+    summary = str(answer.get("summary") or "").strip()
+    return bool(summary and _CJK_TEXT.search(summary) and not answer.get("records"))
 
 
 def _catalog_summary(result: dict[str, Any], language: str = "zh-Hans") -> str:
@@ -557,17 +590,6 @@ def _catalog_chart_data(result: dict[str, Any], sankey: dict[str, Any], language
             for key, value in list(ecosystems.items())[:12]
         ],
     }
-
-
-def _fixed_catalog_records(state: ComponentCatalogState) -> list[dict[str, Any]]:
-    result = state.get("catalog_result") or {}
-    snapshot_id = str(state.get("catalog_snapshot_id") or "").strip()
-    if snapshot_id:
-        return component_catalog_snapshot_store.load(
-            snapshot_id,
-            expected_sha256=str(result.get("result_sha256") or ""),
-        )
-    return [dict(record) for record in result.get("records") or [] if isinstance(record, dict)]
 
 
 def _catalog_severity_label(value: Any, language: str) -> str:

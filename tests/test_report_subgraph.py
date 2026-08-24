@@ -633,12 +633,12 @@ class ReportSubgraphTests(unittest.TestCase):
         self.assertEqual(failed["report"], {})
         self.assertEqual(store.list_reports(), [])
 
-    def test_unresolved_translation_blocks_report_generation(self) -> None:
+    def test_unresolved_translation_falls_back_and_report_generation_continues(self) -> None:
         def unresolved_translation(payload, **_kwargs):
             return TranslationAgentResult(
                 payload=payload,
                 audit={
-                    "server": "SecFlow Translation MCP",
+                    "server": "AegisAl Translation MCP",
                     "tool": "translate_json_payload",
                     "status": "partial",
                     "translation_status": "fallback",
@@ -654,7 +654,7 @@ class ReportSubgraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "app.report_subgraph.translation_agent.translate_json",
             side_effect=unresolved_translation,
-        ):
+        ) as translate_mock:
             store = ReportStore(Path(temp_dir) / "reports")
             graph = ReportCapabilitySubgraph()
             started = graph.start(
@@ -672,18 +672,26 @@ class ReportSubgraphTests(unittest.TestCase):
                     "report_store_root": str(store.root),
                 }
             )
-            failed = graph.resume(
+            generated = graph.resume(
                 started["thread_id"],
                 decision="confirm",
                 user_id="analyst",
                 session_id="session-translation-failure",
             )
+            saved_reports = store.list_reports()
 
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["report"], {})
-        self.assertIn("翻译 MCP", failed["error"])
-        self.assertIn("报告未生成", failed["error"])
-        self.assertEqual(store.list_reports(), [])
+        translate_mock.assert_called_once()
+        self.assertEqual(generated["status"], "interrupted")
+        self.assertEqual(generated["interrupt"]["kind"], "report_download_confirmation")
+        self.assertTrue(generated["report"])
+        self.assertEqual(generated["report_translation"]["translation_status"], "fallback")
+        self.assertEqual(generated["report_translation"]["fallback_source"], "verified_scan_json")
+        self.assertTrue(generated["report_translation"]["fallback_used"])
+        self.assertTrue(any(
+            item["node"] == "report.translation_agent" and item["status"] == "warning"
+            for item in generated["trace"]
+        ))
+        self.assertEqual(len(saved_reports), 1)
 
     def test_mermaid_image_failure_never_falls_back_to_raw_relationship_state(self) -> None:
         def call_or_fail(**kwargs):

@@ -41,9 +41,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CLIENT_LANGUAGES, clientLocaleTag, type ClientLocale, translate, useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { configForProvider, providerPresets, selectedProviderId } from "../lib/modelControls";
+import { configForProvider, normalizedReasoningEffort, providerPresets, selectedProviderId } from "../lib/modelControls";
 import { handleWindowDrag } from "../lib/windowDrag";
 import { useAppStore } from "../store/appStore";
+import { BRAND_NAME_ZH, brandDisplayText } from "../branding";
 import type { ClientCapabilityCatalog, InformationSnapshot, InformationSource, LlmConfig, ModelUsageSnapshot, UserProfile } from "../types";
 import { ModelProviderPicker } from "./ModelProviderPicker";
 import { ModelSelectControl } from "./ModelSelectControl";
@@ -325,7 +326,7 @@ function ProfileSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) =>
           <label>{t("客户端语言")}<select aria-label={t("客户端语言")} name="language" autoComplete="off" value={locale} onChange={(event) => void changeLanguage(event.target.value as ClientLocale)}>{CLIENT_LANGUAGES.map((language) => <option value={language.value} key={language.value}>{language.label}</option>)}</select></label>
           <label className="wide">{t("个人简介")}<textarea maxLength={200} rows={3} name="bio" autoComplete="off" value={profile.bio || ""} onChange={(event) => field("bio", event.target.value)} /></label>
         </div>
-        <div className="settings-actions"><span aria-live="polite">{status}</span><button className="primary" type="submit" disabled={locked || busy || avatarBusy}>{busy ? <LoaderCircle className="spin" /> : status === t("已保存") ? <Check size={14} /> : <Save size={14} />}{busy ? t("正在保存") : t("保存资料并锁定")}</button></div>
+        <div className="settings-actions"><span aria-live="polite">{brandDisplayText(status)}</span><button className="primary" type="submit" disabled={locked || busy || avatarBusy}>{busy ? <LoaderCircle className="spin" /> : status === t("已保存") ? <Check size={14} /> : <Save size={14} />}{busy ? t("正在保存") : t("保存资料并锁定")}</button></div>
       </form>
       </fieldset>
     </section>
@@ -349,34 +350,74 @@ function ModelSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => v
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(true);
+  const [dirty, setDirty] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [activePanel, setActivePanel] = useState<"provider" | "model" | "credential" | "advanced">("provider");
   useEffect(() => {
     if (!state.llm) return;
     setConfig(state.llm);
+    setDirty(false);
     onDirtyChange(false);
   }, [onDirtyChange, state.llm]);
   const update = (key: keyof LlmConfig, value: string | number | boolean) => {
-    setConfig((current) => ({ ...current, [key]: value }));
+    setConfig((current) => ({ ...current, [key]: value, ...(key === "api_key" ? { clear_api_key: false } : {}) }));
+    setDirty(true);
     onDirtyChange(true);
     if (key === "model" || key === "endpoint" || key === "api_key") setStatus("");
   };
   const loadModels = async () => { setBusy(true); setStatus("正在从模型厂商接口读取模型"); try { const result = await api.modelCatalog(state.userId, config); setModels(result.models || []); setStatus(`已读取 ${result.models?.length || 0} 个模型`); } catch (error) { setStatus(String(error)); } finally { setBusy(false); } };
   const test = async (targetConfig = config) => { setBusy(true); try { const result = await api.testLlmConfig(state.userId, targetConfig); if (result.status !== "success" || result.configured === false) throw new Error(result.message || "模型连接测试失败"); setStatus(result.latency_ms ? `模型连接正常 · ${result.latency_ms}ms` : "模型连接正常"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
-  const save = async () => { setBusy(true); setStatus("正在验证模型连接"); try { const nextConfig = { ...config, enabled: config.enabled !== false }; await api.testLlmConfig(state.userId, nextConfig); const result = await api.saveLlmConfig(state.userId, nextConfig); state.set({ llm: result }); setConfig(result); setLocked(true); setShowKey(false); onDirtyChange(false); setStatus(result.enabled ? "模型配置已验证、保存并启用" : "模型配置已验证、保存并停用"); } catch (error) { setStatus(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
+  const save = async () => {
+    setBusy(true);
+    setStatus("正在保存模型配置");
+    try {
+      const nextConfig = {
+        ...config,
+        enabled: config.enabled !== false,
+        reasoning_effort: normalizedReasoningEffort(config, config.reasoning_effort),
+      };
+      const result = await api.saveLlmConfig(state.userId, nextConfig);
+      state.set({ llm: result });
+      setConfig(result);
+      setDirty(false);
+      setLocked(true);
+      setShowKey(false);
+      onDirtyChange(false);
+      setStatus(result.enabled ? "模型配置已保存并启用" : "模型配置已保存并停用");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
   const handleLockAction = () => {
     if (locked) {
       setLocked(false);
       setStatus("");
       return;
     }
+    if (!dirty) {
+      setLocked(true);
+      setShowKey(false);
+      setStatus("");
+      onDirtyChange(false);
+      return;
+    }
     void save();
   };
   const chooseProvider = (provider: string) => {
     setConfig((current) => configForProvider(current, provider));
+    setDirty(true);
     onDirtyChange(true);
     setModels([]);
     setStatus("");
+  };
+  const clearApiKey = () => {
+    setConfig((current) => ({ ...current, api_key: "", api_key_configured: false, clear_api_key: true }));
+    setDirty(true);
+    onDirtyChange(true);
+    setShowKey(false);
+    setStatus("保存后将清除已配置的 API Key");
   };
   const selectedProvider = selectedProviderId(config);
   const preset = providerPresets.find((item) => item.id === selectedProvider);
@@ -397,7 +438,7 @@ function ModelSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => v
       <SettingsHeader
         title="模型设置"
         description={t("推理模型仅用于安全分析与内容生成；漏洞翻译由本机离线能力完成，不依赖模型配置，也不计入 Token 用量。")}
-        action={<div className="model-settings-header-actions"><button className={`settings-icon-button ${locked ? "locked" : "unlocked"}`} aria-label={locked ? "解锁模型配置" : "保存并锁定模型配置"} title={locked ? "解锁后编辑模型配置" : config.enabled !== false ? "保存并启用，然后锁定" : "保存并停用，然后锁定"} onClick={handleLockAction} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : locked ? <Lock /> : <LockOpen />}</button><button className="settings-icon-button" aria-label="刷新模型列表" title="刷新模型列表" onClick={() => void loadModels()} disabled={locked || busy}><RefreshCcw /></button></div>}
+        action={<div className="model-settings-header-actions"><button type="button" className={`settings-icon-button ${locked ? "locked" : "unlocked"}`} aria-label={locked ? "解锁模型配置" : dirty ? "保存并锁定模型配置" : "锁定模型配置"} title={locked ? "解锁后编辑模型配置" : dirty ? config.enabled !== false ? "保存并启用，然后锁定" : "保存并停用，然后锁定" : "锁定模型配置"} onClick={handleLockAction} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : locked ? <Lock /> : <LockOpen />}</button><button type="button" className="settings-icon-button" aria-label="刷新模型列表" title="刷新模型列表" onClick={() => void loadModels()} disabled={locked || busy}><RefreshCcw /></button></div>}
       />
       <div className={`model-settings-card model-transition-card ${locked ? "locked" : ""}`} aria-readonly={locked}>
         <nav className="model-settings-tabs" aria-label="模型配置步骤">
@@ -428,7 +469,7 @@ function ModelSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => v
                 <div className="model-panel-heading"><div><KeyRound /><span><strong>验证接入凭证</strong><small>密钥仅保存在本机安全存储，不会显示完整内容。</small></span></div><button type="button" className="credential-test-button" onClick={() => void test()} disabled={busy}><TestTube2 size={14} />测试连接</button></div>
                 <div className="provider-fields-grid">
                   <label className="provider-field" htmlFor="model-endpoint">Base URL<input id="model-endpoint" name="model_endpoint" type="url" inputMode="url" autoComplete="off" spellCheck={false} value={config.endpoint || ""} placeholder="例如 https://api.example.com/v1…" onChange={(event) => update("endpoint", event.target.value)} /></label>
-                  <div className="provider-field provider-key-field"><label htmlFor="model-api-key">API Key</label><div><input id="model-api-key" name="model_api_key" type={showKey ? "text" : "password"} autoComplete="off" spellCheck={false} value={config.api_key || ""} placeholder={config.api_key_configured ? "已配置，留空保持不变…" : "输入模型厂商 API Key…"} onChange={(event) => update("api_key", event.target.value)} /><button type="button" aria-label={showKey ? "隐藏 API Key" : "显示 API Key"} title={showKey ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></div>
+                  <div className="provider-field provider-key-field"><label htmlFor="model-api-key">API Key</label><div><input id="model-api-key" name="model_api_key" type={showKey ? "text" : "password"} maxLength={8192} autoComplete="off" spellCheck={false} value={config.api_key || ""} placeholder={config.clear_api_key ? "保存后移除当前密钥…" : config.api_key_configured ? "已配置，留空保持不变…" : "输入模型厂商 API Key…"} onChange={(event) => update("api_key", event.target.value)} />{config.api_key_configured && !config.clear_api_key ? <button type="button" aria-label="清除已保存的 API Key" title="清除已保存的 API Key" onClick={clearApiKey}><Trash2 size={15} /></button> : null}<button type="button" aria-label={showKey ? "隐藏 API Key" : "显示 API Key"} title={showKey ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></div>
                 </div>
               </div>
             ) : null}
@@ -446,7 +487,7 @@ function ModelSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => v
         </fieldset>
         <footer className="model-transition-footer">
           <button type="button" className="ghost" onClick={() => movePanel(-1)} disabled={panelIndex === 0}><ArrowLeft />上一步</button>
-          <span aria-live="polite">{status || (locked ? "配置已锁定，点击右上角锁形按钮后编辑" : "修改完成后点击右上角开锁按钮保存")}</span>
+          <span aria-live="polite">{brandDisplayText(status) || (locked ? "配置已锁定，点击右上角锁形按钮后编辑" : "修改完成后点击右上角开锁按钮保存")}</span>
           <button type="button" className="secondary" onClick={() => movePanel(1)} disabled={panelIndex === panels.length - 1}>下一步<ArrowRight /></button>
         </footer>
       </div>
@@ -457,6 +498,21 @@ function ModelSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => v
 function AppearanceSettings() {
   const state = useAppStore();
   const { t } = useI18n();
+  const emojiSaveVersion = useRef(0);
+  const emojiMode = state.settings?.preferences.emoji_mode || "moderate";
+  const persistEmojiMode = (value: "off" | "moderate" | "active") => {
+    if (!state.settings) return;
+    const requestVersion = ++emojiSaveVersion.current;
+    const preferences = { ...state.settings.preferences, emoji_mode: value };
+    state.set({ settings: { ...state.settings, preferences } });
+    void api.savePreferences(preferences).then((savedPreferences) => {
+      if (requestVersion !== emojiSaveVersion.current) return;
+      const latest = useAppStore.getState().settings;
+      if (latest) state.set({ settings: { ...latest, preferences: savedPreferences } });
+    }).catch(() => {
+      // Keep the optimistic selection visible when an older bundled backend does not know this field yet.
+    });
+  };
   const persistAppearance = (theme: "light" | "dark" | "system", fontScale: number) => {
     state.set({ theme, fontScale });
     if (!state.settings) return;
@@ -473,7 +529,7 @@ function AppearanceSettings() {
   ];
   return (
     <section>
-      <SettingsHeader title="外观" description="调整安全智脑的主题与界面密度。" />
+      <SettingsHeader title="外观" description={`调整${BRAND_NAME_ZH}的主题与界面密度。`} />
       {themes.map((theme) => (
         <label className={`appearance-setting ${state.theme === theme.id ? "selected" : ""}`} key={theme.id}>
           <span className={`setting-icon ${theme.iconClass}`}>{theme.icon}</span>
@@ -482,6 +538,7 @@ function AppearanceSettings() {
         </label>
       ))}
       <div className="font-scale-setting"><div><Type size={18} /><strong>字体大小</strong></div><div className="font-segments" role="group" aria-label="字体大小">{[[0.9,"小"],[1,"标准"],[1.12,"大"]].map(([value,label]) => <button key={String(value)} aria-pressed={state.fontScale === value} className={state.fontScale === value ? "active" : ""} onClick={() => persistAppearance(state.theme, Number(value))}>{label}</button>)}</div></div>
+      <div className="font-scale-setting"><div><Sparkles size={18} /><strong>表情符号</strong></div><div className="font-segments" role="group" aria-label="表情符号"><button aria-pressed={emojiMode === "off"} className={emojiMode === "off" ? "active" : ""} onClick={() => persistEmojiMode("off")}>关闭</button><button aria-pressed={emojiMode === "moderate"} className={emojiMode === "moderate" ? "active" : ""} onClick={() => persistEmojiMode("moderate")}>适度</button><button aria-pressed={emojiMode === "active"} className={emojiMode === "active" ? "active" : ""} onClick={() => persistEmojiMode("active")}>活泼</button></div></div>
     </section>
   );
 }
@@ -514,7 +571,7 @@ function IntelligenceSourceSettings() {
         <strong>{storedCount === undefined ? "--" : new Intl.NumberFormat(clientLocaleTag(locale)).format(storedCount)}</strong>
         <b>{t("条已存储数据")}</b>
       </div>
-      {error ? <p className="capability-error">{error}</p> : null}
+      {error ? <p className="capability-error">{brandDisplayText(error)}</p> : null}
     </section>
   );
 }
@@ -548,9 +605,60 @@ function InformationSubscriptionSettings() {
   const filtered = useMemo(() => { const keyword = query.trim().toLocaleLowerCase(); return sources.filter((source) => { if (enabledOnly && !source.enabled) return false; if (group !== "全部分组" && (source.group || "其他") !== group) return false; return !keyword || `${source.name} ${source.group || ""} ${source.region || ""}`.toLocaleLowerCase().includes(keyword); }); }, [enabledOnly, group, query, sources]);
   const replaceSource = (next: InformationSource) => setSnapshot((current) => current ? { ...current, sources: (current.sources || []).map((source) => source.id === next.id ? next : source), source_summary: current.source_summary ? { ...current.source_summary, enabled: (current.sources || []).reduce((count, source) => count + ((source.id === next.id ? next : source).enabled ? 1 : 0), 0), opml_enabled: (current.sources || []).reduce((count, source) => { const value = source.id === next.id ? next : source; return count + (value.catalog === "chinese-security-rss" && value.enabled ? 1 : 0); }, 0) } : undefined } : current);
   const toggle = async (source: InformationSource) => { setBusySource(source.id); setMessage(""); try { replaceSource(await api.updateInformationSource(source.id, !source.enabled)); } catch (reason) { setMessage(String(reason)); } finally { setBusySource(""); } };
-  const test = async (source: InformationSource) => { setBusySource(source.id); setMessage(`正在测试 ${source.name}`); try { const result = await api.testInformationSource(source.id); replaceSource(result); setMessage(result.message || `${source.name} 测试完成`); } catch (reason) { setMessage(String(reason)); } finally { setBusySource(""); } };
+  const test = async (source: InformationSource) => { const sourceName = brandDisplayText(source.name); setBusySource(source.id); setMessage(`正在测试 ${sourceName}`); try { const result = await api.testInformationSource(source.id); replaceSource(result); setMessage(brandDisplayText(result.message) || `${sourceName} 测试完成`); } catch (reason) { setMessage(String(reason)); } finally { setBusySource(""); } };
   const summary = snapshot?.source_summary;
-  return <section><SettingsHeader title="咨询订阅" description="管理信息咨询使用的新闻、研究与安全社区订阅。" /><div className="source-summary"><span><small>全部来源</small><strong>{summary?.total ?? sources.length}</strong></span><span><small>已启用</small><strong>{summary?.enabled ?? sources.filter((source) => source.enabled).length}</strong></span><span><small>OPML 已启用</small><strong>{summary ? `${summary.opml_enabled}/${summary.opml_enabled_limit}` : "-"}</strong></span></div><div className="source-toolbar"><label><Search size={14} aria-hidden="true" /><input aria-label="搜索咨询来源" name="information_source_query" autoComplete="off" value={query} placeholder="例如 FreeBuf 或安全媒体…" onChange={(event) => { setQuery(event.target.value); setVisibleCount(40); }} /></label><select aria-label="咨询来源分组" name="information_source_group" autoComplete="off" value={group} onChange={(event) => { setGroup(event.target.value); setVisibleCount(40); }}>{groups.map((item) => <option key={item}>{item}</option>)}</select><label className="enabled-filter"><input type="checkbox" name="information_source_enabled" checked={enabledOnly} onChange={(event) => setEnabledOnly(event.target.checked)} />只看已启用</label></div><p className="source-message" role="status" aria-live="polite">{message}</p><div className="source-list information-source-list">{filtered.slice(0, visibleCount).map((source) => <div key={source.id}><span className="source-avatar" aria-hidden="true">{source.name.slice(0, 1)}</span><span><strong>{source.name}</strong><small>{source.group || "其他"} · {source.item_count} 条 · {source.message || "等待更新"}</small></span><b className={`source-status ${source.status}`}>{sourceStatusLabel(source)}</b><button className="source-test" aria-label={`测试 ${source.name} 连接`} title={`测试 ${source.name} 连接`} onClick={() => void test(source)} disabled={Boolean(busySource)}>{busySource === source.id ? <LoaderCircle className="spin" /> : <TestTube2 />}</button><input aria-label={`${source.name}订阅`} type="checkbox" checked={source.enabled} onChange={() => void toggle(source)} disabled={Boolean(busySource)} /></div>)}{!filtered.length ? <p className="settings-empty"><Bell size={18} />{sources.length ? "没有匹配的咨询来源" : message || "正在读取咨询订阅…"}</p> : null}</div>{filtered.length > visibleCount ? <button className="source-more secondary" onClick={() => setVisibleCount((value) => value + 40)}>再显示 40 个来源</button> : null}</section>;
+  return (
+    <section>
+      <SettingsHeader title="咨询订阅" description="管理信息咨询使用的新闻、研究与安全社区订阅。" />
+      <div className="source-summary">
+        <span><small>全部来源</small><strong>{summary?.total ?? sources.length}</strong></span>
+        <span><small>已启用</small><strong>{summary?.enabled ?? sources.filter((source) => source.enabled).length}</strong></span>
+      </div>
+      <div className="source-toolbar">
+        <label>
+          <Search size={14} aria-hidden="true" />
+          <input aria-label="搜索咨询来源" name="information_source_query" autoComplete="off" value={query} placeholder="例如 FreeBuf 或安全媒体…" onChange={(event) => { setQuery(event.target.value); setVisibleCount(40); }} />
+        </label>
+        <select aria-label="咨询来源分组" name="information_source_group" autoComplete="off" value={group} onChange={(event) => { setGroup(event.target.value); setVisibleCount(40); }}>
+          {groups.map((item) => <option key={item} value={item}>{brandDisplayText(item)}</option>)}
+        </select>
+        <label className="enabled-filter"><input type="checkbox" name="information_source_enabled" checked={enabledOnly} onChange={(event) => setEnabledOnly(event.target.checked)} />只看已启用</label>
+      </div>
+      <p className="source-message" role="status" aria-live="polite">{brandDisplayText(message)}</p>
+      <div className="source-list information-source-list">
+        {filtered.slice(0, visibleCount).map((source) => {
+          const sourceName = brandDisplayText(source.name);
+          return <div key={source.id}>
+            <InformationSourceAvatar source={source} />
+            <span><strong>{sourceName}</strong><small>{brandDisplayText(source.group) || "其他"} · {source.item_count} 条 · {brandDisplayText(source.message) || "等待更新"}</small></span>
+            <b className={`source-status ${source.status}`}>{sourceStatusLabel(source)}</b>
+            <button className="source-test" aria-label={`测试 ${sourceName} 连接`} title={`测试 ${sourceName} 连接`} onClick={() => void test(source)} disabled={Boolean(busySource)}>{busySource === source.id ? <LoaderCircle className="spin" /> : <TestTube2 />}</button>
+            <input aria-label={`${sourceName}订阅`} type="checkbox" checked={source.enabled} onChange={() => void toggle(source)} disabled={Boolean(busySource)} />
+          </div>;
+        })}
+        {!filtered.length ? <p className="settings-empty"><Bell size={18} />{sources.length ? "没有匹配的咨询来源" : brandDisplayText(message) || "正在读取咨询订阅…"}</p> : null}
+      </div>
+      {filtered.length > visibleCount ? <button className="source-more secondary" onClick={() => setVisibleCount((value) => value + 40)}>再显示 40 个来源</button> : null}
+    </section>
+  );
+}
+
+function InformationSourceAvatar({ source }: { source: InformationSource }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className="source-avatar fallback" aria-hidden="true">{brandDisplayText(source.name).slice(0, 1)}</span>;
+  return (
+    <span className="source-avatar" aria-hidden="true">
+      <img
+        src={api.informationSourceImageUrl(source.id, source.source_image_version)}
+        alt=""
+        width={33}
+        height={33}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+      />
+    </span>
+  );
 }
 
 function sourceStatusLabel(source: InformationSource) {
@@ -617,7 +725,7 @@ function UsageSettings() {
         )}
       />
 
-      {error ? <div className="usage-error" role="alert"><BarChart3 /><span>{error}</span></div> : null}
+      {error ? <div className="usage-error" role="alert"><BarChart3 /><span>{brandDisplayText(error)}</span></div> : null}
       <div className={`usage-metrics ${loading ? "loading" : ""}`} aria-busy={loading}>
         {metrics.map((metric) => (
           <article className={`usage-metric ${metric.featured ? "featured" : ""}`} key={metric.key} title={metric.key === "tokens" ? `${totalTokens} Tokens` : undefined}>
@@ -699,18 +807,18 @@ function CapabilitySettings({ category }: { category: "agents" | "skills" | "mcp
         {category === "skills" ? <article><Sparkles /><span><b>Skills</b><strong>{summary?.skill_count ?? "--"}</strong></span></article> : null}
         {category === "mcp" ? <><article><Server /><span><b>MCP 服务器</b><strong>{summary?.mcp_server_count ?? "--"}</strong></span></article><article><TestTube2 /><span><b>MCP Tools</b><strong>{summary?.mcp_tool_count ?? "--"}</strong></span></article></> : null}
       </div>
-      {error ? <p className="capability-error">{error}</p> : null}
+      {error ? <p className="capability-error">{brandDisplayText(error)}</p> : null}
       {category === "agents" ? <div className="capability-section">
         <header><Bot /><span><strong>Agent 能力</strong></span></header>
-        <div className="capability-grid">{(catalog?.agents || []).map((agent) => <article key={agent.agent_id}><strong>{agent.label}</strong><small>{agent.description || agent.agent_id}</small><div>{(agent.capabilities || []).map((item) => <span key={item}>{item}</span>)}</div></article>)}</div>
+        <div className="capability-grid">{(catalog?.agents || []).map((agent) => <article key={agent.agent_id}><strong>{brandDisplayText(agent.label)}</strong><small>{brandDisplayText(agent.description || agent.agent_id)}</small><div>{(agent.capabilities || []).map((item) => <span key={item}>{brandDisplayText(item)}</span>)}</div></article>)}</div>
       </div> : null}
       {category === "mcp" ? <div className="capability-section">
         <header><Server /><span><strong>MCP 服务器</strong></span></header>
-        <div className="capability-grid mcp">{(catalog?.mcp_servers || []).map((server) => <article key={server.id}><strong>{server.name}<i>{server.tool_count}</i></strong><small>{server.transport}</small><div>{server.tools.map((tool) => <span title={tool.description} key={tool.name}>{tool.name}</span>)}</div></article>)}</div>
+        <div className="capability-grid mcp">{(catalog?.mcp_servers || []).map((server) => <article key={server.id}><strong>{brandDisplayText(server.name)}<i>{server.tool_count}</i></strong><small>{server.transport}</small><div>{server.tools.map((tool) => <span title={brandDisplayText(tool.description)} key={tool.name}>{brandDisplayText(tool.name)}</span>)}</div></article>)}</div>
       </div> : null}
       {category === "skills" ? <div className="capability-section">
         <header><Sparkles /><span><strong>Skills</strong></span></header>
-        <div className="capability-grid skills">{(catalog?.skills || []).map((skill) => <article key={skill.id}><strong>{skill.name}</strong><small>{skill.description}</small><div><span>{skill.source}</span></div></article>)}</div>
+        <div className="capability-grid skills">{(catalog?.skills || []).map((skill) => <article key={skill.id}><strong>{brandDisplayText(skill.name)}</strong><small>{brandDisplayText(skill.description)}</small><div><span>{brandDisplayText(skill.source)}</span></div></article>)}</div>
       </div> : null}
       {!loading && catalog ? <p className="capability-platform"><Database />Platform Adapter：{catalog.platform.adapter} · {catalog.platform.architecture}</p> : null}
     </section>
@@ -727,14 +835,14 @@ function GuideSettings() {
   const content = [
     { icon: <Server />, title: "连接你的模型", description: "进入模型设置，选择厂商和模型，填写本机保存的 API Key，并完成一次连接测试。", hint: "连接成功后锁定配置，安全任务将使用当前启用的模型。" },
     { icon: <Activity />, title: "确认安全服务就绪", description: "查看运行状态，确认 FastAPI、任务 Worker、代码扫描、SBOM 和报告能力均已连接。", hint: "服务异常时先刷新运行状态，再检查本机端口和安全软件拦截。" },
-    { icon: <Sparkles />, title: "创建第一个安全任务", description: "返回工作区选择项目，描述扫描、漏洞查询或报告目标，安全智脑会选择对应 Agent。", hint: "执行过程会集中显示在右侧执行计划，不占用主页内容区域。" },
+    { icon: <Sparkles />, title: "创建第一个安全任务", description: `返回工作区选择项目，描述扫描、漏洞查询或报告目标，${BRAND_NAME_ZH}会选择对应 Agent。`, hint: "执行过程会显示在主对话的思考过程中，右侧仅保留运行状态。" },
   ];
   const current = content[activeStep];
   return (
     <section className="guide-wizard-page">
-      <SettingsHeader title="引导" description="按推荐顺序完成安全智脑的本机配置。" />
+      <SettingsHeader title="引导" description={`按推荐顺序完成${BRAND_NAME_ZH}的本机配置。`} />
       <div className="guide-wizard-card">
-        <WizardProgress steps={steps} activeIndex={activeStep} onSelect={setActiveStep} ariaLabel="安全智脑使用引导" />
+        <WizardProgress steps={steps} activeIndex={activeStep} onSelect={setActiveStep} ariaLabel={`${BRAND_NAME_ZH}使用引导`} />
         <div className="guide-transition-panel" key={steps[activeStep].id}>
           <div className="guide-panel-icon">{current.icon}</div>
           <div><span className="guide-step-kicker">步骤 {activeStep + 1} / {steps.length}</span><h2>{current.title}</h2><p>{current.description}</p><small>{current.hint}</small></div>

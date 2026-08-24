@@ -1,6 +1,7 @@
 import { ExternalLink, Filter, Search, ShieldAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { brandDisplayText } from "../branding";
 import { clientLocaleTag, type ClientLocale, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { openExternalUrl } from "../lib/platform";
@@ -11,6 +12,7 @@ import {
   vulnerabilitySearchText,
   vulnerabilityTitle,
 } from "./VulnerabilityTranslationStatus";
+import { BeautifulEmptyState, BeautifulLoadingState } from "./beautiful-ui/BeautifulUI";
 
 export function RecordsView() {
   const { locale, t } = useI18n();
@@ -24,11 +26,11 @@ export function RecordsView() {
   const [error, setError] = useState("");
   const [searchError, setSearchError] = useState("");
   const [searchRevision, setSearchRevision] = useState(0);
-  const load = useCallback(async () => {
+  const load = useCallback(async (refresh = false) => {
     setLoading(true);
     setError("");
     try {
-      setData(await api.dashboard(locale));
+      setData(await api.dashboard(locale, refresh));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -52,9 +54,10 @@ export function RecordsView() {
       return;
     }
     let active = true;
+    const controller = new AbortController();
     setSearching(true);
     const timer = window.setTimeout(() => {
-      void api.vulnerabilities(locale, cleanQuery).then((records) => {
+      void api.vulnerabilities(locale, cleanQuery, controller.signal).then((records) => {
         if (active) setSearchRecords(records);
       }).catch((reason) => {
         if (active) {
@@ -67,6 +70,7 @@ export function RecordsView() {
     }, 280);
     return () => {
       active = false;
+      controller.abort();
       window.clearTimeout(timer);
     };
   }, [locale, query, searchRevision]);
@@ -87,8 +91,23 @@ export function RecordsView() {
       <div className="page-heading"><div><h1>{t("漏洞库")}</h1><p>{t("查询聚合后的公开漏洞事实与影响范围。")}</p></div></div>
       {data ? <VulnerabilityReadiness snapshot={data} /> : null}
       <div className="records-toolbar"><label><Search size={16} aria-hidden="true" /><input aria-label={t("搜索漏洞记录")} name="vulnerability_query" autoComplete="off" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("例如 CVE-2026-1234 或 OpenSSL…")} /></label><label><Filter size={15} aria-hidden="true" /><select aria-label={t("按严重度筛选")} name="vulnerability_severity" autoComplete="off" value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="all">{t("全部严重度")}</option><option value="critical">{t("严重")}</option><option value="high">{t("高危")}</option><option value="medium">{t("中危")}</option><option value="low">{t("低危")}</option></select></label></div>
-      {visibleError ? <div className="records-load-error" role="alert"><span>{t("漏洞记录加载失败：{error}", { error: visibleError })}</span><button className="secondary" onClick={() => cleanQuery ? setSearchRevision((value) => value + 1) : void load()}>{t("重新加载")}</button></div> : null}
-      <div className="vulnerability-list" aria-busy={busy}>{filtered.map((record) => <article key={record.id}><button type="button" className="vulnerability-card-button" onClick={() => setSelectedRecord(record)} aria-label={t("查看 {id} 的网站漏洞信息", { id: record.id })}><span className="vuln-leading"><span><ShieldAlert size={16} aria-hidden="true" /></span><span><strong className="vuln-id" role="heading" aria-level={2} translate="no">{record.id}</strong><span className="vuln-title">{vulnerabilityTitle(record, locale) || t("漏洞内容准备中")}</span></span></span><b className={`severity ${safeSeverityClass(record.severity)}`}>{severityLabel(record.severity, t)}</b><span className="vuln-description">{vulnerabilityDescription(record, locale) || t("暂无漏洞描述")}</span><span className="vuln-footer"><span translate="no">{record.source || t("公开情报")}</span><span translate="no">CVSS {record.cvss ?? "-"}</span>{record.affected_products?.length ? <span translate="no">{record.affected_products.slice(0, 3).join(" / ")}</span> : null}<span className="vuln-detail-hint">{t("查看网站信息")}<ExternalLink aria-hidden="true" /></span></span></button></article>)}{busy ? <div className="empty-list-state" role="status" aria-live="polite">{cleanQuery ? t("正在搜索完整漏洞库…") : t("正在加载漏洞记录…")}</div> : !visibleError && !filtered.length ? <div className="empty-list-state">{t("没有匹配的漏洞记录")}</div> : null}</div>
+      {visibleError ? <div className="records-load-error" role="alert"><span>{t("漏洞记录加载失败：{error}", { error: brandDisplayText(visibleError) })}</span><button className="secondary" onClick={() => cleanQuery ? setSearchRevision((value) => value + 1) : void load(true)}>{t("重新加载")}</button></div> : null}
+      <div className="vulnerability-list" aria-busy={busy}>{filtered.map((record) => <article key={record.id}><button type="button" className="vulnerability-card-button" onClick={() => setSelectedRecord(record)} aria-label={t("查看 {id} 的网站漏洞信息", { id: record.id })}><span className="vuln-leading"><span><ShieldAlert size={16} aria-hidden="true" /></span><span><strong className="vuln-id" role="heading" aria-level={2} translate="no">{record.id}</strong><span className="vuln-title">{vulnerabilityTitle(record, locale) || t("暂无漏洞标题")}</span></span></span><b className={`severity ${safeSeverityClass(record.severity)}`}>{severityLabel(record.severity, t)}</b><span className="vuln-description">{vulnerabilityDescription(record, locale) || t("暂无漏洞描述")}</span><span className="vuln-footer"><span translate="no">{brandDisplayText(record.source) || t("公开情报")}</span><span translate="no">CVSS {record.cvss ?? "-"}</span>{record.affected_products?.length ? <span translate="no">{record.affected_products.slice(0, 3).join(" / ")}</span> : null}<span className="vuln-detail-hint">{t("查看网站信息")}<ExternalLink aria-hidden="true" /></span></span></button></article>)}{busy ? (
+        <BeautifulLoadingState
+          className="empty-list-state"
+          label={cleanQuery ? t("正在搜索完整漏洞库…") : t("正在加载漏洞记录…")}
+          detail={cleanQuery ? t("正在匹配 CVE 编号、组件和漏洞描述") : t("正在读取本机漏洞索引")}
+          compact={filtered.length > 0}
+          showElapsed
+        />
+      ) : !visibleError && !filtered.length ? (
+        <BeautifulEmptyState
+          className="empty-list-state"
+          title={t("没有匹配的漏洞记录")}
+          query={cleanQuery || undefined}
+          detail={t("请检查 CVE 编号或尝试组件名称")}
+        />
+      ) : null}</div>
       {selectedRecord ? <VulnerabilityDetail record={selectedRecord} locale={locale} onClose={() => setSelectedRecord(undefined)} /> : null}
     </div>
   );
@@ -110,10 +129,10 @@ function VulnerabilityDetail({ record, locale, onClose }: { record: Vulnerabilit
       <section className="vulnerability-detail" role="dialog" aria-modal="true" aria-labelledby="vulnerability-detail-title" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><small>{t("网站漏洞信息")}</small><h2 id="vulnerability-detail-title" translate="no">{record.id}</h2></div><button type="button" onClick={onClose} aria-label={t("关闭漏洞详情")}><X aria-hidden="true" /></button></header>
         <div className="vulnerability-detail-body">
-          <section className="vulnerability-detail-summary"><b className={`severity ${safeSeverityClass(record.severity)}`}>{severityLabel(record.severity, t)}</b><h3>{vulnerabilityTitle(record, locale) || t("漏洞内容准备中")}</h3><p>{vulnerabilityDescription(record, locale) || t("暂无漏洞描述")}</p></section>
+          <section className="vulnerability-detail-summary"><b className={`severity ${safeSeverityClass(record.severity)}`}>{severityLabel(record.severity, t)}</b><h3>{vulnerabilityTitle(record, locale) || t("暂无漏洞标题")}</h3><p>{vulnerabilityDescription(record, locale) || t("暂无漏洞描述")}</p></section>
           <dl className="vulnerability-facts">
             <div><dt>CVSS</dt><dd translate="no">{record.cvss ?? "-"}</dd></div>
-            <div><dt>{t("来源")}</dt><dd translate="no">{record.source || t("公开情报")}</dd></div>
+            <div><dt>{t("来源")}</dt><dd translate="no">{brandDisplayText(record.source) || t("公开情报")}</dd></div>
             <div><dt>{t("发布时间")}</dt><dd>{formatDate(record.published_at, locale)}</dd></div>
             <div><dt>{t("更新时间")}</dt><dd>{formatDate(record.updated_at, locale)}</dd></div>
           </dl>

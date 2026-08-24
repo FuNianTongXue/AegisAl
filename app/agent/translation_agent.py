@@ -160,7 +160,7 @@ class TranslationAgent:
         else:
             agent_status = "failed"
         audit = {
-            "server": "SecFlow Translation MCP",
+            "server": "AegisAl Translation MCP",
             "tool": "translate_json_payload",
             "transport": str(runtime.get("transport") or ""),
             "endpoint": "managed-child-process",

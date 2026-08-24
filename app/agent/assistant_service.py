@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import date
 from time import perf_counter
 from typing import Any
@@ -16,7 +18,10 @@ from app.agent.translation_agent import translate_answer_json
 from app.agent.translation_policy import (
     fail_closed_translation_payload,
     failed_translation_audit,
+    partial_translation_audit_is_publishable,
+    partial_translation_payload,
     translation_audit_is_publishable,
+    translation_partial_message,
     translation_unavailable_message,
 )
 from app.langgraph.checkpoints import InterruptStateExpiredError
@@ -35,7 +40,41 @@ from app.models import (
     AskRequest,
 )
 from app.privacy import public_answer_payload, sanitize_public_text
+from app.settings import normalize_language
 from app.storage import now_iso
+from app.trace_ui import tool_call_presentation
+
+
+_LOCAL_GREETINGS = {
+    "zh-Hans": "你好！我是小安，您的信息安全专家助手。需要我帮你分析漏洞、代码风险、依赖或项目安全吗？",
+    "zh-Hant": "你好！我是小安，您的資訊安全專家助手。需要我協助分析漏洞、程式碼風險、相依套件或專案安全嗎？",
+    "en": "Hello! I'm Xiao An, your information security assistant. How can I help with vulnerabilities, code risk, dependencies, or project security?",
+    "ja": "こんにちは。情報セキュリティ専門アシスタントの小安です。脆弱性、コードリスク、依存関係、プロジェクトの安全性を分析できます。",
+    "ko": "안녕하세요. 정보 보안 전문 어시스턴트 샤오안입니다. 취약점, 코드 위험, 종속성 또는 프로젝트 보안 분석을 도와드릴 수 있습니다.",
+}
+
+_PUBLIC_TRACE_STATUSES = {
+    "pending",
+    "running",
+    "started",
+    "completed",
+    "success",
+    "warning",
+    "failed",
+    "error",
+    "cancelled",
+    "awaiting-approval",
+}
+_PRIVATE_TRACE_DETAIL_KEY = re.compile(
+    r"(?:system[-_ ]?prompt|prompt|messages?|reasoning|thought|chain[-_ ]?of[-_ ]?thought|scratchpad)",
+    flags=re.IGNORECASE,
+)
+_TRACE_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[-_]?key|access[-_]?token|refresh[-_]?token|authorization|password|secret|token)"
+    r"(\s*[:=]\s*[\"']?)([^\"'\s,;&}]+)",
+)
+_TRACE_BEARER_TOKEN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+_TRACE_API_TOKEN = re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b")
 
 
 def invoke_assistant_question(
@@ -46,15 +85,40 @@ def invoke_assistant_question(
     content_sink: Any = None,
     allow_workspace_recovery: bool = False,
 ) -> dict[str, Any]:
-    if payload.intent_hint == "recent_high_vulnerability_lookup":
-        result = _invoke_recent_high_vulnerability_lookup(payload, event_sink=event_sink)
+    if _is_local_greeting(payload.question):
+        result = _local_greeting_answer(payload.response_language, payload.emoji_mode)
+        result["session_id"] = payload.session_id
         if str(payload.session_id or "").startswith("information:"):
-            memory_service.add_short_term_exchange(
+            stored = memory_service.add_short_term_exchange(
                 payload.user_id,
                 payload.session_id,
                 payload.question,
                 result,
             )
+            if isinstance(stored, dict) and stored.get("id"):
+                result["exchange_id"] = str(stored["id"])
+        else:
+            stored = memory_service.add_exchange(
+                payload.user_id,
+                payload.question,
+                result,
+                session_id=payload.session_id,
+            )
+            if isinstance(stored, dict) and stored.get("id"):
+                result["exchange_id"] = str(stored["id"])
+        return result
+
+    if payload.intent_hint == "recent_high_vulnerability_lookup":
+        result = _invoke_recent_high_vulnerability_lookup(payload, event_sink=event_sink)
+        if str(payload.session_id or "").startswith("information:"):
+            stored = memory_service.add_short_term_exchange(
+                payload.user_id,
+                payload.session_id,
+                payload.question,
+                result,
+            )
+            if isinstance(stored, dict) and stored.get("id"):
+                result["exchange_id"] = str(stored["id"])
         return result
 
     from app.langgraph.multi_agent_graph import assistant_multi_agent_supervisor
@@ -100,6 +164,7 @@ def invoke_assistant_question(
             user_id=payload.user_id,
             session_id=payload.session_id,
             response_language=payload.response_language,
+            emoji_mode=payload.emoji_mode,
             attachments=[attachment.model_dump() for attachment in payload.attachments],
             intent_plan=plan,
             event_sink=event_sink,
@@ -126,6 +191,7 @@ def invoke_assistant_question(
         user_id=payload.user_id,
         session_id=payload.session_id,
         response_language=payload.response_language,
+        emoji_mode=payload.emoji_mode,
         attachments=[attachment.model_dump() for attachment in payload.attachments],
         runtime_graph=graph,
         memory=memory_service,
@@ -137,6 +203,143 @@ def invoke_assistant_question(
         allow_workspace_recovery=allow_workspace_recovery,
         allow_task_creation=allow_workspace_recovery,
     )
+
+
+def _is_local_greeting(question: Any) -> bool:
+    normalized = re.sub(r"[\s，。！？、,.!?：:；;‘’'\"“”]", "", str(question or "")).casefold()
+    return normalized in {
+        "你好", "您好", "你们好", "大家好", "嗨", "哈喽", "哈啰", "在吗", "早上好", "下午好", "晚上好",
+        "hello", "hi", "hey", "goodmorning", "goodafternoon", "goodevening",
+    }
+
+
+def _local_greeting_answer(response_language: str, emoji_mode: str = "moderate") -> dict[str, Any]:
+    language = normalize_language(response_language)
+    summary = _LOCAL_GREETINGS.get(language, _LOCAL_GREETINGS["en"])
+    if emoji_mode in {"moderate", "active"}:
+        summary = f"{summary} 👋"
+    return public_answer_payload(
+        {
+            "mode": "greeting",
+            "summary": summary,
+            "fields": {},
+            "knowledge_graph": {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0},
+            "evidence_sources": [],
+            "artifacts": [],
+            "confidence": 1.0,
+            "token_usage": 0,
+            "trace": [
+                {
+                    "node": "local_greeting",
+                    "status": "completed",
+                    "message": "已使用本地问候响应，无需调用模型或翻译。",
+                    "time": now_iso(),
+                }
+            ],
+            "generated_at": now_iso(),
+            "orchestration": {
+                "schema_version": "secflow.local-response/v1",
+                "architecture": "local-deterministic",
+                "agentic": False,
+                "visited_agents": [],
+                "handoffs": [],
+            },
+        }
+    )
+
+
+def public_stream_trace_event(item: Any) -> dict[str, Any] | None:
+    """Project an internal trace entry onto the bounded public SSE contract."""
+
+    if not isinstance(item, dict):
+        return None
+    node = _bounded_public_trace_text(item.get("node"), 200)
+    if not node:
+        return None
+    status = str(item.get("status") or "completed").strip().lower()
+    if status not in _PUBLIC_TRACE_STATUSES:
+        status = "completed"
+    event: dict[str, Any] = {"node": node, "status": status}
+    for key, limit in (
+        ("id", 240),
+        ("title", 240),
+        ("message", 1_200),
+        ("started_at", 80),
+        ("completed_at", 80),
+        ("time", 80),
+        ("tool_name", 200),
+    ):
+        value = _bounded_public_trace_text(item.get(key), limit)
+        if value:
+            event[key] = value
+    try:
+        duration_ms = max(0, int(float(item.get("duration_ms") or 0)))
+    except (TypeError, ValueError, OverflowError):
+        duration_ms = 0
+    if duration_ms:
+        event["duration_ms"] = duration_ms
+
+    presentation = item.get("presentation")
+    if isinstance(presentation, dict) and presentation.get("kind") == "tool_call":
+        raw_input = presentation.get("input")
+        input_summary = {
+            str(key): value
+            for key, value in list(raw_input.items())[:24]
+            if not _PRIVATE_TRACE_DETAIL_KEY.search(str(key))
+        } if isinstance(raw_input, dict) else {}
+        presentation_state = str(presentation.get("state") or status).strip().lower()
+        if presentation_state in {"failed", "warning"}:
+            presentation_state = "error"
+        elif presentation_state not in {"completed", "running", "awaiting-approval", "error"}:
+            presentation_state = "completed"
+        event["presentation"] = tool_call_presentation(
+            str(presentation.get("tool_name") or item.get("tool_name") or item.get("title") or node),
+            state=presentation_state,
+            title=str(presentation.get("title") or item.get("title") or ""),
+            input_summary=input_summary,
+            output=presentation.get("output"),
+            error=presentation.get("error"),
+        )
+
+    # Apply the same provenance scrubber used by final answers. Arbitrary trace
+    # fields were never copied, so prompt diffs and model reasoning stay private.
+    projected = public_answer_payload({"trace": [event]}).get("trace")
+    return projected[0] if isinstance(projected, list) and projected else None
+
+
+def public_stream_trace_items(value: Any) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value if isinstance(value, list) else []:
+        event = public_stream_trace_event(item)
+        if event is None:
+            continue
+        identity = public_stream_trace_identity(event)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        output.append(event)
+    return output
+
+
+def public_stream_trace_identity(item: dict[str, Any]) -> str:
+    return json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _bounded_public_trace_text(value: Any, limit: int) -> str:
+    text = sanitize_public_text(value).strip()
+    text = _TRACE_BEARER_TOKEN.sub(r"\1[REDACTED]", text)
+    text = _TRACE_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
+    text = _TRACE_API_TOKEN.sub("[REDACTED]", text)
+    if len(text) <= limit:
+        return text
+    cut_at = max(0, limit - 1)
+    prefix = text[:cut_at].rstrip()
+    if prefix and cut_at < len(text) and prefix[-1].isalnum() and text[cut_at].isalnum():
+        boundary = max(prefix.rfind(" "), prefix.rfind("\n"), prefix.rfind("\t"))
+        if boundary >= cut_at // 2:
+            prefix = prefix[:boundary].rstrip()
+    return prefix + "…"
 
 
 def _invoke_recent_high_vulnerability_lookup(
@@ -217,7 +420,7 @@ def _invoke_recent_high_vulnerability_lookup(
             "confidence": 0.97 if result.get("records") else 0.62,
             "trace": [completed_trace],
             "translation": {
-                "server": "SecFlow Vulnerability Catalog",
+                "server": "AegisAl Vulnerability Catalog",
                 "tool": "translate_before_persist",
                 "transport": "local-catalog",
                 "status": "completed",
@@ -460,7 +663,16 @@ def translate_assistant_answer(
         trace = list(translated.get("trace") or [])
         audit = translated.get("translation") if isinstance(translated.get("translation"), dict) else {}
         translation_completed = translation_audit_is_publishable(audit)
-        if not translation_completed:
+        translation_partial = partial_translation_audit_is_publishable(audit)
+        if translation_partial:
+            translated = partial_translation_payload(
+                translated,
+                target_language=response_language,
+                audit=audit,
+                verified_source=answer,
+            )
+            audit = dict(translated["translation"])
+        elif not translation_completed:
             translated = fail_closed_translation_payload(
                 translated,
                 target_language=response_language,
@@ -477,7 +689,11 @@ def translate_assistant_answer(
                     f"目标语言 {audit.get('target_language') or response_language}，"
                     f"翻译 {int(audit.get('translated_fields') or 0)} 个字段，"
                     f"状态为 {audit.get('status') or 'failed'}。"
-                ) if translation_completed else translation_unavailable_message(response_language),
+                ) if translation_completed else (
+                    translation_partial_message(response_language)
+                    if translation_partial
+                    else translation_unavailable_message(response_language)
+                ),
                 "time": now_iso(),
             }
         )

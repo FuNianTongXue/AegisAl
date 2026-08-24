@@ -66,7 +66,7 @@ class ReportDownloadArtifactStore:
         if not owner:
             raise ValueError("Artifact owner user_id is required")
         artifact_id = f"report-artifact-{uuid4().hex}"
-        safe_name = Path(str(file_name or "SecFlow-report.bin")).name
+        safe_name = Path(str(file_name or "AegisAl-report.bin")).name
         suffix = Path(safe_name).suffix.lower() or ".bin"
         path = self.root / f"{artifact_id}{suffix}"
         generated_at = now_iso()
@@ -764,7 +764,7 @@ class ReportStore:
         label = "all-reports" if len(clean_ids) > 1 else clean_ids[0]
         return report_artifact_store.save(
             archive.getvalue(),
-            file_name=f"SecFlow-{label}-bundle.zip",
+            file_name=f"AegisAl-{label}-bundle.zip",
             media_type="application/zip",
             user_id=user_id,
         )
@@ -1368,7 +1368,7 @@ def _report_mcp_audit_lines(mcp_audit: dict[str, Any] | None, language: str) -> 
     if not audit:
         return []
     normalized = _normalize_report_language(language)
-    server = _single_line_report_value(audit.get("server") or "SecFlow Report Chart MCP")
+    server = _single_line_report_value(audit.get("server") or "AegisAl Report Chart MCP")
     tool = _report_inline_code(audit.get("tool") or "build_scan_report_charts")
     status = str(audit.get("status") or "unknown").strip().lower()
     fact_count = int(audit.get("fact_count") or 0)
@@ -2486,8 +2486,8 @@ def _apply_download_markdown_style(content: str) -> str:
     styled.extend(lines[:title_index])
     style_language = _report_style_language(title_line, metadata_rows)
     style_copy = {
-        "zh-Hans": ("安全智脑根据本次上传与扫描事实自动生成；章节会随实际依赖、源码和命中情况动态调整。", "扫描项", "结果"),
-        "zh-Hant": ("安全智腦根據本次上傳與掃描事實自動產生；章節會隨實際相依套件、原始碼和命中情況動態調整。", "掃描項", "結果"),
+        "zh-Hans": ("神盾根据本次上传与扫描事实自动生成；章节会随实际依赖、源码和命中情况动态调整。", "扫描项", "结果"),
+        "zh-Hant": ("神盾根據本次上傳與掃描事實自動產生；章節會隨實際相依套件、原始碼和命中情況動態調整。", "掃描項", "結果"),
         "ja": ("今回のアップロードとスキャン結果に基づいて自動生成され、章構成は実際の対象と検出結果に応じて調整されます。", "項目", "結果"),
         "ko": ("이번 업로드와 스캔 사실을 기반으로 자동 생성되며 실제 범위와 탐지 결과에 따라 구성이 조정됩니다.", "항목", "결과"),
         "en": ("Generated from the facts available in this upload and scan; sections adapt to the actual scope and findings.", "Item", "Result"),
@@ -2609,7 +2609,7 @@ def _coerce_report_file_names(metadata: dict[str, Any]) -> dict[str, str]:
 
 
 def _report_file_base_name(title: str, metadata: dict[str, Any], created_at: str) -> str:
-    project_name = _infer_report_project_name(metadata) or title.strip() or "SecFlow安全报告"
+    project_name = _infer_report_project_name(metadata) or title.strip() or "神盾安全报告"
     return f"{project_name}_{_report_timestamp_for_file(created_at)}"
 
 
@@ -2652,17 +2652,17 @@ def _report_timestamp_for_file(created_at: str) -> str:
 
 
 def _safe_report_file_stem(value: str) -> str:
-    clean = str(value or "SecFlow安全报告").strip().replace("\\", "-").replace("/", "-")
+    clean = str(value or "神盾安全报告").strip().replace("\\", "-").replace("/", "-")
     clean = re.sub(r"[^\w\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7a3 ._()（）-]+", "-", clean)
     clean = re.sub(r"\s+", "-", clean).strip(" ._-")
-    return (clean or "SecFlow安全报告")[:120]
+    return (clean or "神盾安全报告")[:120]
 
 
 def _report_export_labels(language: str) -> dict[str, str]:
     normalized = _normalize_report_language(language)
     labels = {
         "zh-Hans": {
-            "brand": "安全智脑报告",
+            "brand": "神盾报告",
             "security_report": "安全扫描报告",
             "critical_high": "严重/高危",
             "medium": "中危风险",
@@ -2680,7 +2680,7 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "page": "第 %d 页",
         },
         "zh-Hant": {
-            "brand": "安全智腦報告",
+            "brand": "神盾報告",
             "security_report": "安全掃描報告",
             "critical_high": "嚴重/高危",
             "medium": "中危風險",
@@ -2698,7 +2698,7 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "page": "第 %d 頁",
         },
         "en": {
-            "brand": "SecFlow security report",
+            "brand": "AegisAl security report",
             "security_report": "Security scan report",
             "critical_high": "Critical / high",
             "medium": "Medium risk",
@@ -2716,7 +2716,7 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "page": "Page %d",
         },
         "ja": {
-            "brand": "SecFlow セキュリティレポート",
+            "brand": "AegisAl セキュリティレポート",
             "security_report": "セキュリティスキャンレポート",
             "critical_high": "重大 / 高",
             "medium": "中リスク",
@@ -2734,7 +2734,7 @@ def _report_export_labels(language: str) -> dict[str, str]:
             "page": "%d ページ",
         },
         "ko": {
-            "brand": "SecFlow 보안 보고서",
+            "brand": "AegisAl 보안 보고서",
             "security_report": "보안 스캔 보고서",
             "critical_high": "심각 / 높음",
             "medium": "중간 위험",
@@ -3096,7 +3096,7 @@ def _build_html_report(
         {sections_html}
       </div>
     </div>
-    <footer class="footer">© {datetime.now().year} SecFlow - {html.escape(labels["footer"])}</footer>
+    <footer class="footer">© {datetime.now().year} AegisAl - {html.escape(labels["footer"])}</footer>
   </main>
 </body>
 </html>
@@ -3277,8 +3277,8 @@ def _validated_render_document(value: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Report JSON render document has no visible sections")
     return {
         **value,
-        "title": str(value.get("title") or "SecFlow 安全报告"),
-        "project_name": str(value.get("project_name") or "SecFlow"),
+        "title": str(value.get("title") or "神盾安全报告"),
+        "project_name": str(value.get("project_name") or "AegisAl"),
         "metrics": {str(key): item for key, item in metrics.items()},
         "sections": normalized_sections,
         "content_model": "secflow.report-blocks/v1",
@@ -3377,7 +3377,7 @@ def _project_from_title_or_file(title: str, metadata: dict[str, Any]) -> str:
     stem = Path(str(metadata.get("file_name") or "")).stem
     if stem and not stem.startswith("report-"):
         return stem.rsplit("_", 1)[0] or stem
-    return title or "SecFlow 安全报告"
+    return title or "神盾安全报告"
 
 
 def _extract_report_metrics(markdown: str, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -3868,7 +3868,7 @@ def _write_pdf_report(
     severity = _render_document_severity(document, markdown, metadata)
     styles = getSampleStyleSheet()
     base = ParagraphStyle(
-        "SecFlowBase",
+        "AegisAlBase",
         parent=styles["Normal"],
         fontName=font_name,
         fontSize=9.5,
@@ -3878,7 +3878,7 @@ def _write_pdf_report(
         spaceAfter=5,
     )
     title_style = ParagraphStyle(
-        "SecFlowTitle",
+        "AegisAlTitle",
         parent=base,
         fontSize=20,
         leading=25,
@@ -3888,7 +3888,7 @@ def _write_pdf_report(
         spaceAfter=6,
     )
     subtitle_style = ParagraphStyle(
-        "SecFlowSubtitle",
+        "AegisAlSubtitle",
         parent=base,
         fontSize=8.5,
         leading=12,
@@ -3896,7 +3896,7 @@ def _write_pdf_report(
         alignment=TA_LEFT,
     )
     section_style = ParagraphStyle(
-        "SecFlowSection",
+        "AegisAlSection",
         parent=base,
         fontSize=14,
         leading=18,
@@ -3906,7 +3906,7 @@ def _write_pdf_report(
         keepWithNext=1,
     )
     code_style = ParagraphStyle(
-        "SecFlowCode",
+        "AegisAlCode",
         parent=base,
         fontName=font_name,
         fontSize=7.2,
@@ -3918,7 +3918,7 @@ def _write_pdf_report(
         spaceAfter=8,
         splitLongWords=1,
     )
-    small = ParagraphStyle("SecFlowSmall", parent=base, fontSize=8, leading=11, textColor=colors.HexColor("#617089"))
+    small = ParagraphStyle("AegisAlSmall", parent=base, fontSize=8, leading=11, textColor=colors.HexColor("#617089"))
 
     story: list[Any] = []
     score = _risk_score(metrics, severity)
@@ -4085,7 +4085,7 @@ def _write_pdf_report(
         topMargin=18 * mm,
         bottomMargin=18 * mm,
         title=document["title"],
-        author="SecFlow",
+        author="AegisAl",
     )
     project_name = document["project_name"]
 
@@ -4128,8 +4128,8 @@ def _register_reportlab_cjk_font(
         try:
             if Path(candidate).is_file():
                 options = {"subfontIndex": 0} if str(candidate).lower().endswith(".ttc") else {}
-                pdfmetrics.registerFont(TTFont("SecFlowCJK", candidate, **options))
-                return "SecFlowCJK"
+                pdfmetrics.registerFont(TTFont("AegisAlCJK", candidate, **options))
+                return "AegisAlCJK"
         except Exception:  # noqa: BLE001
             continue
     cid_font = {
@@ -4161,8 +4161,8 @@ def _register_reportlab_latin_font(pdfmetrics: Any, TTFont: Any) -> str:
     for candidate in candidates:
         try:
             if Path(candidate).is_file():
-                pdfmetrics.registerFont(TTFont("SecFlowLatin", candidate))
-                return "SecFlowLatin"
+                pdfmetrics.registerFont(TTFont("AegisAlLatin", candidate))
+                return "AegisAlLatin"
         except Exception:  # noqa: BLE001
             continue
     return "Helvetica"
@@ -4227,14 +4227,14 @@ def _pdf_section_header(
         "info": "#13a6c6",
     }.get(tone, "#13a6c6")
     badge_style = base.clone(
-        f"SecFlowSectionBadge{number}",
+        f"AegisAlSectionBadge{number}",
         fontSize=8,
         leading=11,
         textColor=colors.white,
         alignment=1,
     )
     title_style = base.clone(
-        f"SecFlowSectionTitle{number}",
+        f"AegisAlSectionTitle{number}",
         fontSize=12.5,
         leading=16,
         textColor=colors.HexColor("#172033"),
@@ -4391,7 +4391,7 @@ def _pdf_distribution_charts(
     chart.barLabels.fillColor = colors.HexColor("#ff4d4f")
     bar_drawing.add(chart)
 
-    heading_style = base.clone("SecFlowChartHeading", fontSize=8.2, leading=11, textColor=colors.HexColor("#26364d"))
+    heading_style = base.clone("AegisAlChartHeading", fontSize=8.2, leading=11, textColor=colors.HexColor("#26364d"))
     left = [
         Paragraph(f"<b>{_pdf_plain_text(visual_labels['severity_share'], latin_font_name)}</b>", heading_style),
         donut_drawing,
@@ -4620,7 +4620,7 @@ def _report_blocks_to_pdf_flowables(
             is_fixed = variant == "fixed"
             header_text = "修复建议代码" if is_fixed else "存在漏洞的代码"
             header_style = base.clone(
-                f"SecFlowCodeHeader{variant}",
+                f"AegisAlCodeHeader{variant}",
                 fontSize=7.5,
                 leading=10,
                 textColor=colors.HexColor("#168f5b" if is_fixed else "#d9363e"),
@@ -4656,9 +4656,9 @@ def _report_blocks_to_pdf_flowables(
         numbered = _parse_numbered_code_lines(lines)
         if numbered is not None:
             code_cell_style = code_style.clone(
-                "SecFlowJsonCodeCell", backColor=None, borderPadding=0, spaceBefore=0, spaceAfter=0
+                "AegisAlJsonCodeCell", backColor=None, borderPadding=0, spaceBefore=0, spaceAfter=0
             )
-            number_style = code_cell_style.clone("SecFlowJsonCodeNumber", textColor=colors.HexColor("#8ea0c5"))
+            number_style = code_cell_style.clone("AegisAlJsonCodeNumber", textColor=colors.HexColor("#8ea0c5"))
             for offset in range(0, len(numbered), 16):
                 table_rows = []
                 highlighted_rows: list[int] = []
@@ -4877,13 +4877,13 @@ def _markdown_to_pdf_flowables(
         numbered = _parse_numbered_code_lines(code_lines)
         if numbered is not None:
             code_cell_style = code_style.clone(
-                "SecFlowCodeCell",
+                "AegisAlCodeCell",
                 backColor=None,
                 borderPadding=0,
                 spaceBefore=0,
                 spaceAfter=0,
             )
-            number_style = code_cell_style.clone("SecFlowCodeNumber", textColor=colors.HexColor("#8ea0c5"))
+            number_style = code_cell_style.clone("AegisAlCodeNumber", textColor=colors.HexColor("#8ea0c5"))
             for offset in range(0, len(numbered), 16):
                 rows = []
                 for number, raw_line in numbered[offset : offset + 16]:
@@ -5088,26 +5088,26 @@ def build_scan_result_json(
 def validate_scan_result_json(value: dict[str, Any]) -> dict[str, Any]:
     document = _json_report_value(value)
     if document.get("$schema") != _SCAN_RESULT_JSON_SCHEMA or int(document.get("schema_version") or 0) != 1:
-        raise ValueError("Unsupported SecFlow scan-result JSON schema")
+        raise ValueError("Unsupported AegisAl scan-result JSON schema")
     if not isinstance(document.get("payload"), dict) or not isinstance(document.get("facts"), dict):
-        raise ValueError("SecFlow scan-result JSON is missing payload or facts")
+        raise ValueError("AegisAl scan-result JSON is missing payload or facts")
     facts = document["facts"]
     for key in ("dependencies", "licenses", "dependency_vulnerabilities", "code_findings"):
         if not isinstance(facts.get(key), list):
-            raise ValueError(f"SecFlow scan-result JSON facts.{key} must be an array")
+            raise ValueError(f"AegisAl scan-result JSON facts.{key} must be an array")
     for finding in facts["code_findings"]:
         if not isinstance(finding, dict):
-            raise ValueError("SecFlow scan-result JSON code finding must be an object")
+            raise ValueError("AegisAl scan-result JSON code finding must be an object")
         _validate_snippet_lines(finding)
         if not finding.get("snippet_lines"):
-            raise ValueError("SecFlow scan-result JSON code finding is missing a verifiable evidence snippet")
+            raise ValueError("AegisAl scan-result JSON code finding is missing a verifiable evidence snippet")
         if not str(finding.get("remediation") or "").strip():
-            raise ValueError("SecFlow scan-result JSON code finding is missing a remediation plan")
+            raise ValueError("AegisAl scan-result JSON code finding is missing a remediation plan")
     audit = document.get("audit") if isinstance(document.get("audit"), dict) else {}
     expected = str(audit.get("payload_sha256") or "")
     actual = _scan_result_payload_sha256(document)
     if not expected or expected != actual:
-        raise ValueError("SecFlow scan-result JSON checksum verification failed")
+        raise ValueError("AegisAl scan-result JSON checksum verification failed")
     return document
 
 
@@ -5213,24 +5213,24 @@ def _validate_snippet_lines(finding: dict[str, Any]) -> None:
     if lines is None:
         return
     if not isinstance(lines, list) or not lines:
-        raise ValueError("SecFlow scan-result JSON snippet_lines must be a non-empty array")
+        raise ValueError("AegisAl scan-result JSON snippet_lines must be a non-empty array")
     numbers: list[int] = []
     for item in lines:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str):
-            raise ValueError("SecFlow scan-result JSON snippet line must contain text")
+            raise ValueError("AegisAl scan-result JSON snippet line must contain text")
         try:
             number = int(item.get("number"))
         except (TypeError, ValueError) as exc:
-            raise ValueError("SecFlow scan-result JSON snippet line number is invalid") from exc
+            raise ValueError("AegisAl scan-result JSON snippet line number is invalid") from exc
         if number <= 0:
-            raise ValueError("SecFlow scan-result JSON snippet line number is invalid")
+            raise ValueError("AegisAl scan-result JSON snippet line number is invalid")
         numbers.append(number)
     if any(current != previous + 1 for previous, current in zip(numbers, numbers[1:])):
-        raise ValueError("SecFlow scan-result JSON snippet line numbers are not contiguous")
+        raise ValueError("AegisAl scan-result JSON snippet line numbers are not contiguous")
     if _positive_report_line(finding.get("line_start")) != numbers[0]:
-        raise ValueError("SecFlow scan-result JSON snippet line_start does not match snippet_lines")
+        raise ValueError("AegisAl scan-result JSON snippet line_start does not match snippet_lines")
     if _positive_report_line(finding.get("line_end")) != numbers[-1]:
-        raise ValueError("SecFlow scan-result JSON snippet line_end does not match snippet_lines")
+        raise ValueError("AegisAl scan-result JSON snippet line_end does not match snippet_lines")
 
 
 def _scan_result_facts(payload: dict[str, Any], source_kind: str) -> dict[str, list[dict[str, Any]]]:
@@ -5286,10 +5286,10 @@ def refresh_scan_result_json(
 
     document = _json_report_value(value)
     if document.get("$schema") != _SCAN_RESULT_JSON_SCHEMA or int(document.get("schema_version") or 0) != 1:
-        raise ValueError("Unsupported SecFlow scan-result JSON schema")
+        raise ValueError("Unsupported AegisAl scan-result JSON schema")
     payload = document.get("payload") if isinstance(document.get("payload"), dict) else None
     if payload is None:
-        raise ValueError("SecFlow scan-result JSON is missing payload")
+        raise ValueError("AegisAl scan-result JSON is missing payload")
     source_kind = str(document.get("source_kind") or "assistant_scan")
     facts = _scan_result_facts(payload, source_kind)
     document["facts"] = facts
@@ -5357,7 +5357,7 @@ def _build_report_json_document(
         "generated_at": str(metadata.get("created_at") or now_iso()),
         "source": source,
         "summary": {
-            "title": str(render_document.get("title") or metadata.get("title") or "SecFlow 企业安全报告"),
+            "title": str(render_document.get("title") or metadata.get("title") or "神盾企业安全报告"),
             "language": str(metadata.get("language") or source.get("language") or "zh-Hans"),
             "scan_type": str((metadata.get("report_plan") or {}).get("scan_type") or "full_scan"),
             "source_sha256": str((source.get("audit") or {}).get("payload_sha256") or ""),
@@ -5461,40 +5461,40 @@ def validate_report_document_json(value: dict[str, Any]) -> dict[str, Any]:
 
     document = _json_report_value(value)
     if document.get("$schema") != _REPORT_DOCUMENT_JSON_SCHEMA:
-        raise ValueError("Unsupported SecFlow report JSON schema")
+        raise ValueError("Unsupported AegisAl report JSON schema")
     if int(document.get("schema_version") or 0) < _REPORT_DOCUMENT_SCHEMA_VERSION:
-        raise ValueError("SecFlow report JSON schema version is outdated")
+        raise ValueError("AegisAl report JSON schema version is outdated")
     source = document.get("source") if isinstance(document.get("source"), dict) else {}
     validate_scan_result_json(source)
     document["report"] = _validated_render_document(document.get("report") or {})
     if not str(document["report"].get("markdown") or "").strip():
-        raise ValueError("SecFlow report JSON is missing Markdown content")
+        raise ValueError("AegisAl report JSON is missing Markdown content")
     expected_hash = str((source.get("audit") or {}).get("payload_sha256") or "")
     recorded_hash = str((document.get("audit") or {}).get("source_payload_sha256") or "")
     if expected_hash and recorded_hash and expected_hash != recorded_hash:
-        raise ValueError("SecFlow report source hash does not match its audit record")
+        raise ValueError("AegisAl report source hash does not match its audit record")
     sarif = document.get("sarif") if isinstance(document.get("sarif"), dict) else {}
     if sarif:
         sarif_document = sarif.get("sarif") if isinstance(sarif.get("sarif"), dict) else sarif
         if sarif_document.get("version") != "2.1.0" or not isinstance(sarif_document.get("runs"), list):
-            raise ValueError("SecFlow report SARIF is invalid")
+            raise ValueError("AegisAl report SARIF is invalid")
         sarif_input_hash = str(sarif.get("input_sha256") or "")
         if expected_hash and sarif_input_hash and sarif_input_hash != expected_hash:
-            raise ValueError("SecFlow report SARIF source hash does not match scan JSON")
+            raise ValueError("AegisAl report SARIF source hash does not match scan JSON")
         sarif_digest = hashlib.sha256(_canonical_report_json_bytes(sarif_document)).hexdigest()
         if sarif.get("output_sha256") and str(sarif.get("output_sha256")) != sarif_digest:
-            raise ValueError("SecFlow report SARIF checksum verification failed")
+            raise ValueError("AegisAl report SARIF checksum verification failed")
     visuals = document.get("visuals") if isinstance(document.get("visuals"), dict) else {}
     visual_input_hash = str(visuals.get("input_sha256") or "")
     if expected_hash and visual_input_hash and visual_input_hash != expected_hash:
-        raise ValueError("SecFlow report visual source hash does not match scan JSON")
+        raise ValueError("AegisAl report visual source hash does not match scan JSON")
     for diagram in visuals.get("diagrams") or []:
         if not isinstance(diagram, dict):
-            raise ValueError("SecFlow report visual is invalid")
+            raise ValueError("AegisAl report visual is invalid")
         try:
             payload = base64.b64decode(str(diagram.get("image_base64") or ""), validate=True)
         except (TypeError, ValueError) as exc:
-            raise ValueError("SecFlow report visual is not valid base64") from exc
+            raise ValueError("AegisAl report visual is not valid base64") from exc
         media_type = str(diagram.get("image_media_type") or "")
         valid_signature = (
             media_type == "image/jpeg" and payload.startswith(b"\xff\xd8\xff")
@@ -5502,7 +5502,7 @@ def validate_report_document_json(value: dict[str, Any]) -> dict[str, Any]:
             media_type == "image/png" and payload.startswith(b"\x89PNG\r\n\x1a\n")
         )
         if not valid_signature or hashlib.sha256(payload).hexdigest() != str(diagram.get("image_sha256") or ""):
-            raise ValueError("SecFlow report visual checksum verification failed")
+            raise ValueError("AegisAl report visual checksum verification failed")
     audit = document.get("audit") if isinstance(document.get("audit"), dict) else {}
     report_blocks = [
         {"title": section.get("title"), "blocks": section.get("blocks") or []}
@@ -5511,13 +5511,13 @@ def validate_report_document_json(value: dict[str, Any]) -> dict[str, Any]:
     ]
     expected_blocks_hash = hashlib.sha256(_canonical_report_json_bytes(report_blocks)).hexdigest()
     if audit.get("report_blocks_sha256") and str(audit.get("report_blocks_sha256")) != expected_blocks_hash:
-        raise ValueError("SecFlow report content-block checksum verification failed")
+        raise ValueError("AegisAl report content-block checksum verification failed")
     expected_sarif_hash = hashlib.sha256(_canonical_report_json_bytes(sarif)).hexdigest()
     if audit.get("sarif_sha256") and str(audit.get("sarif_sha256")) != expected_sarif_hash:
-        raise ValueError("SecFlow report SARIF-envelope checksum verification failed")
+        raise ValueError("AegisAl report SARIF-envelope checksum verification failed")
     expected_visuals_hash = hashlib.sha256(_canonical_report_json_bytes(visuals)).hexdigest()
     if audit.get("visuals_sha256") and str(audit.get("visuals_sha256")) != expected_visuals_hash:
-        raise ValueError("SecFlow report visual-envelope checksum verification failed")
+        raise ValueError("AegisAl report visual-envelope checksum verification failed")
     available_diagrams = {
         str(item.get("image_sha256") or "")
         for item in visuals.get("diagrams") or []
@@ -5531,7 +5531,7 @@ def validate_report_document_json(value: dict[str, Any]) -> dict[str, Any]:
         if isinstance(block, dict) and block.get("type") == "diagram"
     }
     if not referenced_diagrams.issubset(available_diagrams):
-        raise ValueError("SecFlow report content blocks reference an unavailable diagram")
+        raise ValueError("AegisAl report content blocks reference an unavailable diagram")
     return document
 
 
@@ -5561,9 +5561,9 @@ def _render_binary_report_artifacts_with_mcps(
     errors: dict[str, str] = {}
     audits = metadata.get("report_mcps") if isinstance(metadata.get("report_mcps"), list) else []
     for report_format, server, tool, tool_id in (
-        ("docx", "SecFlow Word MCP", "render_word_report", "mcp__report_word__render_word_report"),
-        ("xlsx", "SecFlow Excel MCP", "render_excel_report", "mcp__report_excel__render_excel_report"),
-        ("pdf", "SecFlow PDF MCP", "render_pdf_report", "mcp__report_pdf__render_pdf_report"),
+        ("docx", "AegisAl Word MCP", "render_word_report", "mcp__report_word__render_word_report"),
+        ("xlsx", "AegisAl Excel MCP", "render_excel_report", "mcp__report_excel__render_excel_report"),
+        ("pdf", "AegisAl PDF MCP", "render_pdf_report", "mcp__report_pdf__render_pdf_report"),
     ):
         invoked_at = now_iso()
         try:
@@ -5616,9 +5616,9 @@ def _load_report_json_document(path: Path) -> dict[str, Any]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("SecFlow report JSON cannot be read") from exc
+        raise ValueError("AegisAl report JSON cannot be read") from exc
     if not isinstance(document, dict):
-        raise ValueError("SecFlow report JSON root must be an object")
+        raise ValueError("AegisAl report JSON root must be an object")
     return validate_report_document_json(document)
 
 

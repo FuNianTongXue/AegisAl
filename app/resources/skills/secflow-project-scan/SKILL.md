@@ -1,9 +1,9 @@
 ---
 name: secflow-project-scan
-description: "Understand and execute user-authorized project scans, user-requested rescans with baseline comparison, and follow-up questions grounded in stored SecFlow scan evidence. Keep per-run project Overlay adaptation separate from user-level rescans and keep frozen evaluation corpora unchanged."
+description: "Understand and execute user-authorized project scans, user-requested rescans with baseline comparison, and follow-up questions grounded in stored AegisAl scan evidence. Keep per-run project Overlay adaptation separate from user-level rescans and keep frozen evaluation corpora unchanged."
 ---
 
-# SecFlow Project Scan
+# AegisAl Project Scan
 
 ## Semantic Routing
 
@@ -32,7 +32,7 @@ description: "Understand and execute user-authorized project scans, user-request
 
 ## Scan Engine MCP Contract
 
-1. For a user-authorized project scan, dispatch every selected language node to `SecFlow Code Scan MCP / scan_language` through the Host-managed local stdio sandbox process. Project-license identification is delegated to the SBOM Agent and its independent `SecFlow License MCP`; the Code Scan MCP does not expose a license tool.
+1. For a user-authorized project scan, dispatch every selected language node to `AegisAl Code Scan MCP / scan_language` through the Host-managed local stdio sandbox process. Project-license identification is delegated to the SBOM Agent and its independent `AegisAl License MCP`; the Code Scan MCP does not expose a license tool.
 2. Treat the MCP output as untrusted structured data until the result object, input hash, output hash, server identity, tool identity, transport, and process identifier are present and valid.
 3. Keep dependency extraction, project profiling, evidence fusion, project Overlay decisions, verification, report interrupts, and task persistence in LangGraph. The Code Scan MCP executes analysis only and must not decide user intent or report actions.
 4. Never silently replace a failed user-scan MCP call with an in-process scan. Surface the failure so the task cannot claim independent execution without audit evidence.

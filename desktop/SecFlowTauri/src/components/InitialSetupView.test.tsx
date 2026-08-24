@@ -75,6 +75,37 @@ describe("InitialSetupView", () => {
     expect(useAppStore.getState().settings?.profile.display_name).toBe("新用户");
   });
 
+  it("saves the model after an optional connection test fails", async () => {
+    vi.spyOn(api, "saveProfile").mockImplementation(async (_userId, profile) => ({
+      ...profile,
+      updated_at: "2026-08-06T12:00:00Z",
+    }));
+    const testSpy = vi.spyOn(api, "testLlmConfig").mockRejectedValue(new Error("第三方网关暂时不可用"));
+    const saveSpy = vi.spyOn(api, "saveLlmConfig").mockImplementation(async (_userId, config) => ({
+      ...config,
+      configured: true,
+      api_key_configured: true,
+    }));
+
+    render(<InitialSetupView />);
+    await continueToModelSetup();
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "third-party-key" } });
+    const save = screen.getByRole("button", { name: "保存并进入工作区" });
+    expect(save).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(await screen.findByText("第三方网关暂时不可用")).toBeInTheDocument();
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith("new-user", expect.objectContaining({
+      api_key: "third-party-key",
+      enabled: true,
+    })));
+    expect(testSpy).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().initialSetupRequired).toBe(false);
+  });
+
   it("uses the same complete provider catalog as model settings", async () => {
     vi.spyOn(api, "saveProfile").mockImplementation(async (_userId, profile) => ({
       ...profile,
@@ -209,7 +240,7 @@ describe("InitialSetupView", () => {
     expect(model).toHaveValue("deepseek-enterprise-v3");
   });
 
-  it("requires connection verification again after the selected model changes", async () => {
+  it("clears the verified status after a model change without blocking local save", async () => {
     vi.spyOn(api, "saveProfile").mockImplementation(async (_userId, profile) => ({
       ...profile,
       updated_at: "2026-08-09T09:00:00Z",
@@ -224,7 +255,7 @@ describe("InitialSetupView", () => {
     await continueToModelSetup();
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "test-key" } });
     const save = screen.getByRole("button", { name: "保存并进入工作区" });
-    expect(save).toBeDisabled();
+    expect(save).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
     await waitFor(() => expect(save).toBeEnabled());
@@ -232,7 +263,7 @@ describe("InitialSetupView", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "选择模型" }), {
       target: { value: "deepseek-reasoner" },
     });
-    expect(save).toBeDisabled();
+    expect(save).toBeEnabled();
     expect(screen.queryByText(/\u8fde\u63a5\u6210\u529f/)).not.toBeInTheDocument();
   });
 });

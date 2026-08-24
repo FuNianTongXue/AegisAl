@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
@@ -47,6 +48,78 @@ class FakeKnowledgeGraph:
 
 
 class StandaloneAssistantModuleTests(unittest.TestCase):
+    def test_plain_greeting_returns_locally_without_planner_model_or_translation(self) -> None:
+        graph = Mock()
+        with (
+            patch(
+                "app.agent.assistant_service.plan_assistant_intent",
+                side_effect=AssertionError("a plain greeting must not call the planner model"),
+            ),
+            patch(
+                "app.agent.assistant_service.memory_service.add_exchange",
+                return_value={"id": "msg-7"},
+            ) as remember,
+        ):
+            result = invoke_assistant_question(
+                AskRequest(
+                    question="你好",
+                    user_id="tester",
+                    session_id="local-greeting",
+                    response_language="zh-Hans",
+                ),
+                graph=graph,
+            )
+
+        graph.invoke.assert_not_called()
+        remember.assert_called_once()
+        self.assertEqual(result["mode"], "greeting")
+        self.assertIn("我是小安", result["summary"])
+        self.assertIn("👋", result["summary"])
+        self.assertEqual(result["token_usage"], 0)
+        self.assertEqual(result["orchestration"]["architecture"], "local-deterministic")
+        self.assertEqual(result["session_id"], "local-greeting")
+        self.assertEqual(result["exchange_id"], "msg-7")
+        self.assertNotIn("translation", result)
+
+    def test_local_greeting_obeys_emoji_mode_without_calling_the_model(self) -> None:
+        graph = Mock()
+        with patch("app.agent.assistant_service.memory_service.add_exchange"):
+            for emoji_mode, expected in (("off", False), ("moderate", True), ("active", True)):
+                with self.subTest(emoji_mode=emoji_mode):
+                    result = invoke_assistant_question(
+                        AskRequest(
+                            question="你好",
+                            user_id="tester",
+                            session_id=f"greeting-{emoji_mode}",
+                            response_language="zh-Hans",
+                            emoji_mode=emoji_mode,
+                        ),
+                        graph=graph,
+                    )
+                    self.assertEqual("👋" in result["summary"], expected)
+        graph.invoke.assert_not_called()
+
+    def test_information_greeting_returns_short_term_exchange_id(self) -> None:
+        graph = Mock()
+        with patch(
+            "app.agent.assistant_service.memory_service.add_short_term_exchange",
+            return_value={"id": "short-0012"},
+        ) as remember:
+            result = invoke_assistant_question(
+                AskRequest(
+                    question="你好",
+                    user_id="tester",
+                    session_id="information:article-1",
+                    response_language="zh-Hans",
+                ),
+                graph=graph,
+            )
+
+        graph.invoke.assert_not_called()
+        remember.assert_called_once()
+        self.assertEqual(result["session_id"], "information:article-1")
+        self.assertEqual(result["exchange_id"], "short-0012")
+
     def test_intent_skills_are_resolved_through_the_plugin_registry(self) -> None:
         def registered_body(name: str) -> str:
             return f"registered:{name}"
@@ -240,6 +313,10 @@ class StandaloneAssistantModuleTests(unittest.TestCase):
                 "app.agent.assistant_service.intelligence_service.query_component_vulnerability_catalog",
                 return_value=catalog_result,
             ) as query,
+            patch(
+                "app.agent.assistant_service.memory_service.add_short_term_exchange",
+                return_value={"id": "short-0042"},
+            ) as remember,
         ):
             result = invoke_assistant_question(
                 AskRequest(
@@ -247,7 +324,7 @@ class StandaloneAssistantModuleTests(unittest.TestCase):
                     intent_hint="recent_high_vulnerability_lookup",
                     top_k=5,
                     user_id="tester",
-                    session_id="information-fast-query",
+                    session_id="information:fast-query",
                 ),
                 graph=FakeKnowledgeGraph(),
             )
@@ -258,6 +335,52 @@ class StandaloneAssistantModuleTests(unittest.TestCase):
         self.assertEqual(query.call_args.kwargs["severities"], ["HIGH"])
         self.assertFalse(query.call_args.kwargs["include_realtime"])
         self.assertEqual(query.call_args.kwargs["limit"], 5)
+        remember.assert_called_once()
+        self.assertEqual(result["exchange_id"], "short-0042")
+
+    def test_standalone_route_saves_information_table_edits_in_short_term_memory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            from app.memory import LongTermMemoryService
+
+            service = LongTermMemoryService(Path(temp_dir) / "memory.json")
+            stored = service.add_short_term_exchange(
+                "tester",
+                "information:standalone",
+                "查看记录",
+                {
+                    "summary": "已返回译后记录。",
+                    "tables": [{
+                        "id": "records",
+                        "columns": [{"key": "title", "label": "标题"}],
+                        "rows": [{"title": "原译文"}],
+                    }],
+                },
+            )
+            edits = [{
+                "id": "records",
+                "type": "records-table",
+                "columns": [{"key": "title", "label": "标题"}],
+                "rows": [{"title": "修订译文"}],
+                "edited": True,
+            }]
+            with patch.object(assistant_routes, "memory_service", service), TestClient(
+                assistant_app.app,
+            ) as client:
+                response = client.patch(
+                    "/api/assistant/conversations/information:standalone/exchanges/"
+                    f"{stored['id']}/table-edits",
+                    params={"user_id": "tester"},
+                    json={"tables": edits},
+                )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["data"]["tables"], edits)
+            recent = service.build_short_term_context(
+                "tester",
+                "information:standalone",
+                "继续",
+            )["recentHistory"]
+            self.assertEqual(recent[-1]["answerPayload"]["structured_data_edits"], edits)
 
     def test_recent_high_free_text_uses_deterministic_catalog_planning(self) -> None:
         plan = heuristic_intent_plan("查询近期高危漏洞")
@@ -468,7 +591,7 @@ class StandaloneAssistantModuleTests(unittest.TestCase):
 
         self.assertEqual(graph.status_code, 200, graph.text)
         graph_data = graph.json()["data"]
-        self.assertEqual(graph_data["name"], "SecFlow Multi-Agent Supervisor")
+        self.assertEqual(graph_data["name"], "AegisAl Multi-Agent Supervisor")
         self.assertEqual(graph_data["architecture"], "supervisor-specialists")
         self.assertEqual(graph_data["subgraphs"][0]["name"], "standalone-test")
         self.assertEqual(response.status_code, 200, response.text)
@@ -496,10 +619,13 @@ class StandaloneAssistantModuleTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.text.count("event: trace"), 1)
         self.assertLess(response.text.index("event: trace"), response.text.index("event: content"))
         self.assertLess(response.text.index("event: content"), response.text.index("event: result"))
         content = response.text.split("event: content\ndata: ", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(json.loads(content)["delta"], "独立智能问答响应")
+        result_data = response.text.split("event: result\ndata: ", 1)[1].split("\n\n", 1)[0]
+        self.assertEqual(len(json.loads(result_data)["trace"]), 1)
 
 
 if __name__ == "__main__":

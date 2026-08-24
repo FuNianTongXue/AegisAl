@@ -26,13 +26,34 @@ from app.storage import now_iso
 CODE_SCAN_MCP_SCHEMA_VERSION = 1
 CODE_SCAN_MCP_SERVER_ID = "code-scan"
 CODE_SCAN_MCP_TOOL_NAME = "scan_language"
+CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT = 500
+_SYNTAX_GRAPH_FIELDS = ("ast_graph", "cfg_graph", "dfg_graph")
+_SYNTAX_TRANSPORT_FIELDS = (
+    "file",
+    "language",
+    "parser",
+    "parser_mode",
+    "parse_error",
+    "raw_parse_error",
+    "recovered_parse_error",
+    "parser_error_nodes",
+    "preprocessor_definition_count",
+    "ast_node_count",
+    "control_count",
+    "assignment_count",
+    "cfg_node_count",
+    "cfg_edge_count",
+    "dfg_edge_count",
+)
 
 
 class CodeScanMCPOutput(BaseModel):
     schema_version: Literal[1] = CODE_SCAN_MCP_SCHEMA_VERSION
-    server: Literal["SecFlow Code Scan MCP"] = "SecFlow Code Scan MCP"
+    # Accept the legacy wire label when reading older sidecars, but always emit
+    # the current public brand in newly generated payloads.
+    server: Literal["AegisAl Code Scan MCP", "SecFlow Code Scan MCP"] = "AegisAl Code Scan MCP"
     tool: Literal["scan_language"] = CODE_SCAN_MCP_TOOL_NAME
-    engine: Literal["SecFlow Static Analyzer"] = "SecFlow Static Analyzer"
+    engine: Literal["AegisAl Static Analyzer", "SecFlow Static Analyzer"] = "AegisAl Static Analyzer"
     process_id: int
     language: str
     started_at: str
@@ -44,9 +65,9 @@ class CodeScanMCPOutput(BaseModel):
 
 
 code_scan_mcp = FastMCP(
-    "SecFlow Code Scan MCP",
+    "AegisAl Code Scan MCP",
     instructions=(
-        "Read only the explicitly authorized workspace paths and run the SecFlow static-rule, "
+        "Read only the explicitly authorized workspace paths and run the AegisAl static-rule, "
         "AST, CFG, DFG, interprocedural, and taint engines. Never "
         "execute project code, build scripts, package-manager hooks, or arbitrary commands."
     ),
@@ -58,7 +79,7 @@ code_scan_mcp = FastMCP(
 
 @code_scan_mcp.tool(
     name=CODE_SCAN_MCP_TOOL_NAME,
-    description="Scan one dispatched project language using the independent SecFlow analysis engine.",
+    description="Scan one dispatched project language using the independent AegisAl analysis engine.",
     structured_output=True,
 )
 def scan_language(
@@ -94,14 +115,16 @@ def scan_language(
     input_sha256 = _json_sha256(logical_input)
     started_at = now_iso()
     started = time.monotonic()
-    result = semgrep_tool.analyze(
-        attachments,
-        dependency_scan,
-        [],
-        rule_paths=verified_rules,
-        cancelled=lambda: bool(marker and marker.exists()),
-        language_hint=language,
-        include_all_attachments=bool(complete_scan),
+    result = _compact_scan_result_for_transport(
+        semgrep_tool.analyze(
+            attachments,
+            dependency_scan,
+            [],
+            rule_paths=verified_rules,
+            cancelled=lambda: bool(marker and marker.exists()),
+            language_hint=language,
+            include_all_attachments=bool(complete_scan),
+        )
     )
     completed_at = now_iso()
     return CodeScanMCPOutput(
@@ -114,6 +137,95 @@ def scan_language(
         output_sha256=_json_sha256(result),
         result=result,
     )
+
+
+def _compact_scan_result_for_transport(result: dict[str, Any]) -> dict[str, Any]:
+    """Bound per-file MCP output while preserving findings and aggregate scan facts."""
+
+    raw_files = result.get("files") if isinstance(result.get("files"), list) else []
+    parse_error_files: list[dict[str, Any]] = []
+    discovered_parse_error_names: list[str] = []
+    graph_previews_omitted = 0
+    graph_preview_nodes_omitted = 0
+    graph_preview_edges_omitted = 0
+
+    for raw_file in raw_files:
+        if not isinstance(raw_file, dict):
+            continue
+        raw_syntax = raw_file.get("syntax") if isinstance(raw_file.get("syntax"), dict) else {}
+        compact_graphs: dict[str, dict[str, Any]] = {}
+        for field in _SYNTAX_GRAPH_FIELDS:
+            raw_graph = raw_syntax.get(field) if isinstance(raw_syntax.get(field), dict) else {}
+            preview_nodes = raw_graph.get("nodes") if isinstance(raw_graph.get("nodes"), list) else []
+            preview_edges = raw_graph.get("edges") if isinstance(raw_graph.get("edges"), list) else []
+            preview_omitted = bool(preview_nodes or preview_edges)
+            if preview_omitted:
+                graph_previews_omitted += 1
+                graph_preview_nodes_omitted += len(preview_nodes)
+                graph_preview_edges_omitted += len(preview_edges)
+            compact_graphs[field] = {
+                "node_count": int(raw_graph.get("node_count") or 0),
+                "edge_count": int(raw_graph.get("edge_count") or 0),
+                "preview_omitted": preview_omitted,
+            }
+        if not bool(raw_syntax.get("parse_error")):
+            continue
+        file_name = str(raw_file.get("file_name") or raw_syntax.get("file") or "")
+        discovered_parse_error_names.append(file_name)
+        if len(parse_error_files) >= CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT:
+            continue
+
+        syntax = {
+            field: raw_syntax[field]
+            for field in _SYNTAX_TRANSPORT_FIELDS
+            if field in raw_syntax
+        }
+        syntax.update(compact_graphs)
+        parse_error_files.append(
+            {
+                "file_name": file_name,
+                "language": str(raw_file.get("language") or raw_syntax.get("language") or ""),
+                "syntax": syntax,
+            }
+        )
+
+    raw_summary = result.get("syntax_summary") if isinstance(result.get("syntax_summary"), dict) else {}
+    syntax_summary = dict(raw_summary)
+    summary_names = raw_summary.get("parse_error_file_names")
+    if isinstance(summary_names, list):
+        parse_error_names = [str(item) for item in summary_names]
+    else:
+        parse_error_names = discovered_parse_error_names
+    retained_names = parse_error_names[:CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT]
+    syntax_summary["parse_error_file_names"] = retained_names
+    syntax_summary["parse_error_file_name_count"] = len(parse_error_names)
+    syntax_summary["omitted_parse_error_file_names"] = max(0, len(parse_error_names) - len(retained_names))
+    syntax_summary["parse_error_file_names_truncated"] = len(parse_error_names) > len(retained_names)
+
+    parse_error_count = max(
+        len(discovered_parse_error_names),
+        len(parse_error_names),
+        int(raw_summary.get("parse_error_files") or 0),
+    )
+    omitted_file_details = max(0, len(raw_files) - len(parse_error_files))
+    omitted_parse_error_details = max(0, parse_error_count - len(parse_error_files))
+    result_truncated = bool(omitted_file_details or graph_previews_omitted or omitted_parse_error_details)
+    compacted = dict(result)
+    compacted["files"] = parse_error_files
+    compacted["syntax_summary"] = syntax_summary
+    compacted["result_truncated"] = result_truncated
+    compacted["transport_compaction"] = {
+        "source_file_count": len(raw_files),
+        "retained_file_details": len(parse_error_files),
+        "omitted_file_details": omitted_file_details,
+        "parse_error_file_limit": CODE_SCAN_MCP_PARSE_ERROR_PREVIEW_LIMIT,
+        "omitted_parse_error_file_details": omitted_parse_error_details,
+        "parse_error_file_details_truncated": bool(omitted_parse_error_details),
+        "graph_previews_omitted": graph_previews_omitted,
+        "graph_preview_nodes_omitted": graph_preview_nodes_omitted,
+        "graph_preview_edges_omitted": graph_preview_edges_omitted,
+    }
+    return compacted
 
 
 @code_scan_mcp.tool(
@@ -345,7 +457,7 @@ def _public_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run the independent SecFlow Code Scan MCP service.")
+    parser = argparse.ArgumentParser(description="Run the independent AegisAl Code Scan MCP service.")
     parser.add_argument("--transport", choices=("stdio",), default="stdio")
     parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)

@@ -50,7 +50,7 @@ export function useBackendBootstrap() {
         api.conversations(userId, true).then((archivedConversations) => set({ archivedConversations })),
       ]));
     } catch (error) {
-      console.error("SecFlow bootstrap failed", error);
+      console.error("AegisAl bootstrap failed", error);
       // StrictMode and explicit refreshes can overlap. A successful caller
       // must not be replaced by a late failure from an older startup attempt.
       if (useAppStore.getState().bootstrapReady) set({ bootstrapError: undefined });
@@ -95,7 +95,7 @@ async function retryHealth() {
 
 function logBootstrapFailures(results: PromiseSettledResult<unknown>[]) {
   results.forEach((result) => {
-    if (result.status === "rejected") console.error("SecFlow bootstrap request failed", result.reason);
+    if (result.status === "rejected") console.error("AegisAl bootstrap request failed", result.reason);
   });
 }
 

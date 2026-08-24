@@ -16,6 +16,7 @@ class AssistantAgentContext:
     user_id: str
     session_id: str
     response_language: str
+    emoji_mode: str
     attachments: list[dict[str, Any]]
     workspace_path: str
     task_context: dict[str, Any]
@@ -54,6 +55,7 @@ class GraphSpecialistAgent:
             user_id=context.user_id,
             session_id=context.session_id,
             response_language=context.response_language,
+            emoji_mode=context.emoji_mode,
             attachments=context.attachments,
             workspace_path=context.workspace_path,
             task_context=context.task_context,

@@ -105,7 +105,7 @@ _registry_lock = RLock()
 _registry_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 license_scan_mcp = FastMCP(
-    "SecFlow License MCP",
+    "AegisAl License MCP",
     instructions=(
         "Read only dependency manifests, SPDX declarations, and license evidence from an explicitly "
         "authorized workspace. Do not run static code analysis, project code, builds, or package hooks."
@@ -433,7 +433,7 @@ def _fetch_osi_registry() -> list[dict[str, Any]]:
     timeout = max(1.0, min(float(os.getenv("SECFLOW_OSI_LICENSE_API_TIMEOUT_SECONDS", "8") or 8), 30.0))
     request = urllib.request.Request(
         OSI_LICENSES_API_URL,
-        headers={"Accept": "application/json", "User-Agent": "SecFlow-License-Scanner/1"},
+        headers={"Accept": "application/json", "User-Agent": "AegisAl-License-Scanner/1"},
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - URL is a fixed trusted constant.
@@ -484,7 +484,7 @@ def identify_project_licenses(workspace_path: str) -> dict[str, Any]:
         "server": license_scan_mcp.name,
         "tool": "identify_project_licenses",
         "transport": "in-process",
-        "engine": "SecFlow License Analyzer",
+        "engine": "AegisAl License Analyzer",
         "process_id": os.getpid(),
         "started_at": started_at,
         "completed_at": now_iso(),

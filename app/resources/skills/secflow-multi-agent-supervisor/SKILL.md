@@ -1,9 +1,9 @@
 ---
 name: secflow-multi-agent-supervisor
-description: "Coordinate SecFlow specialist agents through explicit, auditable handoffs. Use for assistant questions, authorized project scans, SBOM generation, full scans (code scan + SBOM), component intelligence, vulnerability research, scan follow-up, and report operations. When a user requests a scan without specifying the type, ask them to choose: code scan, SBOM scan, or full scan. Give each specialist only its allowed tools, preserve human interrupts, and keep online project adaptation isolated from frozen evaluation corpora."
+description: "Coordinate AegisAl specialist agents through explicit, auditable handoffs. Use for assistant questions, authorized project scans, SBOM generation, full scans (code scan + SBOM), component intelligence, vulnerability research, scan follow-up, and report operations. When a user requests a scan without specifying the type, ask them to choose: code scan, SBOM scan, or full scan. Give each specialist only its allowed tools, preserve human interrupts, and keep online project adaptation isolated from frozen evaluation corpora."
 ---
 
-# SecFlow Multi-Agent Supervisor
+# AegisAl Multi-Agent Supervisor
 
 ## Planning And Handoff
 

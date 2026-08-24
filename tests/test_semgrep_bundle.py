@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 class SemgrepBundleValidationTests(unittest.TestCase):
+    BUNDLED_VERSION = "1.174.0"
+
     def test_self_contained_runtime_with_java_rules_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, rules = self._make_runtime(Path(temp_dir))
@@ -16,7 +18,19 @@ class SemgrepBundleValidationTests(unittest.TestCase):
             result = self._validate(runtime, rules)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Validated Semgrep 1.170.0", result.stdout)
+        self.assertIn(f"Validated Semgrep {self.BUNDLED_VERSION}", result.stdout)
+
+    def test_external_cli_fallback_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, rules = self._make_runtime(Path(temp_dir))
+            cli = runtime / "secflow-semgrep"
+            cli.write_text("#!/bin/sh\nexec pysemgrep \"$@\"\n", encoding="utf-8")
+            cli.chmod(0o755)
+
+            result = self._validate(runtime, rules)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("isolated CLI cannot start", result.stderr)
 
     def test_external_symbolic_link_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as external_dir:
@@ -34,11 +48,17 @@ class SemgrepBundleValidationTests(unittest.TestCase):
     def _make_runtime(root: Path) -> tuple[Path, Path]:
         runtime = root / "semgrep"
         runtime.mkdir(parents=True)
+        metadata = runtime / "_internal" / "semgrep-1.174.0.dist-info" / "METADATA"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: semgrep\nVersion: 1.174.0\n",
+            encoding="utf-8",
+        )
         cli = runtime / "secflow-semgrep"
         cli.write_text(
             "#!/bin/sh\n"
             "if [ \"${1:-}\" = \"--version\" ]; then\n"
-            "  printf '%s\\n' '1.170.0'\n"
+            "  printf '%s\\n' '1.174.0'\n"
             "  exit 0\n"
             "fi\n"
             "output=''\n"
@@ -46,7 +66,7 @@ class SemgrepBundleValidationTests(unittest.TestCase):
             "  if [ \"$1\" = \"--json-output\" ]; then shift; output=$1; fi\n"
             "  shift\n"
             "done\n"
-            "printf '%s\\n' '{\"results\":[{\"check_id\":\"secflow.java.command-injection\"}]}' > \"$output\"\n",
+            "printf '%s\\n' '{\"version\":\"1.174.0\",\"results\":[{\"check_id\":\"secflow.java.command-injection\"}]}' > \"$output\"\n",
             encoding="utf-8",
         )
         cli.chmod(0o755)

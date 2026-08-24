@@ -83,7 +83,8 @@ describe("AppSidebar deletion state", () => {
     });
 
     render(<AppSidebar />);
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
 
     await waitFor(() => expect(useAppStore.getState().conversations).toEqual([]));
     expect(api.deleteConversation).toHaveBeenCalledWith("conversation-session", "analyst");
@@ -118,7 +119,8 @@ describe("AppSidebar deletion state", () => {
 
     render(<AppSidebar />);
     fireEvent.click(within(screen.getByRole("group", { name: "导航视图" })).getByRole("button", { name: "项目" }));
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
 
     await waitFor(() => expect(useAppStore.getState().tasks).toEqual([]));
     expect(api.deleteTask).toHaveBeenCalledWith(task.id, "analyst");
@@ -244,10 +246,36 @@ describe("AppSidebar deletion state", () => {
     useAppStore.setState({ conversations: [conversation] });
 
     render(<AppSidebar />);
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
 
     expect(remove).not.toHaveBeenCalled();
     expect(useAppStore.getState().conversations).toEqual([conversation]);
+  });
+
+  it("renders item actions outside the clipped sidebar scroll and flips the menu above a low anchor", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 768 });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("sidebar-context-menu")) return rectangle({ left: 0, top: 0, width: 126, height: 72 });
+      if (this.getAttribute("aria-label") === "更多操作") return rectangle({ left: 220, top: 730, width: 24, height: 24 });
+      return rectangle({ left: 0, top: 0, width: 0, height: 0 });
+    });
+    useAppStore.setState({ conversations: [conversation] });
+
+    const { container } = render(<AppSidebar />);
+    const trigger = screen.getByRole("button", { name: "更多操作" });
+    fireEvent.click(trigger);
+
+    const menu = screen.getByRole("menu", { name: "更多操作" });
+    expect(container.querySelector(".sidebar-scroll .context-menu")).not.toBeInTheDocument();
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu).toHaveStyle({ left: "118px", top: "654px", visibility: "visible" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "更多操作" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
   it("exposes the project/task switch as a pressed button group", () => {
@@ -347,4 +375,18 @@ function makeConversations(count: number): ConversationSummary[] {
     title: `历史对话 ${index + 1}`,
     updated_at: `2026-08-${String((index % 28) + 1).padStart(2, "0")}T08:00:00Z`,
   }));
+}
+
+function rectangle({ left, top, width, height }: { left: number; top: number; width: number; height: number }): DOMRect {
+  return {
+    bottom: top + height,
+    height,
+    left,
+    right: left + width,
+    top,
+    width,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  };
 }

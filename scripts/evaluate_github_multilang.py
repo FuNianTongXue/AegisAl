@@ -97,7 +97,7 @@ ARCHIVE_MAX_SINGLE_FILE_BYTES = 500_000
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the real SecFlow workspace task pipeline on pinned multi-language GitHub projects."
+        description="Run the real AegisAl workspace task pipeline on pinned multi-language GitHub projects."
     )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--workspace", type=Path, default=Path("/tmp/secflow-multilang-500-evaluation"))
@@ -221,7 +221,7 @@ def download_repository_archive(spec: dict[str, Any], destination: Path) -> None
     encoded_ref = urllib.parse.quote(ref, safe="")
     url = f"https://codeload.github.com/{encoded_slug}/tar.gz/{encoded_ref}"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    request = urllib.request.Request(url, headers={"User-Agent": "SecFlow-Multilang-500-Evaluation"})
+    request = urllib.request.Request(url, headers={"User-Agent": "AegisAl-Multilang-500-Evaluation"})
     for attempt in range(4):
         try:
             downloaded = 0
@@ -365,7 +365,7 @@ def scan_project(checkout: Path, spec: dict[str, Any], scan_timeout: int) -> dic
     try:
         state = TaskAgentGraph(adaptive_upload=False).invoke(
             task_id=f"evaluation-{str(spec['slug']).replace('/', '-')}",
-            objective="Run the SecFlow code and dependency security baseline.",
+            objective="Run the AegisAl code and dependency security baseline.",
             workspace_path=str(checkout),
             user_id="evaluation",
         )
@@ -580,7 +580,7 @@ def main() -> int:
         "manifest": str(args.manifest.resolve()),
         "selection_methodology": methodology,
         "evaluation_policy": {
-            "engine": "SecFlow TaskAgentGraph (the macOS app local backend pipeline)",
+            "engine": "AegisAl TaskAgentGraph (the macOS app local backend pipeline)",
             "evaluator_revision": EVALUATOR_REVISION,
             "ground_truth": "not available for ordinary high-star repositories",
             "valid_metrics": [

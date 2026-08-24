@@ -41,7 +41,7 @@ _ECOSYSTEM_ALIASES = {
 }
 
 
-ASSISTANT_INTENT_SYSTEM_PROMPT = """你是 SecFlow 的语义规划节点，不是关键词分类器。
+ASSISTANT_INTENT_SYSTEM_PROMPT = """你是神盾的语义规划节点，不是关键词分类器。
 根据用户真正希望完成的工作，从允许的能力中选择最合适的一项，并提取时间语义和筛选条件。
 当输入明确提供项目工作区，并且用户目标是生成软件物料清单、项目组件/依赖资产清单、项目许可清单、供应链清单或对应 Excel 时，选择 project_sbom_export。应结合目标、工作区、期望产物和上下文理解，不要求用户必须说出“SBOM”这个缩写。
 当输入提供最近一次、当前用户所有的 SBOM 操作上下文，并且用户追问已生成清单匹配了哪些漏洞、命中数量、覆盖状态、组件或许可结果时，选择 sbom_result_follow_up。该能力只读既有 SBOM checkpoint 或长期记忆快照，不得把追问当成下载确认，也不得重新匹配漏洞。

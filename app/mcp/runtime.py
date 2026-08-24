@@ -1,4 +1,4 @@
-"""Secure MCP client runtime shared by SecFlow agents and plugins.
+"""Secure MCP client runtime shared by AegisAl agents and plugins.
 
 The runtime deliberately supports only the two current MCP transports:
 
@@ -384,7 +384,7 @@ class ArtifactPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ToolArtifactPolicy:
-    """Per-tool artifact contract supplied only by the SecFlow Host."""
+    """Per-tool artifact contract supplied only by the AegisAl Host."""
 
     output_argument: str
     max_artifact_bytes: int
@@ -850,18 +850,28 @@ class ToolBroker:
             input_sha256 = _sha256_json(logical_args)
             _validate_json_schema(args, descriptor.input_schema, f"input for {tool_id}")
             phase = "execution"
-            async with state.call_lock:
+            lock_wait_started = time.monotonic()
+            try:
+                await asyncio.wait_for(state.call_lock.acquire(), timeout=hard_timeout)
+            except TimeoutError as exc:
+                raise MCPToolTimeoutError(
+                    f"MCP tool call timed out waiting for the server after {hard_timeout:g}s: {descriptor.name}"
+                ) from exc
+            try:
                 if state.lifecycle is not MCPServerLifecycle.ACTIVE:
                     raise MCPToolNotFoundError(
                         f"MCP server stopped accepting calls: {state.config.server_id}"
                     )
+                remaining_timeout = max(0.001, hard_timeout - (time.monotonic() - lock_wait_started))
                 response = await _call_with_policy(
                     state.session,
                     descriptor.name,
                     args,
-                    timeout_seconds=hard_timeout,
+                    timeout_seconds=remaining_timeout,
                     cancel_event=cancel_event,
                 )
+            finally:
+                state.call_lock.release()
             if bool(getattr(response, "isError", False)):
                 raise MCPToolExecutionError(_error_content(response) or f"MCP tool failed: {tool_id}")
             phase = "output"
@@ -1082,7 +1092,7 @@ class MCPRuntime:
             prefix = config.sandbox.launcher_prefix
             if prefix not in self._trusted_sandbox_launchers:
                 raise MCPConfigurationError(
-                    "Untrusted MCP sandbox launcher is not approved by the SecFlow Host"
+                    "Untrusted MCP sandbox launcher is not approved by the AegisAl Host"
                 )
         connection = _ManagedConnection(config, self._connector, self._handle_disconnect)
         try:

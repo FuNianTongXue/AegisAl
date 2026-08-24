@@ -23,7 +23,7 @@ from app.privacy import sanitize_public_text
 
 _TRANSLATABLE_KEYS = {
     "answer", "analysis", "conclusion", "content", "description", "detail",
-    "fix_advice", "impact", "label", "message", "mitigation", "question",
+    "caption", "fix_advice", "impact", "label", "message", "mitigation", "question",
     "reason", "recommendation", "remediation", "solution", "summary",
     "summary_zh", "text", "title",
 }
@@ -61,11 +61,49 @@ _CONTROL_MACHINE_KEYS = {
     "artifact_id", "file_name", "id", "interrupt_id", "operation_thread_id", "path",
     "report_id", "task_id", "thread_id", "workspace_name", "workspace_path",
 }
+_TABLE_CONTAINER_KEYS = frozenset({"cards", "table", "tables"})
+_TABLE_ROW_KEYS = frozenset({"data", "rows"})
+_TABLE_COLUMN_LABEL_KEYS = frozenset({"label", "name", "title"})
+_TABLE_DISPLAY_ENUM_KEYS = frozenset(
+    {"action", "kind", "mode", "priority", "risk_state", "severity", "state", "status"}
+)
+_TABLE_CONTEXTUAL_NAME_ANCESTORS = frozenset(
+    {"artifact", "component", "package", "project", "workspace"}
+)
+_TABLE_MACHINE_CELL_KEYS = frozenset(
+    (
+        _PROTECTED_KEYS
+        | _DISPLAY_MACHINE_KEYS
+        | {
+            "bom_ref", "commit", "commit_hash", "component", "component_coordinate",
+            "component_id", "component_name", "coordinate", "coordinates", "cpe",
+            "group", "group_id", "package_name", "package_url", "purl", "sha", "sha1",
+        }
+    )
+    - {"action", "kind", "mode", "name", "status"}
+)
 _MACHINE_VALUE = re.compile(
     r"^(?:https?://\S+|urn:uuid:[A-Fa-f0-9-]{36}|[A-Fa-f0-9]{7,64}|"
     r"CVE-\d{4}-\d+|GHSA-[A-Za-z0-9-]+|"
-    r"v?\d+(?:\.\d+){1,4}(?:[-+][A-Za-z0-9.-]+)?|/[A-Za-z0-9._/\\-]+)$",
+    r"v?\d+(?:\.\d+){1,4}(?:[-+][A-Za-z0-9.-]+)?|/[A-Za-z0-9._/\\-]+|"
+    r"[a-z][a-z0-9]*(?:[_:-][a-z0-9]+)+)$",
     flags=re.IGNORECASE,
+)
+_TABLE_MACHINE_VALUE = re.compile(
+    r"^(?:"
+    r"(?:pkg|cpe):\S+|"
+    r"(?:[A-Za-z0-9._+-]+:){1,4}[A-Za-z0-9._+@/-]+|"
+    r"(?:@?[A-Za-z0-9._-]+/)+[A-Za-z0-9._@-]+(?:[:@][A-Za-z0-9._:+-]+)|"
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+|"
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?)?|"
+    r"(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?|"
+    r"(?:true|false|null|none|n/?a)"
+    r")$",
+    flags=re.IGNORECASE,
+)
+_TABLE_DISPLAY_ENUM_VALUE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+$"
 )
 _QUOTED_PATH_PATTERN = r'''["'](?:[A-Za-z]:[\\/]|/)[^"'\r\n]+["']'''
 _WINDOWS_PATH_PATTERN = (
@@ -204,8 +242,8 @@ _MACHINE_PATH = re.compile(r"^(?:@?[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+(?::\d+)?$")
 _FENCED_BLOCK = re.compile(r"```[\s\S]*?```")
 _CACHE_ENGINE_ID = "ctranslate2:opus-mt-en-zh-1.9"
 _TRANSLATION_CACHE_LIMIT = 2_000
-_BATCH_MAX_ITEMS = 24
-_BATCH_MAX_BYTES = 8_000
+_BATCH_MAX_ITEMS = 8
+_BATCH_MAX_BYTES = 4_000
 _LONG_TEXT_CHARS = 4_000
 _LONG_TEXT_CHUNK_CHARS = 2_200
 _PRODUCT_ENTITY_MARKER_DIGITS = "甲乙丙丁戊己庚辛壬癸"
@@ -294,9 +332,9 @@ _translation_cache_lock = RLock()
 
 
 translation_mcp = FastMCP(
-    "SecFlow Translation MCP",
+    "AegisAl Translation MCP",
     instructions=(
-        "Translate customer-visible structured JSON with SecFlow's verified offline language pack. "
+        "Translate customer-visible structured JSON with AegisAl's verified offline language pack. "
         "Never use a configured chat model, API key, provider endpoint, or network transport. "
         "Preserve machine-readable security evidence exactly."
     ),
@@ -351,6 +389,12 @@ def translate_json_payload(
                 if cjk_candidates else []
             ),
         )
+
+    # String-only column definitions lose their field identity after the label
+    # is translated. Lock object-row tables to explicit keys before translating
+    # their labels so renderers never have to infer keys from JSON member order.
+    _bind_object_row_table_columns(translatable_root)
+    candidates = _collect_candidates(translatable_root)
 
     errors: list[str] = []
     translated_fields = 0
@@ -598,20 +642,186 @@ def _collect_candidates(root: Any) -> list[_Candidate]:
     return output
 
 
+def _bind_object_row_table_columns(root: Any) -> None:
+    def visit(value: Any, path: tuple[Any, ...]) -> None:
+        if isinstance(value, dict):
+            normalized_path = [str(item).lower() for item in path if not isinstance(item, int)]
+            if any(item in _TABLE_CONTAINER_KEYS for item in normalized_path):
+                _bind_table_columns(value)
+            for key, item in value.items():
+                visit(item, (*path, str(key)))
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, (*path, index))
+
+    visit(root, ())
+
+
+def _bind_table_columns(table: dict[str, Any]) -> None:
+    columns = table.get("columns")
+    rows = table.get("rows") if isinstance(table.get("rows"), list) else table.get("data")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return
+    object_rows = [row for row in rows if isinstance(row, dict)]
+    if not object_rows:
+        return
+
+    row_keys = list(
+        dict.fromkeys(
+            str(key)
+            for row in object_rows
+            for key in row
+            if not re.search(r"_(?:original|zh|zh_hant)$", str(key), flags=re.IGNORECASE)
+        )
+    )
+    if not row_keys:
+        return
+
+    used_keys: set[str] = set()
+    bound_columns: list[Any] = []
+    for index, column in enumerate(columns):
+        if not isinstance(column, str) or not column.strip():
+            bound_columns.append(column)
+            if isinstance(column, dict) and isinstance(column.get("key"), str):
+                used_keys.add(column["key"])
+            continue
+        key = _matching_table_row_key(column, row_keys, used_keys)
+        if key is None and index < len(row_keys) and row_keys[index] not in used_keys:
+            key = row_keys[index]
+        if key is None:
+            key = next((candidate for candidate in row_keys if candidate not in used_keys), None)
+        if key is None:
+            bound_columns.append(column)
+            continue
+        used_keys.add(key)
+        bound_columns.append({"key": key, "label": column})
+    table["columns"] = bound_columns
+
+
+def _matching_table_row_key(label: str, keys: list[str], used_keys: set[str]) -> str | None:
+    normalized_label = _normalize_machine_key(label)
+    available = [key for key in keys if key not in used_keys]
+    direct = next((key for key in available if _normalize_machine_key(key) == normalized_label), None)
+    if direct is not None:
+        return direct
+    aliases = {
+        "vulnerability_id": ("id", "identifier", "cve", "cve_id", "vulnerability_id"),
+        "cve_id": ("cve_id", "cve", "id", "identifier"),
+        "finding_title": ("title", "finding_title", "name"),
+        "review_status": ("status", "review_status", "state"),
+    }
+    candidates = aliases.get(normalized_label, ())
+    return next((key for alias in candidates for key in available if _normalize_machine_key(key) == alias), None)
+
+
 def _is_translatable_path(path: tuple[Any, ...], value: str) -> bool:
     text = value.strip()
-    if not text or _MACHINE_VALUE.fullmatch(text):
+    if not text:
         return False
     keys = [str(item) for item in path if not isinstance(item, int)]
     if not keys:
         return False
-    key = keys[-1].lower()
+    raw_key = keys[-1]
+    key = raw_key.lower()
     ancestors = {item.lower() for item in keys[:-1]}
-    if key in _PROTECTED_KEYS or key in _DISPLAY_MACHINE_KEYS or ancestors & _PROTECTED_ANCESTORS:
+    if ancestors & _PROTECTED_ANCESTORS:
+        return False
+    if _is_structured_table_column_label_path(path):
+        return (
+            _contains_human_readable_text(text)
+            or _TABLE_DISPLAY_ENUM_VALUE.fullmatch(text) is not None
+        )
+    if _is_structured_table_cell_path(path):
+        # Table rows are presentation data, so prose in arbitrary column keys
+        # must pass through the same Translation Agent as the surrounding
+        # answer. Both the column key and the scalar value are checked so
+        # object rows and positional array rows receive the same protection.
+        machine_key = _normalize_machine_key(raw_key)
+        return (
+            not _is_table_machine_cell_key(path)
+            and not _is_table_machine_value(text, key=machine_key)
+            and (
+                _contains_human_readable_text(text)
+                or _is_table_display_enum_value(text, key=machine_key)
+            )
+        )
+    if _MACHINE_VALUE.fullmatch(text):
+        return False
+    if key in _PROTECTED_KEYS or key in _DISPLAY_MACHINE_KEYS:
         return False
     if key in _TRANSLATABLE_KEYS:
         return True
     return "fields" in ancestors or "vulnerability_card" in ancestors or "interrupt" in ancestors
+
+
+def _is_structured_table_column_label_path(path: tuple[Any, ...]) -> bool:
+    normalized = [str(item).lower() for item in path if not isinstance(item, int)]
+    if not _path_has_table_container(normalized):
+        return False
+    try:
+        columns_index = len(normalized) - 1 - normalized[::-1].index("columns")
+    except ValueError:
+        return False
+    if not any(item in _TABLE_CONTAINER_KEYS for item in normalized[:columns_index]):
+        return False
+    if isinstance(path[-1], int):
+        return normalized[-1] == "columns"
+    return normalized[-1] in _TABLE_COLUMN_LABEL_KEYS and columns_index < len(normalized) - 1
+
+
+def _is_structured_table_cell_path(path: tuple[Any, ...]) -> bool:
+    normalized = [str(item).lower() for item in path if not isinstance(item, int)]
+    if not _path_has_table_container(normalized):
+        return False
+    table_index = max(
+        index for index, item in enumerate(normalized) if item in _TABLE_CONTAINER_KEYS
+    )
+    return any(item in _TABLE_ROW_KEYS for item in normalized[table_index + 1 :])
+
+
+def _path_has_table_container(normalized: list[str]) -> bool:
+    return any(item in _TABLE_CONTAINER_KEYS for item in normalized)
+
+
+def _normalize_machine_key(value: str) -> str:
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
+    return re.sub(
+        r"[^a-z0-9\u3400-\u9fff]+", "_", snake_case.casefold()
+    ).strip("_")
+
+
+def _is_table_machine_cell_key(path: tuple[Any, ...]) -> bool:
+    normalized = [
+        _normalize_machine_key(str(item)) for item in path if not isinstance(item, int)
+    ]
+    key = normalized[-1]
+    if key in _TABLE_MACHINE_CELL_KEYS:
+        return True
+    return key == "name" and bool(
+        set(normalized[:-1]) & _TABLE_CONTEXTUAL_NAME_ANCESTORS
+    )
+
+
+def _is_table_machine_value(value: str, *, key: str) -> bool:
+    if _is_table_display_enum_value(value, key=key):
+        return False
+    return bool(
+        _MACHINE_VALUE.fullmatch(value)
+        or _TABLE_MACHINE_VALUE.fullmatch(value)
+        or _MACHINE_PATH.fullmatch(value)
+        or _TECHNICAL_SEGMENT.fullmatch(value)
+    )
+
+
+def _is_table_display_enum_value(value: str, *, key: str) -> bool:
+    return key in _TABLE_DISPLAY_ENUM_KEYS and bool(
+        _TABLE_DISPLAY_ENUM_VALUE.fullmatch(value)
+    )
+
+
+def _contains_human_readable_text(value: str) -> bool:
+    return bool(_CJK_CHAR.search(value) or _LATIN_PROSE.search(value))
 
 
 def _collect_control_machine_literals(root: Any) -> tuple[str, ...]:
@@ -674,6 +884,12 @@ def _translate_batch(
     product_entities: dict[tuple[str, int], tuple[tuple[str, str], ...]] = {}
     engine_candidates: set[str] = set()
     for candidate in batch:
+        # The answer model already writes in the requested UI language. Pure
+        # Simplified Chinese is therefore safe to publish without loading the
+        # optional English-to-Chinese model; only mixed/English prose needs it.
+        if target == "zh-Hans" and _candidate_already_localized(candidate, target):
+            _set_path(root, candidate.path, candidate.text)
+            continue
         cached = (
             None
             if candidate.protected_literals
@@ -689,6 +905,11 @@ def _translate_batch(
             if cached.provenance is not None:
                 provenances.add(cached.provenance)
             _set_path(root, candidate.path, cached.translated)
+            continue
+        # Large advisory descriptions are handled by the chunked single-item
+        # retry below. Sending them in the first batch can stall the offline
+        # engine on x86_64/Rosetta and delays every later translation request.
+        if len(candidate.text) > _LONG_TEXT_CHARS:
             continue
         pending.append(candidate)
         parts = _split_protected_segments(candidate.text)

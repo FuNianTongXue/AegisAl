@@ -18,6 +18,7 @@ RULES_PATH="${SECFLOW_SEMGREP_RULES_PATH:-$ROOT_DIR/config/semgrep}"
 BACKEND_RUNTIME_DIR="$RESOURCES_DIR/backend"
 BACKEND_EXECUTABLE="$BACKEND_RUNTIME_DIR/secflow-backend"
 TRANSLATION_MODEL_DIR="$ROOT_DIR/app/resources/translation-models/opus-mt-en-zh-1.9"
+BUNDLE_DIR="$TAURI_SOURCE_DIR/target/$TARGET_TRIPLE/release/bundle"
 
 case "$MACOS_ARCH:$TARGET_TRIPLE" in
     arm64:aarch64-apple-darwin|x86_64:x86_64-apple-darwin) ;;
@@ -29,7 +30,7 @@ PYTHON_ARCH="$($PYTHON_BIN -c 'import platform; print(platform.machine())')"
     echo "Python architecture is $PYTHON_ARCH, expected $MACOS_ARCH: $PYTHON_BIN" >&2
     exit 1
 }
-for MODULE in PyInstaller semgrep reportlab docx tree_sitter uvicorn xlsxwriter numpy ctranslate2 sentencepiece opencc; do
+for MODULE in PyInstaller semgrep semdep reportlab docx tree_sitter uvicorn xlsxwriter numpy ctranslate2 sentencepiece opencc; do
     "$PYTHON_BIN" -c "import $MODULE" >/dev/null 2>&1 || {
         echo "Missing Python module: $MODULE" >&2
         exit 1
@@ -38,7 +39,18 @@ done
 "$PYTHON_BIN" "$ROOT_DIR/scripts/validate_translation_model.py" "$TRANSLATION_MODEL_DIR"
 [ -d "$RULES_PATH" ] || { echo "Missing offline Semgrep rules: $RULES_PATH" >&2; exit 1; }
 
-rm -rf "$BUILD_ROOT" "$RESOURCES_DIR"
+# Tauri keeps bundles from previous product names and architectures. Remove
+# legacy-branded bundles from every generated target before building the
+# selected architecture so testers cannot accidentally launch an old app.
+if [ -d "$TAURI_SOURCE_DIR/target" ]; then
+    while IFS= read -r LEGACY_BUNDLE; do
+        rm -rf "$LEGACY_BUNDLE"
+    done < <(find "$TAURI_SOURCE_DIR/target" -type d -path '*/release/bundle/macos/安全智脑.app' -prune -print)
+    while IFS= read -r LEGACY_DMG; do
+        rm -f "$LEGACY_DMG"
+    done < <(find "$TAURI_SOURCE_DIR/target" -type f -path '*/release/bundle/dmg/安全智脑_*.dmg' -print)
+fi
+rm -rf "$BUILD_ROOT" "$RESOURCES_DIR" "$BUNDLE_DIR"
 mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
     "$RESOURCES_DIR/semgrep" "$RESOURCES_DIR/semgrep-rules" "$RESOURCES_DIR/licenses"
 
@@ -93,13 +105,33 @@ else
     "$ROOT_DIR/scripts/validate_tauri_backend_workers.sh" "$BACKEND_EXECUTABLE" "$PYTHON_BIN"
 fi
 
+SEMGREP_HIDDEN_IMPORT_ARGS=()
+while IFS= read -r MODULE_NAME; do
+    [ -n "$MODULE_NAME" ] && SEMGREP_HIDDEN_IMPORT_ARGS+=(--hidden-import "$MODULE_NAME")
+done < <("$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+
+import semdep
+
+site_packages = Path(semdep.__file__).resolve().parent.parent
+for extension in sorted(site_packages.glob("*__mypyc*.so")):
+    print(extension.name.split(".", 1)[0])
+PY
+)
+[ "${#SEMGREP_HIDDEN_IMPORT_ARGS[@]}" -gt 0 ] || {
+    echo "Unable to locate Semgrep's compiled mypyc support module." >&2
+    exit 1
+}
+
 "$PYTHON_BIN" -m PyInstaller \
     --noconfirm \
     --clean \
     --onedir \
     --name secflow-semgrep \
     --collect-all semgrep \
+    --collect-all semdep \
     --copy-metadata semgrep \
+    "${SEMGREP_HIDDEN_IMPORT_ARGS[@]}" \
     --distpath "$SEMGREP_BUILD_DIR/dist" \
     --workpath "$SEMGREP_BUILD_DIR/work" \
     --specpath "$SEMGREP_BUILD_DIR" \
@@ -108,6 +140,7 @@ fi
 cp -R "$SEMGREP_BUILD_DIR/dist/secflow-semgrep/." "$RESOURCES_DIR/semgrep/"
 cp -R "$RULES_PATH/." "$RESOURCES_DIR/semgrep-rules/"
 cp "$ROOT_DIR/licenses/THIRD-PARTY-NOTICES.txt" "$RESOURCES_DIR/licenses/THIRD-PARTY-NOTICES.txt"
+cp "$ROOT_DIR/licenses/Beautiful-UI-MIT.txt" "$RESOURCES_DIR/licenses/Beautiful-UI-MIT.txt"
 cp "$ROOT_DIR/licenses/NumPy-BSD-3-Clause.txt" "$RESOURCES_DIR/licenses/NumPy-BSD-3-Clause.txt"
 cp "$ROOT_DIR/licenses/CTranslate2-MIT.txt" "$RESOURCES_DIR/licenses/CTranslate2-MIT.txt"
 cp "$ROOT_DIR/licenses/SentencePiece-Apache-2.0.txt" "$RESOURCES_DIR/licenses/SentencePiece-Apache-2.0.txt"

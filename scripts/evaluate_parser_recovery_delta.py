@@ -458,7 +458,7 @@ def fetch_pinned_file(slug: str, ref: str, file_name: str, *, cache_dir: Path, t
         return cache_path.read_text(encoding="utf-8", errors="replace")
     quoted_path = urllib.parse.quote(file_name, safe="/")
     url = f"https://raw.githubusercontent.com/{slug}/{ref}/{quoted_path}"
-    request = urllib.request.Request(url, headers={"User-Agent": "SecFlow-parser-recovery-delta/1.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "AegisAl-parser-recovery-delta/1.0"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:

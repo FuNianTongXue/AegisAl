@@ -335,7 +335,7 @@ def _nvd_record(cve: dict[str, Any], config: dict[str, Any], year: int | None) -
     summary = _description(cve)
     return {
         "id": cve_id,
-        "title": summary[:160] or cve_id,
+        "title": _bounded_vulnerability_title(summary, fallback=cve_id),
         "severity": _nvd_severity(cve),
         "cvss_score": _nvd_cvss_score(cve),
         "cvss_vector": _nvd_cvss_vector(cve),
@@ -349,6 +349,33 @@ def _nvd_record(cve: dict[str, Any], config: dict[str, Any], year: int | None) -
         "published_at": cve.get("published") or "",
         "updated_at": cve.get("lastModified") or now_iso(),
     }
+
+
+def _bounded_vulnerability_title(text: str, *, fallback: str, limit: int = 160) -> str:
+    """Shorten prose without creating an invalid trailing word fragment."""
+
+    value = str(text or "").strip()
+    if not value:
+        return fallback
+    if len(value) <= limit:
+        return value
+
+    clipped = value[:limit]
+    sentence_ends = list(re.finditer(r"[.!?。！？](?:[\"')\]]*)", clipped))
+    if sentence_ends:
+        sentence = clipped[: sentence_ends[-1].end()].strip()
+        if sentence:
+            return sentence
+
+    if re.search(r"\s", clipped):
+        whole_words = clipped.rsplit(None, 1)[0].rstrip(" ,;:")
+        if whole_words:
+            return whole_words
+
+    # CJK prose has character boundaries rather than whitespace-delimited words.
+    if re.search(r"[\u3400-\u9fff]", clipped):
+        return clipped.rstrip("，、；：")
+    return fallback
 
 
 def _nvd_references(cve: dict[str, Any]) -> list[str]:

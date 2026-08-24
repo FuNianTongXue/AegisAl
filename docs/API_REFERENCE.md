@@ -1,10 +1,10 @@
-# SecFlow API 接口文档
+# 神盾 / AegisAl API 接口文档
 
 ## 1. 基本约定
 
 | 项目 | 值 |
 | --- | --- |
-| API 版本 | 应用版本 1.3.3；桌面契约 `2026-07-subscriptions-v1` |
+| API 版本 | 应用版本 1.3.4；桌面契约 `2026-07-subscriptions-v1` |
 | 桌面 Base URL | 正式版 `http://127.0.0.1:18781`；试用版 `http://127.0.0.1:18783` |
 | 开发 Base URL | `http://127.0.0.1:8000`（示例） |
 | 默认 Content-Type | `application/json` |
@@ -32,14 +32,13 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 
 ## 3. 接口总览
 
-当前 OpenAPI 包含 78 个路径、88 个 HTTP 操作和 33 个 Schema，完整机器可读契约见同目录 `openapi.json`。
+当前 OpenAPI 包含 78 个路径、88 个 HTTP 操作和 36 个 Schema，完整机器可读契约见同目录 `openapi.json`。
 
 ### 3.1 基础与试用
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/` | 重定向到 `/ui` |
-| GET | `/ui` | 内置 Web 管理界面 |
+| GET | `/` | 返回服务标识、桌面客户端标识和 API 文档入口 |
 | GET | `/health` | 服务、契约版本和作者健康信息 |
 | GET | `/api/trial/status` | 查询试用状态；不受试用拦截 |
 
@@ -79,16 +78,16 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 | PATCH | `/api/config/{collector_id}` | `CollectorConfigUpdate` | 更新 `cve` 或 `github_advisory` 配置 |
 | POST | `/api/config/{collector_id}/test` | Path: `collector_id` | 测试采集器连接 |
 | POST | `/api/collect/{collector_id}` | Path: `collector_id` | 立即执行单个采集器 |
-| GET | `/api/vulnerabilities` | Query: `limit`, `severity`, `source`, `query` | 查询本地漏洞记录 |
+| GET | `/api/vulnerabilities` | Query: `query`, `response_language` | 查询或搜索本地漏洞记录，并返回目标语言翻译状态 |
 
 ### 3.5 Dashboard 与实时资讯
 
 | 方法 | 路径 | 请求/参数 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/dashboard` | Query: `start_date`, `end_date` | 获取总览指标 |
+| GET | `/api/dashboard` | Query: `start_date`, `end_date`, `response_language`, `refresh` | 获取带短期缓存的总览指标；`refresh=true` 强制刷新 |
 | POST | `/api/dashboard/refresh` | `DashboardRefreshRequest` | 刷新指定日期范围的总览 |
-| GET | `/api/information` | Query: `limit`, `category`, `refresh`, `locale` | 获取资讯列表和来源状态 |
-| POST | `/api/information/refresh` | - | 强制刷新资讯缓存 |
+| GET | `/api/information` | Query: `query`, `category`, `sort`, `limit`, `refresh`, `response_language` | 获取资讯列表和来源状态；资讯正文保持来源原文 |
+| POST | `/api/information/refresh` | Query: `response_language` | 强制刷新资讯缓存 |
 | GET | `/api/information/images/{item_id}` | Path: `item_id` | 获取资讯图片或回退图片 |
 | GET | `/api/information/source-images/{source_id}` | Path: `source_id` | 获取来源 Logo |
 | PATCH | `/api/information/sources/{source_id}` | `InformationSourceUpdate` | 启用或停用单个来源 |
@@ -100,14 +99,16 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 | 方法 | 路径 | 请求/参数 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/api/intelligence/sources` | - | 情报源能力和状态 |
-| GET | `/api/intelligence/recent` | Query: `limit`, `severity` | 最近漏洞情报 |
+| GET | `/api/intelligence/recent` | - | 最近漏洞情报查询记录 |
 | POST | `/api/intelligence/query` | `IntelligenceQueryRequest` | 聚合 NVD、GitHub Advisory、OSV 等来源 |
 | POST | `/api/components/vulnerabilities/query` | `ComponentVulnerabilityRequest` | 按组件、版本和生态查询漏洞 |
 | POST | `/api/components/vulnerabilities/export` | `ComponentVulnerabilityRequest` | 导出组件查询结果 |
 | POST | `/api/vulnerabilities/components/export` | `VulnerabilityComponentExportRequest` | 导出指定 CVE/GHSA 的组件信息 |
 | GET | `/api/mcp/tools/component-query` | - | 获取 Excel 和 D3 Sankey MCP 工具描述 |
-| GET | `/api/mcp/tools/code-scan` | - | 获取扫描 MCP SSE Schema；实际令牌按 Agent 仅允许 `scan_language` 或 `identify_project_licenses`，不返回动态端口和能力令牌 |
+| GET | `/api/mcp/tools/code-scan` | - | 获取 Host 管理的本地 `stdio` Code Scan MCP 描述；不返回进程参数或能力令牌 |
+| GET | `/api/mcp/tools/license-scan` | - | 获取独立 License MCP 工具描述 |
 | GET | `/api/mcp/tools/project-sbom` | - | 获取项目 SBOM Excel MCP 工具描述 |
+| GET | `/api/mcp/tools/translation` | - | 获取离线 Translation MCP 工具描述 |
 | GET | `/api/assistant/artifacts/{artifact_id}` | Path: `artifact_id` | 下载问答、组件查询或 SBOM 制品 |
 | POST | `/api/assistant/interrupts/resume` | `AssistantInterruptResumeRequest` | 恢复报告、组件目录或 SBOM 子图的用户确认中断 |
 
@@ -122,6 +123,7 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 | GET | `/api/langgraph/assistant` | - | 获取 Supervisor、专业 Agent、handoff 和内部子图描述 |
 | GET | `/api/langgraph/collectors` | - | 获取采集器子图描述 |
 | GET | `/api/system/runtime` | - | 获取 LangGraph、LLM、采集器等运行状态 |
+| GET | `/api/system/capabilities` | - | 获取已注册 Agent、Skills 与 MCP 能力目录 |
 
 `AskRequest` 的核心字段：
 
@@ -132,20 +134,22 @@ macOS 正式版仅监听 `127.0.0.1:18781`。订阅支付事件要求请求头 `
 | `user_id` | string | 默认 `default` |
 | `session_id` | string | 默认 `default` |
 | `response_language` | string | 默认 `zh-Hans` |
+| `emoji_mode` | enum | `off`、`moderate` 或 `active`，默认 `moderate` |
+| `intent_hint` | enum/null | 可提示组件目录、近期高危漏洞或信息咨询意图 |
 | `attachments` | array | 受支持的代码文件或依赖清单；单文件内容最多 120000 字符 |
 
 SSE 客户端应逐个解析 `event:` 和 `data:` 行，并在空行处提交事件：
 
 | 事件 | `data` | 说明 |
 | --- | --- | --- |
-| `trace` | `TraceItem` | 真实 LangGraph 节点状态；可携带脱敏后的 Tool Call 或 Prompt Diff presentation |
-| `content` | `{"delta":"..."}` | 模型供应商实时文本 delta；确定性回答或上游不支持流式时为最终 Markdown 的兼容分片，按接收顺序拼接且不会在 `result` 前重复发送 |
+| `trace` | `TraceItem` | 经字段白名单、长度限制、去重和隐私清洗后的高层节点状态；可携带脱敏 Tool Call 展示信息 |
+| `content` | `{"delta":"..."}` | 完整回答通过翻译与公开发布策略后产生的 Markdown 分片；原始模型 delta 不直接公开 |
 | `result` | `AskResult` | 规范最终结果，包含完整正文、公开 `evidence_sources`、汇总 `token_usage`、制品和完整 trace |
 | `error` | `{"message":"..."}` | 脱敏错误；收到后结束本轮请求 |
 
 `evidence_sources` 只公开 `nvd`、`github_advisory` 和 `osv` 的状态与数量；回答中的其他权威 URL 来自已核验 `reference_links`。客户端不得把进度文案当作独立事实，也不得从 Tool Call presentation 推断未返回的数据。连接取消后客户端停止消费本轮事件。
 
-服务不会把 Responses reasoning、Chat `reasoning_content` 或 Anthropic thinking block 写入 `content`；Thinking 面板只消费 `trace` 中的高层 LangGraph 节点状态。
+服务不会把系统提示词、Prompt Diff、Responses reasoning、Chat `reasoning_content` 或 Anthropic thinking block 写入 `trace` 或 `content`；Thinking 面板只消费 `trace` 中的高层 LangGraph 节点状态。简单问候由本地确定性路径直接响应，不调用模型或翻译，也不产生模型 Token 用量。
 
 ### 3.8 工作区任务
 
@@ -162,6 +166,7 @@ SSE 客户端应逐个解析 `event:` 和 `data:` 行，并在空行处提交事
 | POST | `/api/agent/tasks/{task_id}/report-decision` | `AgentTaskReportDecisionRequest` + `user_id` | 扫描后确认是否生成报告 |
 | POST | `/api/agent/tasks/{task_id}/report-download-decision` | `AgentTaskReportDownloadDecisionRequest` + `user_id` | 报告完成后确认下载及格式 |
 | GET | `/api/agent/tasks/{task_id}/events` | Query: `user_id`, `after` | SSE 任务事件流，可按序号续传 |
+| POST | `/api/assistant/tasks/{task_id}/actions` | `AssistantTaskActionRequest` | 对指定任务执行语义化继续操作、复核或报告动作 |
 
 创建与恢复接口只把任务写入 SQLite WAL `task_jobs` 队列。独立 Worker 使用有期限租约领取任务并持续心跳，FastAPI 进程不运行项目扫描图。Worker 非正常退出后，监管器会启动替代进程；租约过期后任务从持久状态重新执行，最多自动恢复三次。取消排队任务会直接将队列和任务置为 `cancelled`，运行中任务则由 Worker 的持久取消检查停止。
 
@@ -170,6 +175,8 @@ SSE 客户端应逐个解析 `event:` 和 `data:` 行，并在空行处提交事
 问答结果增加 `orchestration`：`schema_version`、`architecture`、`supervisor`、`final_agent`、`visited_agents`、`handoffs` 和隔离策略。handoff 只公开 Agent 标识、能力意图和简短理由，不包含私有推理、绝对工作区路径、凭证或完整工具载荷。完整应用向 Supervisor 注入任务服务；独立 `assistant_app` 不注入，因此扫描执行请求不会越权创建本机任务。
 
 SBOM Agent 通过独立 `SecFlow License MCP / identify_project_licenses` 识别许可；`SecFlow Code Scan MCP` 只暴露 `scan_language`，两个 MCP 的审计字段互不混用。License MCP 只读检查 SPDX、结构化清单和许可证文件，并仅访问固定 OSI API。SBOM 依赖提取只读清单和锁文件，不读取源码推断组件。Report Agent 只能消费 SBOM Agent 已固定的许可事实，不得重新扫描。接口不可用时返回 `coverage_status=partial` 并保留本地证据；自动识别结果不构成法律意见。
+
+Code Scan MCP 由 Host 通过隔离的本地 `stdio` 子进程调用，不监听动态 HTTP/SSE 端口。单语言大项目默认按最多 5000 个文件或 64 MiB 源码分批，跨批次合并告警、解析统计、诊断与审计哈希；传输层省略普通文件的 AST/CFG/DFG 图预览，只保留汇总、告警和有界解析失败明细。上述限制可通过受边界校验的 `SECFLOW_CODE_SCAN_BATCH_MAX_FILES`、`SECFLOW_CODE_SCAN_BATCH_MAX_BYTES` 与 `SECFLOW_STATIC_MAX_FINDINGS` 调整。
 
 创建任务示例：
 
@@ -199,11 +206,11 @@ curl -N 'http://127.0.0.1:18781/api/agent/tasks/TASK_ID/events?user_id=local-use
 | POST | `/api/reports/actions/resume` | `ReportActionResumeRequest` | 使用 `thread_id` 确认或取消中断 |
 | POST | `/api/assistant/interrupts/resume` | `AssistantInterruptResumeRequest` | 统一恢复报告、组件漏洞目录或 SBOM 中断 |
 | GET | `/api/reports/{report_id}` | Path: `report_id` | 报告详情和格式目录 |
-| GET | `/api/reports/{report_id}/download` | Query: `format=md|html|docx|pdf` | 下载指定格式 |
-| GET | `/api/mcp/tools/reports` | - | 获取 SARIF、图表、Mermaid、Markdown、Word 和 PDF MCP 工具描述 |
+| GET | `/api/reports/{report_id}/download` | Query: `format=md|html|docx|xlsx|pdf` | 下载指定格式 |
+| GET | `/api/mcp/tools/reports` | - | 获取 SARIF、图表、Mermaid、Markdown、Word、Excel 和 PDF MCP 工具描述 |
 | GET | `/api/mcp/tools/report-charts` | - | 兼容路径，返回同一组报告 MCP 工具描述 |
 
-报告动作支持 `generate`、`download_report`、`download_report_all_formats`、`download_all`。生成流程先把扫描代码和依赖结果规范化为 JSON，再调用 SARIF MCP 生成 2.1.0 `codeFlows/threadFlows/locations`，由 Mermaid MCP 将每条完整污点路径转为 JPEG，最后让 HTML、Word 和 PDF 从同一 canonical JSON 嵌入相同图像。Markdown 是并列输出格式，不作为 Word/PDF 数据协议。MD、DOCX、PDF 各自由不同 MCP 生成并记录独立哈希审计；全部格式 ZIP 额外包含 canonical JSON 和 SARIF JSON。生成和下载各有一次 interrupt。组件漏洞目录使用两次 interrupt；项目 SBOM 使用漏洞匹配、Excel 生成和下载三次 interrupt。下载中断携带固定制品的 `artifact_ids`，SBOM 还可携带系统目录语义 `destination_hint`。
+报告动作支持 `generate`、`download_report`、`download_report_all_formats`、`download_all`。生成流程先把扫描代码和依赖结果规范化为 JSON，再调用 SARIF MCP 生成 2.1.0 `codeFlows/threadFlows/locations`，由 Mermaid MCP 将每条完整污点路径转为 JPEG，最后让 HTML、Word、Excel 和 PDF 从同一 canonical JSON 生成制品。Markdown 是并列输出格式，不作为 Word/Excel/PDF 数据协议。MD、DOCX、XLSX、PDF 各自由不同 MCP 生成并记录独立哈希审计；全部格式 ZIP 额外包含 canonical JSON 和 SARIF JSON。生成和下载各有一次 interrupt。组件漏洞目录使用两次 interrupt；项目 SBOM 使用漏洞匹配、Excel 生成和下载三次 interrupt。下载中断携带固定制品的 `artifact_ids`，SBOM 还可携带系统目录语义 `destination_hint`。
 
 恢复请求应原样提交确认卡片中的 `thread_id` 与 `interrupt_id`，服务端会校验卡片是否仍是该线程的当前阶段。待确认检查点保存在本机数据目录的 SQLite 中，客户端或本地服务重启后仍可恢复；已经推进的旧卡片返回 `409`，升级前遗留且无法恢复的卡片返回 `status=expired` 并从历史消息中清除，不再返回误导性的 `404`。
 
@@ -227,11 +234,16 @@ curl -N 'http://127.0.0.1:18781/api/agent/tasks/TASK_ID/events?user_id=local-use
 | PATCH | `/api/llm/config` | `LLMConfigRequest` | 保存 OpenAI、Claude、DeepSeek 或自定义端点配置 |
 | POST | `/api/llm/test` | `LLMConfigRequest` | 测试模型连通性 |
 | POST | `/api/llm/models` | `LLMModelsRequest` | 根据提供商官方 API 查询可用模型 |
+| GET | `/api/usage/model` | Query: `user_id`, `days=7|30` | 获取指定时间窗口的模型用量快照 |
 | GET | `/api/assistant/conversations` | Query: `user_id`, `limit`, `archived` | 查询“智能问答”项目中的活动或归档对话摘要 |
 | GET | `/api/assistant/conversations/{session_id}` | Query: `user_id` | 读取指定用户的完整普通问答会话，用于恢复历史上下文 |
+| PATCH | `/api/assistant/conversations/{session_id}/exchanges/{exchange_id}/table-edits` | `AssistantStructuredDataEditRequest` + `user_id` | 保存某次回答中用户编辑后的结构化表格快照 |
 | POST | `/api/assistant/conversations/{session_id}/archive` | `AssistantConversationArchiveRequest` + `user_id` | 归档或恢复普通问答会话 |
 | DELETE | `/api/assistant/conversations/{session_id}` | Query: `user_id` | 永久删除会话并重建不含该会话的长期记忆摘要 |
+| DELETE | `/api/assistant/short-term-sessions/{session_id}` | Query: `user_id` | 删除信息咨询等短期会话 |
 | DELETE | `/api/memory` | `MemoryClearRequest` | 清除指定用户长期记忆 |
+
+`AssistantStructuredDataEditRequest` 最多包含 12 张表；每张表最多 64 列、200 行，每行最多 64 个字段，完整请求体不得超过 1 MB（1,000,000 bytes）。编辑结果保存在 `answer_payload.structured_data_edits`，原始翻译证据和后端事实不被覆盖。`AskResult.exchange_id` 用于把编辑准确关联到当前会话交换。
 
 ### 3.11 兼容路径
 
@@ -239,7 +251,7 @@ curl -N 'http://127.0.0.1:18781/api/agent/tasks/TASK_ID/events?user_id=local-use
 
 会话详情中的 `exchanges[].answer_payload` 保存经过公开输出脱敏后的回答展示载荷，用于恢复 Security Agent 的 Trace、Tool Call、Sources、Token、图表与制品状态；旧记录没有该字段时客户端继续使用 `answer`、`mode`、`confidence` 和 `fields` 兼容恢复。
 
-会话摘要固定返回 `project_id=assistant`、`project_name=智能问答`、`archived` 和 `archived_at`。会话接口同时使用 `user_id` 和 `session_id` 查找记录，不会跨用户返回同名会话。归档会话继续提问时会自动恢复为活动状态。模型密钥不会在公开配置响应中原样返回。`wire_api` 可选择 `chat` 或 `responses`；支持的推理强度由所选模型和提供商决定。
+会话摘要固定返回 `project_id=assistant`、`project_name=智能问答`、`archived` 和 `archived_at`。会话接口同时使用 `user_id` 和 `session_id` 查找记录，不会跨用户返回同名会话。归档会话继续提问时会自动恢复为活动状态。模型密钥不会在公开配置响应中原样返回；省略 `api_key` 会保留现有密钥，只有显式提交 `clear_api_key=true` 才会清除。`wire_api` 可选择 `chat` 或 `responses`；支持的推理强度由所选模型和提供商决定。
 
 ## 4. 关键请求模型
 
@@ -249,8 +261,10 @@ curl -N 'http://127.0.0.1:18781/api/agent/tasks/TASK_ID/events?user_id=local-use
 | --- | --- |
 | `AskRequest` / `AskAttachment` | 问答和上传附件 |
 | `AssistantConversationArchiveRequest` | 普通问答会话归档与恢复 |
+| `AssistantDataTableEdit` / `AssistantStructuredDataEditRequest` | 回答表格编辑和会话持久化 |
 | `AgentTaskCreateRequest` | 工作区任务 |
 | `AssistantWorkspaceActionRequest` | LLM 工作区动作规划和 SBOM/扫描分流 |
+| `AssistantTaskActionRequest` | 已有任务的语义化后续动作 |
 | `AgentTaskReportDecisionRequest` | 是否生成报告 |
 | `AgentTaskReportDownloadDecisionRequest` | 是否下载及格式 |
 | `ReportActionRequest` / `ReportActionResumeRequest` | 独立报告子图 interrupt |
@@ -269,4 +283,4 @@ curl -N 'http://127.0.0.1:18781/api/agent/tasks/TASK_ID/events?user_id=local-use
 - 新增可选字段应保持旧客户端可解码；删除或改变字段语义时必须升级契约版本。
 - SSE 事件消费者应忽略未知事件和未知 JSON 字段。
 - 报告和助手制品只能通过服务返回的 ID 下载，不应拼接任意文件路径。
-- 修改接口后应重新生成 `openapi.json`，并运行 Python 接口测试和 Swift `ModelDecodingTests`。
+- 修改接口后应重新生成 `openapi.json`，并运行 Python 接口测试、React/Vitest 契约测试与 TypeScript 构建检查。

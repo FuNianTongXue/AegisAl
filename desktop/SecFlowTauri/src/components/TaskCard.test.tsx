@@ -55,7 +55,7 @@ describe("TaskCard report confirmation", () => {
 
     expect(await screen.findByRole("button", { name: /Report Agent 生成中/ })).toBeDisabled();
     expect(screen.getByText("报告生成中")).toBeInTheDocument();
-    expect(screen.getByText("Report Agent")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /正在思考 Report Agent/ })).toBeInTheDocument();
     expect(api.decideReport).toHaveBeenCalledTimes(1);
 
     finish({ ...task, report_decision: "generated", report: { id: "report-1", title: "报告", created_at: task.updated_at } });
@@ -129,7 +129,7 @@ describe("TaskCard report confirmation", () => {
       task,
       artifact: {
         id: "report-artifact-bundle",
-        file_name: "SecFlow-report-1-bundle.zip",
+        file_name: "AegisAl-report-1-bundle.zip",
         download_path: "/api/assistant/artifacts/report-artifact-bundle",
       },
     });
@@ -137,11 +137,11 @@ describe("TaskCard report confirmation", () => {
 
     render(<TaskCard task={task} />);
     fireEvent.change(screen.getByLabelText("报告格式"), { target: { value: "all" } });
-    fireEvent.click(screen.getByRole("button", { name: /确认下载/ }));
+    fireEvent.click(screen.getByRole("button", { name: /下载全部格式/ }));
 
     await waitFor(() => expect(api.decideReportDownload).toHaveBeenCalledWith(task.id, "analyst", true, "all"));
     expect(api.decideReportDownload).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(saveBinaryArtifact).toHaveBeenCalled());
-    expect(vi.mocked(saveBinaryArtifact).mock.calls[0][0]).toBe("SecFlow-report-1-bundle.zip");
+    expect(vi.mocked(saveBinaryArtifact).mock.calls[0][0]).toBe("AegisAl-report-1-bundle.zip");
   });
 });

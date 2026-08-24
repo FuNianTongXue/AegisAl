@@ -1,6 +1,11 @@
 import { useEffect, useLayoutEffect } from "react";
 
 import { useI18n } from "../i18n";
+import {
+  applyDocumentAppearance,
+  INFORMATION_APPEARANCE_EVENT,
+  parseInformationAppearance,
+} from "../lib/appearance";
 import { isTauri } from "../lib/platform";
 import { useAppStore } from "../store/appStore";
 import { InformationPanel } from "./InformationPanel";
@@ -11,12 +16,7 @@ export function InformationWindow() {
   const { locale } = useI18n();
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = theme;
-    root.lang = locale;
-    root.style.setProperty("--font-scale", String(fontScale));
-    const dark = theme === "dark" || (theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", dark ? "#171718" : "#fafbfd");
+    applyDocumentAppearance({ theme, fontScale }, locale);
   }, [fontScale, locale, theme]);
 
   useLayoutEffect(() => {
@@ -31,26 +31,40 @@ export function InformationWindow() {
   useEffect(() => {
     if (!isTauri()) return;
     let disposed = false;
-    let cleanup: (() => void) | undefined;
+    const cleanups: Array<() => void> = [];
 
     void import("@tauri-apps/api/event")
-      .then(({ listen }) => listen("secflow:information-opened", () => {
-        window.requestAnimationFrame(() => {
-          document.querySelector<HTMLTextAreaElement>("[aria-label='独立咨询问题']")?.focus();
+      .then(async ({ listen }) => {
+        const opened = await listen("secflow:information-opened", () => {
+          void Promise.resolve(useAppStore.persist.rehydrate())
+            .catch((error) => console.error("Failed to refresh information window appearance", error))
+            .finally(() => {
+              window.requestAnimationFrame(() => {
+                document.querySelector<HTMLTextAreaElement>("[aria-label='独立咨询问题']")?.focus();
+              });
+            });
         });
-      }))
-      .then((unlisten) => {
         if (disposed) {
-          unlisten();
+          opened();
           return;
         }
-        cleanup = unlisten;
+        cleanups.push(opened);
+
+        const appearanceChanged = await listen<unknown>(INFORMATION_APPEARANCE_EVENT, ({ payload }) => {
+          const appearance = parseInformationAppearance(payload);
+          if (appearance) useAppStore.getState().set(appearance);
+        });
+        if (disposed) {
+          appearanceChanged();
+          return;
+        }
+        cleanups.push(appearanceChanged);
       })
       .catch((error) => console.error("Failed to bind information window events", error));
 
     return () => {
       disposed = true;
-      cleanup?.();
+      cleanups.splice(0).forEach((cleanup) => cleanup());
     };
   }, []);
 

@@ -248,7 +248,7 @@ class ComponentQuerySubgraph:
             artifact = publish_mcp_workbook(
                 result,
                 kind="component",
-                default_file_name="SecFlow-component-vulnerabilities.xlsx",
+                default_file_name="AegisAl-component-vulnerabilities.xlsx",
                 generated_at=generated_at,
                 user_id=str(state.get("user_id") or "default"),
                 session_id=str(state.get("session_id") or ""),

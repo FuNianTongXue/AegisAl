@@ -86,7 +86,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("failed to build SecFlow desktop client");
+        .expect("failed to build AegisAl desktop client");
 
     app.run(|handle, event| match event {
         RunEvent::WindowEvent {
@@ -296,7 +296,7 @@ fn verify_file_integrity(path: &Path, expected: &str) -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "安全智脑完整性校验失败：本机安全服务已被修改，应用拒绝启动。",
+        "神盾完整性校验失败：本机安全服务已被修改，应用拒绝启动。",
     ))
 }
 
@@ -384,9 +384,9 @@ fn create_status_item(app: &AppHandle) -> tauri::Result<()> {
     let information = MenuItemBuilder::with_id("secflow-toggle-information", "独立信息咨询")
         .accelerator("CmdOrCtrl+Shift+I")
         .build(app)?;
-    let open_main = MenuItemBuilder::with_id("secflow-open-main", "打开安全智脑").build(app)?;
+    let open_main = MenuItemBuilder::with_id("secflow-open-main", "打开神盾").build(app)?;
     let settings = MenuItemBuilder::with_id("secflow-open-settings", "设置...").build(app)?;
-    let quit = MenuItemBuilder::with_id("secflow-quit", "退出安全智脑").build(app)?;
+    let quit = MenuItemBuilder::with_id("secflow-quit", "退出神盾").build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
@@ -394,7 +394,7 @@ fn create_status_item(app: &AppHandle) -> tauri::Result<()> {
     )?;
 
     let mut builder = TrayIconBuilder::with_id("secflow-information")
-        .tooltip("安全智脑 信息咨询")
+        .tooltip("神盾 · AegisAl 信息咨询")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -491,7 +491,7 @@ fn show_main_window(app: &AppHandle) {
 
 fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("安全智脑")
+        .title("神盾")
         .inner_size(1280.0, 820.0)
         .min_inner_size(960.0, 640.0)
         .decorations(true);

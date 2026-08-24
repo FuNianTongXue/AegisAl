@@ -1,6 +1,7 @@
 import { Activity, AlertTriangle, Bug, CalendarDays, RefreshCcw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { brandDisplayText } from "../branding";
 import { clientLocaleTag, type ClientLocale, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import type { DashboardSnapshot } from "../types";
@@ -8,17 +9,20 @@ import {
   VulnerabilityReadiness,
   vulnerabilityTitle,
 } from "./VulnerabilityTranslationStatus";
+import { StructuredDataTable } from "./StructuredDataTable";
+import type { StructuredDataTableModel } from "./structuredData";
+import { BeautifulLoadingState } from "./beautiful-ui/BeautifulUI";
 
 export function IntelligenceView() {
   const { locale, t } = useI18n();
   const [data, setData] = useState<DashboardSnapshot>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const load = useCallback(async () => {
+  const load = useCallback(async (refresh = false) => {
     setLoading(true);
     setError("");
     try {
-      setData(await api.dashboard(locale));
+      setData(await api.dashboard(locale, refresh));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -36,12 +40,49 @@ export function IntelligenceView() {
   ];
   const donut = useMemo(() => buildConic(severities, total), [total, stats.critical, stats.high, stats.medium, stats.low]);
   const trend = useMemo(() => normalizeTrend(data?.trend), [data?.trend]);
+  const priorityTable = useMemo<StructuredDataTableModel>(() => ({
+    id: "priority-vulnerabilities",
+    caption: t("最近更新的高风险漏洞情报"),
+    columns: [
+      {
+        key: "id",
+        label: t("漏洞"),
+        kind: "text",
+        width: "48%",
+        render: (_value, row) => (
+          <span className="structured-primary-cell">
+            <strong translate="no">{String(row.id || "-")}</strong>
+            <small>{String(row.title || t("暂无漏洞标题"))}</small>
+          </span>
+        ),
+      },
+      { key: "severity", label: t("严重度"), kind: "status", width: "14%" },
+      { key: "source", label: t("来源"), kind: "text", width: "18%" },
+      { key: "updated_at", label: t("更新时间"), kind: "date", width: "20%" },
+    ],
+    rows: (data?.records || []).slice(0, 12).map((record) => ({
+      id: record.id,
+      title: vulnerabilityTitle(record, locale) || t("暂无漏洞标题"),
+      severity: severityLabel(record.severity, t),
+      source: brandDisplayText(record.source) || t("公开情报"),
+      updated_at: formatDate(record.updated_at || record.published_at, locale),
+    })),
+  }), [data?.records, locale, t]);
 
   return (
     <div className="page-scroll intelligence-view">
-      <div className="page-heading"><div><h1>{t("漏洞情报")}</h1><p>{t("公开漏洞情报统计，不代表项目扫描结果。")}</p></div><button className="secondary" onClick={() => void load()} disabled={loading}><RefreshCcw size={14} className={loading ? "spin" : ""} aria-hidden="true" />{t("刷新情报")}</button></div>
-      {error ? <div className="records-load-error" role="alert"><span>{t("漏洞情报加载失败：{error}", { error })}</span><button className="secondary" onClick={() => void load()}>{t("重新加载")}</button></div> : null}
+      <div className="page-heading"><div><h1>{t("漏洞情报")}</h1><p>{t("公开漏洞情报统计，不代表项目扫描结果。")}</p></div><button className="secondary" onClick={() => void load(true)} disabled={loading}><RefreshCcw size={14} className={loading ? "spin" : ""} aria-hidden="true" />{t("刷新情报")}</button></div>
+      {error ? <div className="records-load-error" role="alert"><span>{t("漏洞情报加载失败：{error}", { error: brandDisplayText(error) })}</span><button className="secondary" onClick={() => void load(true)}>{t("重新加载")}</button></div> : null}
+      {loading && !data ? (
+        <BeautifulLoadingState
+          className="empty-list-state"
+          label={t("正在加载漏洞记录…")}
+          detail={t("正在读取本机聚合情报索引")}
+          showElapsed
+        />
+      ) : null}
       {data ? <VulnerabilityReadiness snapshot={data} /> : null}
+      {data ? <>
       <div className="stat-grid">
         <Stat icon={<Bug />} label={t("漏洞总量")} value={total} change={t("当前筛选范围")} locale={locale} />
         <Stat icon={<ShieldAlert />} label={t("严重与高危")} value={Number(stats.critical || 0) + Number(stats.high || 0)} change={`${percent(Number(stats.critical || 0) + Number(stats.high || 0), total)}%`} tone="danger" locale={locale} />
@@ -60,8 +101,9 @@ export function IntelligenceView() {
       </div>
       <section className="record-band">
         <header><div><h2>{t("优先关注")}</h2><p>{t("最近更新的高风险漏洞情报")}</p></div></header>
-        <table className="record-table"><caption className="sr-only">{t("最近更新的高风险漏洞情报")}</caption><thead><tr className="table-head"><th scope="col">{t("漏洞")}</th><th scope="col">{t("严重度")}</th><th scope="col">{t("来源")}</th><th scope="col">{t("更新时间")}</th></tr></thead><tbody>{(data?.records || []).slice(0, 12).map((record) => <tr className="table-row" key={record.id}><td><strong translate="no">{record.id}</strong><small>{vulnerabilityTitle(record, locale) || t("漏洞内容准备中")}</small></td><td><b className={`severity ${safeSeverityClass(record.severity)}`}>{severityLabel(record.severity, t)}</b></td><td translate="no">{record.source || t("公开情报")}</td><td>{formatDate(record.updated_at || record.published_at, locale)}</td></tr>)}{!loading && !error && !data?.records.length ? <tr><td className="table-empty" colSpan={4}>{t("暂无漏洞情报")}</td></tr> : null}</tbody></table>
+        <StructuredDataTable model={priorityTable} emptyLabel={t("暂无漏洞情报")} />
       </section>
+      </> : null}
     </div>
   );
 }
@@ -103,10 +145,10 @@ function Stat({ icon, label, value, change, locale, tone = "neutral" }: { icon: 
 }
 
 function buildConic(items: Array<{ value: number; color: string }>, total: number) {
-  if (!total) return "conic-gradient(#dfe5ed 0 100%)";
+  if (!total) return "conic-gradient(var(--border) 0 100%)";
   let cursor = 0;
   const stops = items.map((item) => { const start = cursor; cursor += (item.value / total) * 100; return `${item.color} ${start}% ${cursor}%`; });
-  if (cursor < 100) stops.push(`#dfe5ed ${cursor}% 100%`);
+  if (cursor < 100) stops.push(`var(--border) ${cursor}% 100%`);
   return `conic-gradient(${stops.join(",")})`;
 }
 
@@ -118,7 +160,6 @@ function normalizeTrend(trend?: Array<{ date: string; count: number }>) {
 
 const percent = (value: number, total: number) => total ? Math.round((value / total) * 100) : 0;
 const severityLabel = (value: string | undefined, t: (source: string) => string) => t({ critical: "严重", high: "高危", medium: "中危", low: "低危" }[value?.toLowerCase() || ""] || "待定");
-const safeSeverityClass = (value?: string) => ["critical", "high", "medium", "low"].includes(value?.toLowerCase() || "") ? value!.toLowerCase() : "unknown";
 const formatNumber = (value: number, locale: ClientLocale) => new Intl.NumberFormat(clientLocaleTag(locale)).format(Number(value || 0));
 const formatTrendDate = (value: string, locale: ClientLocale) => {
   const parsed = new Date(`${value}T00:00:00Z`);

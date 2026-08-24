@@ -39,7 +39,7 @@ _HIGH_STAR_FORBIDDEN_ADAPTIVE_KEYS = {
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Check SecFlow security-evaluation regression gates. "
+            "Check AegisAl security-evaluation regression gates. "
             "This gate is for development regression only; ordinary high-star repositories "
             "do not provide product precision/recall ground truth."
         )

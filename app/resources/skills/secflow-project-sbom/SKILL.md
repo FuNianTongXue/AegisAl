@@ -3,7 +3,7 @@ name: secflow-project-sbom
 description: "Build an auditable CycloneDX-compatible SBOM JSON and Excel workbook from a user-authorized project, own project-license identification through a capability-scoped MCP and OSI License API, optionally match versioned components, and answer read-only follow-ups from stored SBOM facts. Use when the user wants a software bill of materials, project dependency inventory, supply-chain component inventory, license inventory, equivalent workbook, or existing SBOM result details. Do not use for ordinary code vulnerability scans or frozen evaluation corpora."
 ---
 
-# SecFlow Project SBOM
+# AegisAl Project SBOM
 
 ## Semantic Routing
 
@@ -16,7 +16,7 @@ description: "Build an auditable CycloneDX-compatible SBOM JSON and Excel workbo
 
 1. Resolve and validate the authorized project path without allowing symlink scope expansion.
 2. Read only authoritative dependency manifests and lockfiles. If none are present, return an empty component inventory with an explicit warning; never inspect source imports or invoke static code analysis as a fallback.
-3. As the SBOM Agent, call the independent `SecFlow License MCP` tool `identify_project_licenses`. Code Scan, Conversation, and Report agents cannot invoke it. Detect SPDX identifiers, structured manifest license fields, and project license files without running project code.
+3. As the SBOM Agent, call the independent `AegisAl License MCP` tool `identify_project_licenses`. Code Scan, Conversation, and Report agents cannot invoke it. Detect SPDX identifiers, structured manifest license fields, and project license files without running project code.
 4. Standardize detected licenses with `https://opensource.org/api/licenses`. Preserve the local result if OSI is unavailable, mark coverage `partial`, and never translate an upstream failure into “no license”.
 5. Normalize extracted dependencies and project-license evidence into one CycloneDX-compatible JSON document before invoking any workbook tool. Attach project licenses to `metadata.component.licenses` and retain evidence and API audit fields.
 6. Interrupt and ask whether the user wants component vulnerability intelligence matching. Match only concrete component versions; label unresolved versions and partial coverage explicitly.

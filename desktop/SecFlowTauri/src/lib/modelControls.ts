@@ -21,14 +21,13 @@ export const providerPresets: ProviderPreset[] = [
   { id: "custom", label: "OpenAI 兼容接口", endpoint: "", backendProvider: "custom", catalogProvider: "custom", models: [], wireApi: "chat" },
 ];
 
-const responseReasoningOptions: ReasoningOption[] = [
-  { value: "none" },
-  { value: "low" },
-  { value: "medium" },
-  { value: "high" },
-  { value: "xhigh" },
-  { value: "max" },
-];
+const reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"] as const;
+const reasoningEffortSet = new Set<string>(reasoningEfforts);
+const responseReasoningOptions: ReasoningOption[] = reasoningEfforts.map((value) => ({ value }));
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === "string" && reasoningEffortSet.has(value);
+}
 
 export function selectedProviderId(config?: Partial<LlmConfig>): string {
   const provider = String(config?.provider || "").trim().toLowerCase();
@@ -82,7 +81,8 @@ export function modelOptionsFor(
 }
 
 export function reasoningOptionsFor(config?: Partial<LlmConfig>): ReasoningOption[] {
-  if (config?.reasoning_options?.length) return config.reasoning_options;
+  const declaredOptions = (config?.reasoning_options || []).filter((option) => isReasoningEffort(option?.value));
+  if (declaredOptions.length) return declaredOptions;
   const provider = String(config?.provider || "").toLowerCase();
   const model = String(config?.model || "").toLowerCase();
   if (provider === "openai" || config?.wire_api === "responses") return responseReasoningOptions;
@@ -92,10 +92,10 @@ export function reasoningOptionsFor(config?: Partial<LlmConfig>): ReasoningOptio
 
 export function normalizedReasoningEffort(
   config: Partial<LlmConfig>,
-  requested?: ReasoningEffort,
+  requested?: unknown,
 ): ReasoningEffort {
   const options = reasoningOptionsFor(config);
-  if (requested && options.some((option) => option.value === requested)) return requested;
+  if (isReasoningEffort(requested) && options.some((option) => option.value === requested)) return requested;
   if (options.some((option) => option.value === "medium")) return "medium";
   return options[0]?.value || "none";
 }

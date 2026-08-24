@@ -396,7 +396,7 @@ class ComponentQuerySubgraphTests(unittest.TestCase):
             content, metadata = fake.export_component_vulnerabilities()
             artifact = store.save(
                 content,
-                file_name="SecFlow-PyPI-demo-2.3.0-vulnerabilities.xlsx",
+                file_name="AegisAl-PyPI-demo-2.3.0-vulnerabilities.xlsx",
                 generated_at=metadata["generated_at"],
             )
             with (

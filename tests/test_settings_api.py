@@ -165,7 +165,7 @@ class SettingsApiTests(unittest.TestCase):
 
                 terms = client.get("/api/settings/legal/terms")
                 self.assertEqual(terms.status_code, 200)
-                self.assertEqual(terms.json()["data"]["heading"], "安全智脑服务协议")
+                self.assertEqual(terms.json()["data"]["heading"], "神盾服务协议")
 
                 updated_terms = client.patch(
                     "/api/settings/legal/terms",

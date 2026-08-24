@@ -22,7 +22,7 @@ from app.source_filter import SEMGREP_EXCLUDE_PATTERNS, is_analyzable_source_pat
 from app.storage import DATA_DIR, now_iso
 
 
-AST_CFG_DFG_ANALYSIS_PROMPT = """你是 SecFlow 静态分析节点。
+AST_CFG_DFG_ANALYSIS_PROMPT = """你是神盾静态分析节点。
 任务：基于用户上传代码、pom 依赖、漏洞情报组件信息和静态数据流 source→sink 路径，输出中文可审计结论。
 必须按照 AST / CFG / DFG 三层组织证据：
 1. AST：列出类、方法、调用表达式、import 与危险 API。
@@ -526,7 +526,7 @@ class SemgrepTool:
         review_findings = _enrich_code_findings(review_candidates, code_files)
         return {
             "status": "completed" if findings or cli_status == "completed" else "warning",
-            "tool": "SecFlow Static Analyzer",
+            "tool": "AegisAl Static Analyzer",
             "cli_status": cli_status,
             "mode": "bundled-cli" if cli_status == "completed" else "internal-fallback",
             "rule_paths": list(rule_paths or []),
@@ -687,7 +687,7 @@ def _analysis_cancelled(cancelled: Callable[[], bool] | None) -> bool:
 def _cancelled_analysis_result(rule_paths: list[str] | None, diagnostics: list[str]) -> dict[str, Any]:
     return {
         "status": "cancelled",
-        "tool": "SecFlow Static Analyzer",
+        "tool": "AegisAl Static Analyzer",
         "cli_status": "cancelled",
         "mode": "cancelled",
         "rule_paths": list(rule_paths or []),

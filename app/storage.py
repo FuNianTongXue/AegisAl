@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
-
-from cryptography.exceptions import InvalidTag
 
 from app.secure_storage import decrypt_json_from_text, encrypt_json_to_text
 
@@ -147,18 +144,13 @@ class StateStore:
                 state = default_state()
                 self.write(state)
                 return state
-            try:
-                raw = self.path.read_text(encoding="utf-8")
-                state = decrypt_json_from_text(raw, STATE_PURPOSE)
-                if not isinstance(state, dict):
-                    raise ValueError("state payload is not an object")
-                if not raw.lstrip().startswith('{"__secflow_encrypted__"'):
-                    self.write(state)
-                return state
-            except (InvalidTag, json.JSONDecodeError, OSError, ValueError):
-                state = default_state()
+            raw = self.path.read_text(encoding="utf-8")
+            state = decrypt_json_from_text(raw, STATE_PURPOSE)
+            if not isinstance(state, dict):
+                raise ValueError("state payload is not an object")
+            if not raw.lstrip().startswith('{"__secflow_encrypted__"'):
                 self.write(state)
-                return state
+            return state
 
     def write(self, state: dict[str, Any]) -> None:
         with self._lock:

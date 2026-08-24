@@ -14,9 +14,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { clientLocaleTag, type ClientLocale, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
-import type { ChatTurn, InformationItem, TraceItem } from "../types";
+import type { AskResult, ChatTurn, InformationItem, TraceItem } from "../types";
 import { ChatMessage } from "./ChatMessage";
 import { InformationCenterMark } from "./InformationCenterMark";
+import { BRAND_NAME_EN, brandDisplayText } from "../branding";
 
 type PanelMode = "consultation" | "feed";
 type InformationPanelVariant = "floating" | "window";
@@ -119,6 +120,29 @@ export function InformationPanel({
 
   const updateTurn = (id: string, patch: Partial<ChatTurn>) => {
     setTurns((current) => current.map((turn) => turn.id === id ? { ...turn, ...patch } : turn));
+  };
+
+  const saveStructuredData = async (turn: ChatTurn, nextResult: AskResult) => {
+    const targetSessionId = String(nextResult.session_id || sessionIdRef.current || "").trim();
+    const exchangeId = String(nextResult.exchange_id || "").trim();
+    const tables = nextResult.structured_data_edits || [];
+    if (!targetSessionId || !exchangeId || !tables.length) {
+      throw new Error(t("当前记录尚未同步到会话，请稍后重试"));
+    }
+    const saved = await api.updateConversationTableEdits(
+      targetSessionId,
+      exchangeId,
+      userId,
+      tables,
+    );
+    updateTurn(turn.id, {
+      result: {
+        ...nextResult,
+        session_id: targetSessionId,
+        exchange_id: saved.exchange_id || exchangeId,
+        structured_data_edits: saved.tables,
+      },
+    });
   };
 
   const send = async (question: string) => {
@@ -294,7 +318,17 @@ export function InformationPanel({
                 </button>
               ) : null}
               <div role="log" aria-live="off" aria-label="咨询对话记录">
-                {!turns.length ? <ConsultationEmpty onPrompt={(prompt) => void send(prompt)} /> : visibleTurns.map((turn) => <ChatMessage key={turn.id} turn={turn} compact autoExpandThinking={false} />)}
+                {!turns.length ? <ConsultationEmpty onPrompt={(prompt) => void send(prompt)} /> : visibleTurns.map((turn) => (
+                  <ChatMessage
+                    key={turn.id}
+                    turn={turn}
+                    compact
+                    autoExpandThinking={false}
+                    onResultChange={turn.role === "assistant" && turn.result
+                      ? (result) => saveStructuredData(turn, result)
+                      : undefined}
+                  />
+                ))}
               </div>
             </div>
           </div>
@@ -326,14 +360,14 @@ export function InformationPanel({
       ) : (
         <div id="information-feed-panel" className="information-feed" role="tabpanel" aria-labelledby="information-tab-feed">
           {loading && !items.length ? <InformationSkeleton /> : null}
-          {feedError && !items.length ? <div className="information-error" role="alert"><span>资讯加载失败：{feedError}</span><button className="secondary" onClick={() => void refresh()}>重新加载</button></div> : null}
+          {feedError && !items.length ? <div className="information-error" role="alert"><span>资讯加载失败：{brandDisplayText(feedError)}</span><button className="secondary" onClick={() => void refresh()}>重新加载</button></div> : null}
           {items.slice(0, 20).map((item, index) => (
             <a className="information-entry" style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }} key={item.id} href={item.url} target="_blank" rel="noreferrer">
               <InformationImage item={item} />
               <span>
-                <strong>{item.title}</strong>
+                <strong>{brandDisplayText(item.title)}</strong>
                 <small>
-                  {item.source_name || "安全情报"} · {formatTime(item.published_at, locale)}
+                  {brandDisplayText(item.source_name) || "安全情报"} · {formatTime(item.published_at, locale)}
                 </small>
               </span>
               <ExternalLink size={12} />
@@ -359,7 +393,7 @@ function ConsultationEmpty({ onPrompt }: { onPrompt: (prompt: string) => void })
   return (
     <div className="consultation-empty">
       <InformationCenterMark className="consultation-brand-mark" size={38} />
-      <strong>SecFlow 安全咨询</strong>
+      <strong>{BRAND_NAME_EN} 安全咨询</strong>
       <div>{prompts.map((prompt) => <button key={prompt} onClick={() => onPrompt(prompt)}>{prompt}</button>)}</div>
     </div>
   );
@@ -386,7 +420,7 @@ function InformationImage({ item }: { item: InformationItem }) {
     return (
       <img
         className="information-image source-image"
-        src={api.informationSourceImageUrl(item.source_id)}
+        src={api.informationSourceImageUrl(item.source_id, item.source_image_version)}
         alt=""
         width={46}
         height={46}
@@ -395,7 +429,7 @@ function InformationImage({ item }: { item: InformationItem }) {
       />
     );
   }
-  return <span className="source-logo">{(item.source_name || "S").slice(0, 1)}</span>;
+  return <span className="source-logo">{(brandDisplayText(item.source_name) || "S").slice(0, 1)}</span>;
 }
 
 function InformationSkeleton() {

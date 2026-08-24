@@ -218,7 +218,7 @@ def _parent_is_alive(parent_pid: int | None) -> bool:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="SecFlow durable LangGraph task worker")
+    parser = argparse.ArgumentParser(description="AegisAl durable LangGraph task worker")
     parser.add_argument("--task-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--store-path", type=Path, required=True)
     parser.add_argument("--parent-pid", type=int)

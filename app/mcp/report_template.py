@@ -35,7 +35,7 @@ _TEMPLATES = {
 
 
 template_mcp = FastMCP(
-    "SecFlow Template MCP",
+    "AegisAl Template MCP",
     instructions="Resolve one immutable cross-format report template and platform font profile from local assets.",
 )
 

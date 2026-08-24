@@ -1,6 +1,7 @@
-import { Sparkles } from "lucide-react";
+import aegisalEmblem from "../assets/aegisal-emblem.png";
+import { BRAND_NAME_EN } from "../branding";
 
-/** Shared SecFlow mark used by both the workspace and Information Center. */
+/** Shared AegisAl mark used by both the workspace and Information Center. */
 export function InformationCenterMark({
   size = 44,
   className = "",
@@ -13,10 +14,9 @@ export function InformationCenterMark({
       className={`information-center-mark ${className}`.trim()}
       style={{ width: size, height: size }}
       role="img"
-      aria-label="SecFlow 信息中心标识"
+      aria-label={`${BRAND_NAME_EN} 信息中心标识`}
     >
-      <span className="information-center-mark-halo" aria-hidden="true" />
-      <Sparkles aria-hidden="true" />
+      <img src={aegisalEmblem} alt="" draggable="false" />
     </span>
   );
 }

@@ -48,17 +48,40 @@ class InformationServiceTests(unittest.TestCase):
         opml_sources = [source for source in INFORMATION_SOURCES if source.catalog == "chinese-security-rss"]
         urls = [source.url for source in INFORMATION_SOURCES]
 
-        self.assertEqual(len(CURATED_INFORMATION_SOURCES), 10)
-        self.assertEqual(len(opml_sources), 503)
+        self.assertEqual(len(CURATED_INFORMATION_SOURCES), 3)
+        self.assertEqual(len(opml_sources), 505)
         self.assertEqual(len(urls), len(set(urls)))
         self.assertTrue(all(not source.default_enabled for source in opml_sources))
         self.assertTrue(all(source.source_image_url for source in opml_sources))
-        self.assertEqual(sum(source.group == "微信公众号" for source in opml_sources), 326)
+        self.assertEqual(sum(source.group == "微信公众号" for source in opml_sources), 321)
+        self.assertEqual(sum(source.group == "精选来源" for source in opml_sources), 5)
         self.assertTrue(
             all(source.max_response_bytes == 8_000_000 for source in opml_sources if source.group == "微信公众号")
         )
         xlab_atom = next(source for source in opml_sources if source.url == "https://xlab.tencent.com/cn/atom.xml")
         self.assertEqual(xlab_atom.source_image_url, "https://xlab.tencent.com/cn/favicon.png?v=1.1")
+
+    def test_featured_sources_are_official_security_and_response_channels(self) -> None:
+        featured = {source.name: source for source in INFORMATION_SOURCES if source.group == "精选来源"}
+
+        self.assertEqual(
+            set(featured),
+            {
+                "CISA 官方安全公告",
+                "CISA 已知在野利用目录",
+                "FreeBuf",
+                "腾讯安全应急响应中心",
+                "阿里云应急响应",
+                "百度安全应急响应中心",
+                "OPPO安全应急响应中心",
+                "小米安全中心",
+            },
+        )
+        self.assertEqual(featured["FreeBuf"].source_image_url, "https://www.freebuf.com/favicon.ico")
+        self.assertEqual(featured["腾讯安全应急响应中心"].website, "https://security.tencent.com/")
+        self.assertEqual(featured["阿里云应急响应"].source_image_url, "https://developer.aliyun.com/favicon.ico")
+        self.assertEqual(featured["百度安全应急响应中心"].source_image_url, "https://bsrc.baidu.com/statics/imgs/favicon.ico")
+        self.assertEqual(featured["小米安全中心"].source_image_url, "https://trust.mi.com/favicon.png")
 
     def test_meituan_source_uses_official_logo_and_image_cdn(self) -> None:
         source = next(source for source in INFORMATION_SOURCES if source.url == "https://tech.meituan.com/feed")
@@ -341,7 +364,7 @@ class InformationServiceTests(unittest.TestCase):
         fake_store = FakeStore()
 
         def fetcher(source):
-            if source.id == "talos":
+            if source.id == "cisa_advisories":
                 raise RuntimeError("temporary failure")
             return [
                 {
@@ -401,7 +424,12 @@ class InformationServiceTests(unittest.TestCase):
     def test_snapshot_migrates_stale_error_state_for_already_disabled_source(self) -> None:
         fake_store = FakeStore()
         fake_store.state = self.state_with_only_enabled("freebuf")
-        fake_store.state["information"]["sources"]["microsoft_security"].update(
+        disabled_source = next(
+            source
+            for source in INFORMATION_SOURCES
+            if source.catalog == "chinese-security-rss" and source.group != "精选来源"
+        )
+        fake_store.state["information"]["sources"][disabled_source.id].update(
             status="error",
             failure_count=4,
             next_retry_at="2099-01-01T00:00:00+00:00",
@@ -409,12 +437,12 @@ class InformationServiceTests(unittest.TestCase):
         )
 
         snapshot = InformationService(fake_store, fetcher=lambda _source: [])._current_snapshot()
-        microsoft = next(source for source in snapshot["sources"] if source["id"] == "microsoft_security")
+        migrated = next(source for source in snapshot["sources"] if source["id"] == disabled_source.id)
 
-        self.assertEqual(microsoft["status"], "idle")
-        self.assertEqual(microsoft["failure_count"], 0)
-        self.assertEqual(microsoft["next_retry_at"], "")
-        self.assertEqual(microsoft["message"], "已暂停订阅。")
+        self.assertEqual(migrated["status"], "idle")
+        self.assertEqual(migrated["failure_count"], 0)
+        self.assertEqual(migrated["next_retry_at"], "")
+        self.assertEqual(migrated["message"], "已暂停订阅。")
 
     def test_information_transport_uses_system_trust_and_extended_timeouts(self) -> None:
         timeout = information_module._information_request_timeout()
@@ -571,7 +599,7 @@ class InformationServiceTests(unittest.TestCase):
             patch.object(
                 information_module,
                 "_write_cached_information_source_logo",
-                side_effect=lambda _source_id, result: result,
+                side_effect=lambda _source_id, result, _cache_version: result,
             ),
             patch.object(information_module, "_read_cached_information_image", return_value=None),
             patch.object(information_module, "_download_information_image", side_effect=fake_download),
@@ -616,7 +644,7 @@ class InformationServiceTests(unittest.TestCase):
             patch.object(
                 information_module,
                 "_write_cached_information_source_logo",
-                side_effect=lambda _source_id, result: result,
+                side_effect=lambda _source_id, result, _cache_version: result,
             ),
             patch.object(information_module, "_read_cached_information_image", return_value=None),
             patch.object(information_module, "_download_information_image", side_effect=fake_download),
@@ -655,7 +683,7 @@ class InformationServiceTests(unittest.TestCase):
             patch.object(
                 information_module,
                 "_write_cached_information_source_logo",
-                side_effect=lambda _source_id, result: result,
+                side_effect=lambda _source_id, result, _cache_version: result,
             ),
             patch.object(information_module, "_read_cached_information_image", return_value=None),
             patch.object(information_module, "_download_information_image", side_effect=fake_download),
@@ -683,6 +711,21 @@ class InformationServiceTests(unittest.TestCase):
         self.assertFalse(information_module._remote_url_is_public("https://8.8.8.8:8443/logo.png"))
         self.assertTrue(information_module._remote_url_is_public("https://8.8.8.8/logo.png"))
 
+    def test_image_signature_validation_rejects_html_disguised_as_favicon(self) -> None:
+        self.assertFalse(information_module._looks_like_information_image(b"<!DOCTYPE html>", "image/x-icon"))
+        self.assertTrue(
+            information_module._looks_like_information_image(
+                b"\x00\x00\x01\x00\x01\x00favicon-data",
+                "image/x-icon",
+            )
+        )
+        self.assertTrue(
+            information_module._looks_like_information_image(
+                b"\x89PNG\r\n\x1a\nimage-data",
+                "image/png",
+            )
+        )
+
     def test_source_logo_disk_cache_is_shared_by_source(self) -> None:
         result = information_module.InformationImageResult(
             data=b"company-logo",
@@ -697,11 +740,13 @@ class InformationServiceTests(unittest.TestCase):
         ):
             saved = information_module._write_cached_information_source_logo("company-source", result)
             loaded = information_module._read_cached_information_source_logo("company-source")
+            stale = information_module._read_cached_information_source_logo("company-source", "new-logo-url")
 
         self.assertEqual(saved.kind, "source")
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.data, b"company-logo")
         self.assertEqual(loaded.content_type, "image/png")
+        self.assertIsNone(stale)
 
     def test_article_image_prefers_open_graph_metadata(self) -> None:
         html = """<html><head>

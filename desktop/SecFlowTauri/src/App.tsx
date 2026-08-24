@@ -13,10 +13,13 @@ import { InformationWindow } from "./components/InformationWindow";
 import { InitialSetupView } from "./components/InitialSetupView";
 import { BrandMark } from "./components/BrandMark";
 import { TrialGuard } from "./components/TrialGuard";
+import { BeautifulLoadingState } from "./components/beautiful-ui/BeautifulUI";
 import { useBackendBootstrap } from "./hooks/useBackend";
 import { useI18n } from "./i18n";
+import { applyDocumentAppearance, emitInformationAppearance } from "./lib/appearance";
 import { isTauri } from "./lib/platform";
 import { useAppStore } from "./store/appStore";
+import { BRAND_NAME_ZH, brandDisplayText } from "./branding";
 
 export default function App() {
   const informationWindow = new URLSearchParams(window.location.search).get("secflowWindow") === "information";
@@ -35,13 +38,13 @@ function MainApp() {
   const copy = interfaceCopy(locale);
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = state.theme;
-    root.lang = locale;
-    root.style.setProperty("--font-scale", String(state.fontScale));
-    const dark = state.theme === "dark" || (state.theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", dark ? "#171718" : "#fafbfd");
+    applyDocumentAppearance({ theme: state.theme, fontScale: state.fontScale }, locale);
   }, [locale, state.fontScale, state.theme]);
+
+  useEffect(() => {
+    void emitInformationAppearance({ theme: state.theme, fontScale: state.fontScale })
+      .catch((error) => console.error("Failed to sync information window appearance", error));
+  }, [state.fontScale, state.theme]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -85,16 +88,16 @@ function MainApp() {
         <SkipLink label={copy.skip} />
         <main id="main-content" tabIndex={-1} className="startup-loading" aria-busy={!state.bootstrapError}>
           <BrandMark size={44} />
-          <strong>安全智脑</strong>
+          <strong>{BRAND_NAME_ZH}</strong>
           {state.bootstrapError ? (
             <>
               <span role="alert">
                 {copy.bootstrapFailed}
-                <small style={{ display: "block", marginTop: 4 }}>{state.bootstrapError}</small>
+                <small style={{ display: "block", marginTop: 4 }}>{brandDisplayText(state.bootstrapError)}</small>
               </span>
               <button type="button" className="primary" onClick={() => void refreshBackend()}>{copy.retry}</button>
             </>
-          ) : <span>{copy.initializing}</span>}
+          ) : <BeautifulLoadingState label={copy.initializing} compact showElapsed />}
         </main>
       </>
     );

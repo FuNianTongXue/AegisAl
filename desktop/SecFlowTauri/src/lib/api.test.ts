@@ -8,6 +8,75 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("model configuration payloads", () => {
+  it("normalizes a historical blank reasoning effort when loading and saving", async () => {
+    const responseConfig = {
+      provider: "openai",
+      catalog_provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-5.6-sol",
+      wire_api: "responses",
+      reasoning_effort: "",
+      reasoning_options: [
+        { value: "none" },
+        { value: "medium" },
+        { value: "high" },
+      ],
+      max_tokens: 1800,
+      timeout_ms: 60000,
+      enabled: true,
+      has_api_key: true,
+    };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ data: responseConfig }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SecFlowApi("http://secflow.test");
+
+    const loaded = await client.llmConfig("default");
+    expect(loaded.reasoning_effort).toBe("medium");
+
+    await client.saveLlmConfig("default", { ...loaded, reasoning_effort: "" as never });
+
+    const [, request] = fetchMock.mock.calls[1] as [URL, RequestInit];
+    const payload = JSON.parse(String(request.body));
+    expect(payload.reasoning_effort).toBe("medium");
+  });
+
+  it("sends an explicit API key clear request without inventing a replacement", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        provider: "custom",
+        catalog_provider: "custom",
+        endpoint: "https://gateway.example/v1",
+        model: "third-party-model",
+        max_tokens: 1800,
+        timeout_ms: 60000,
+        enabled: true,
+        has_api_key: false,
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new SecFlowApi("http://secflow.test").saveLlmConfig("default", {
+      provider: "custom",
+      catalog_provider: "custom",
+      endpoint: "https://gateway.example/v1",
+      model: "third-party-model",
+      max_tokens: 1800,
+      timeout_ms: 60000,
+      enabled: true,
+      clear_api_key: true,
+    });
+
+    const [, request] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const payload = JSON.parse(String(request.body));
+    expect(payload.clear_api_key).toBe(true);
+    expect(payload.api_key).toBeUndefined();
+  });
+});
+
 describe("dashboard normalization", () => {
   it("maps explicit KEV, PoC, and recent update trend fields", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -32,6 +101,23 @@ describe("dashboard normalization", () => {
       { date: "2026-07-31", count: 44 },
       { date: "2026-08-01", count: 36 },
     ]);
+  });
+
+  it("shares dashboard requests, reuses the short cache, and bypasses it on refresh", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      data: { vulnerability_count: 10, recent_records: [] },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new SecFlowApi("http://secflow.test");
+
+    await Promise.all([client.dashboard("zh-Hans"), client.dashboard("zh-Hans")]);
+    await client.dashboard("zh-Hans");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await client.dashboard("zh-Hans", true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [refreshUrl] = fetchMock.mock.calls[1] as [URL, RequestInit];
+    expect(refreshUrl.searchParams.get("refresh")).toBe("true");
   });
 
   it("sends the requested language and normalizes offline translation progress and localized fields", async () => {
@@ -157,6 +243,32 @@ describe("dashboard normalization", () => {
     });
   });
 
+  it("keeps explicit public source facts visible while translation is pending", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        response_language: "zh-Hans",
+        recent_records: [{
+          id: "CVE-2026-76011",
+          title: "Original vulnerability title",
+          title_original: "Original vulnerability title",
+          summary: "Original public vulnerability description.",
+          summary_original: "Original public vulnerability description.",
+          content_language: "en",
+          translation_status: "pending",
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const dashboard = await new SecFlowApi("http://secflow.test").dashboard("zh-Hans");
+
+    expect(dashboard.records[0]).toMatchObject({
+      title: "Original vulnerability title",
+      summary: "Original public vulnerability description.",
+      description: "Original public vulnerability description.",
+      translation_status: "pending",
+    });
+  });
+
   it("does not let a simplified response override a Traditional Chinese request", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: {
@@ -246,6 +358,34 @@ describe("workspace actions", () => {
       session_id: "session-1",
       response_language: "en",
     });
+  });
+
+  it("sends translated table snapshots to the selected conversation exchange", async () => {
+    const tables = [{
+      id: "translated-findings",
+      title: "翻译后的漏洞记录",
+      columns: [{ key: "id", label: "漏洞编号", editable: false }, { key: "title", label: "标题" }],
+      rows: [{ id: "CVE-2026-4242", title: "修订后的中文标题" }],
+      edited: true,
+    }];
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { exchange_id: "msg-42", tables },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new SecFlowApi("http://secflow.test").updateConversationTableEdits(
+      "translated/session",
+      "msg-42",
+      "analyst",
+      tables,
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toBe("/api/assistant/conversations/translated%2Fsession/exchanges/msg-42/table-edits");
+    expect(url.searchParams.get("user_id")).toBe("analyst");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({ tables });
+    expect(result.tables[0].rows[0]).toEqual({ id: "CVE-2026-4242", title: "修订后的中文标题" });
   });
 
   it("encodes avatar upload and removal requests for the selected user", async () => {

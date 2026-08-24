@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -16,7 +17,7 @@ from app.assistant_artifacts import (
     XLSX_MEDIA_TYPE,
 )
 from app.catalog_translation import CATALOG_TRANSLATION_VERSION
-from app.intelligence import intelligence_service
+from app.intelligence import RealtimeIntelligenceService, intelligence_service
 from app.mcp.artifacts import stage_output_artifact
 from app.privacy import sanitize_public_text, severity_cn
 from app.storage import now_iso
@@ -125,15 +126,15 @@ class ComponentDetailPayload(BaseModel):
 
 
 excel_mcp = FastMCP(
-    "SecFlow Excel MCP",
+    "AegisAl Excel MCP",
     instructions="Generate auditable XLSX artifacts for verified component vulnerability queries.",
 )
 sankey_mcp = FastMCP(
-    "SecFlow D3 Sankey MCP",
+    "AegisAl D3 Sankey MCP",
     instructions="Normalize verified knowledge graph data for the bundled D3 Sankey renderer.",
 )
 detail_mcp = FastMCP(
-    "SecFlow Component Detail MCP",
+    "AegisAl Component Detail MCP",
     instructions=(
         "Build a customer-facing component vulnerability detail page only from verified structured records. "
         "Never infer missing versions, CVSS metrics, exploit status, or references."
@@ -229,7 +230,7 @@ def export_component_vulnerabilities(
         )
     stem = "-".join(
         _safe_file_part(part)
-        for part in ("SecFlow", metadata.get("ecosystem") or "auto", metadata["name"], metadata["version"], "vulnerabilities")
+        for part in ("AegisAl", metadata.get("ecosystem") or "auto", metadata["name"], metadata["version"], "vulnerabilities")
     )
     return _component_excel_output(
         content,
@@ -245,29 +246,57 @@ def export_component_vulnerabilities(
     structured_output=True,
 )
 def export_component_vulnerability_catalog(
-    records: list[dict[str, Any]],
     start_date: str,
     end_date: str,
+    expected_total: int,
+    expected_result_sha256: str,
     filters: dict[str, Any] | None = None,
+    response_language: str = "zh-Hans",
     generated_at: str = "",
     *,
     output_dir: str,
 ) -> AssistantArtifact:
-    content, metadata = intelligence_service.export_component_vulnerability_catalog(
-        records,
+    from app.vulnerability_export import build_component_vulnerability_catalog_workbook_stream
+
+    if int(expected_total) < 0:
+        raise ValueError("expected_total must not be negative")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(expected_result_sha256 or "")):
+        raise ValueError("expected_result_sha256 must be a SHA-256 digest")
+    catalog_path = Path(os.getenv("SECFLOW_VULNERABILITY_CATALOG_PATH", "").strip())
+    if not catalog_path.is_file():
+        raise ValueError("Excel MCP 无法访问已确认的本地组件漏洞目录")
+    service = RealtimeIntelligenceService(catalog_path)
+    clean_filters = dict(filters or {})
+    records, metadata = service.stream_component_vulnerability_catalog(
         start_date=start_date,
         end_date=end_date,
-        filters=filters or {},
-        generated_at=generated_at or now_iso(),
+        ecosystems=list(clean_filters.get("ecosystems") or []),
+        severities=list(clean_filters.get("severities") or []),
+        component_names=list(clean_filters.get("component_names") or []),
+        response_language=response_language,
+    )
+    if int(metadata["total"]) != int(expected_total):
+        raise ValueError(
+            f"组件漏洞目录在确认后发生变化：预期 {int(expected_total)} 条，实际 {int(metadata['total'])} 条"
+        )
+    timestamp = generated_at or now_iso()
+    content, _workbook_metadata = build_component_vulnerability_catalog_workbook_stream(
+        records,
+        start_date=str(metadata["start_date"]),
+        end_date=str(metadata["end_date"]),
+        filters=dict(metadata["filters"]),
+        generated_at=timestamp,
+        expected_total=int(expected_total),
+        source_result_sha256=expected_result_sha256,
     )
     stem = "-".join(
         _safe_file_part(part)
-        for part in ("SecFlow", "component-vulnerabilities", metadata["start_date"], "to", metadata["end_date"])
+        for part in ("AegisAl", "component-vulnerabilities", metadata["start_date"], "to", metadata["end_date"])
     )
     return _component_excel_output(
         content,
         file_name=f"{stem[:180]}.xlsx",
-        generated_at=str(metadata.get("generated_at") or now_iso()),
+        generated_at=timestamp,
         output_dir=output_dir,
     )
 
@@ -849,7 +878,7 @@ def _safe_excel_name(value: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a SecFlow component-query MCP server over stdio.")
+    parser = argparse.ArgumentParser(description="Run an AegisAl component-query MCP server over stdio.")
     parser.add_argument("server", choices=("component-detail", "excel", "d3-sankey"))
     args = parser.parse_args()
     {

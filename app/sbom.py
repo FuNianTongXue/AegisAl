@@ -84,7 +84,7 @@ def build_cyclonedx_sbom(
                 "components": [
                     {
                         "type": "application",
-                        "name": "SecFlow SBOM Agent",
+                        "name": "AegisAl SBOM Agent",
                         "version": "1",
                     }
                 ]
@@ -419,7 +419,7 @@ def _cyclonedx_vulnerability(record: dict[str, Any], component_refs: dict[str, s
     if isinstance(score, (int, float)):
         rating["score"] = float(score)
     source_names = [str(value).strip() for value in record.get("provenance") or [] if str(value).strip()]
-    original_source = "; ".join(source_names) or "SecFlow vulnerability intelligence"
+    original_source = "; ".join(source_names) or "AegisAl vulnerability intelligence"
     source_name = localized_intelligence_source(original_source)
     original_description = str(record.get("summary") or record.get("title") or "").strip()
     result: dict[str, Any] = {
@@ -451,7 +451,7 @@ def localized_intelligence_source(value: Any) -> str:
 
     text = str(value or "").strip()
     if not text:
-        return "SecFlow 漏洞情报库"
+        return "神盾漏洞情报库"
 
     source_labels = {
         "nvd": "美国国家漏洞数据库（NVD）",
@@ -467,7 +467,8 @@ def localized_intelligence_source(value: Any) -> str:
         "kev": "CISA 已知被利用漏洞目录（KEV）",
         "exploitdb": "Exploit-DB 漏洞利用数据库",
         "exploit-db": "Exploit-DB 漏洞利用数据库",
-        "secflow vulnerability intelligence": "SecFlow 漏洞情报库",
+        "secflow vulnerability intelligence": "神盾漏洞情报库",
+        "aegisai vulnerability intelligence": "神盾漏洞情报库",
     }
     labels: list[str] = []
     for raw_part in re.split(r"[;,|]", text):
@@ -475,8 +476,8 @@ def localized_intelligence_source(value: Any) -> str:
         key = re.sub(r"\s+", " ", part.casefold())
         label = source_labels.get(key)
         if label is None:
-            if "secflow" in key:
-                label = source_labels["secflow vulnerability intelligence"]
+            if "secflow" in key or "aegisai" in key:
+                label = source_labels["aegisai vulnerability intelligence"]
             elif "github" in key and ("advisory" in key or "security" in key):
                 label = source_labels["github advisory"]
             elif "nvd" in key or "national vulnerability database" in key:
@@ -492,10 +493,10 @@ def localized_intelligence_source(value: Any) -> str:
             elif _CJK_PATTERN.search(part):
                 label = part
             else:
-                label = "SecFlow 漏洞情报库"
+                label = "神盾漏洞情报库"
         if label not in labels:
             labels.append(label)
-    return "；".join(labels) or "SecFlow 漏洞情报库"
+    return "；".join(labels) or "神盾漏洞情报库"
 
 
 def utc_timestamp() -> str:

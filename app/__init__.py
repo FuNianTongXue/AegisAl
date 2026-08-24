@@ -1,6 +1,5 @@
-"""SecFlow Knowledge Security Assistant.
+"""神盾 AegisAl Knowledge Security Assistant.
 
 Author: ShenSiQi
-License: SecFlow Source-Available Commercial Non-Redistribution License.
+License: AegisAl Source-Available Commercial Non-Redistribution License.
 """
-

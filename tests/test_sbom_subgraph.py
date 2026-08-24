@@ -65,7 +65,7 @@ def fake_artifact() -> dict:
     return {
         "id": "sbom-xlsx-20260728000000-abcdef123456",
         "kind": "excel",
-        "file_name": "SecFlow-payments-SBOM.xlsx",
+        "file_name": "AegisAl-payments-SBOM.xlsx",
         "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "download_path": "/api/assistant/artifacts/sbom-xlsx-20260728000000-abcdef123456",
         "sha256": "a" * 64,
@@ -97,7 +97,7 @@ def fake_license_scan(_workspace_path: str) -> dict:
         ],
         "registry": {"status": "completed", "url": "https://opensource.org/api/licenses"},
         "_license_mcp": {
-            "server": "SecFlow License MCP",
+            "server": "AegisAl License MCP",
             "tool": "identify_project_licenses",
             "transport": "in-process",
         },
@@ -269,10 +269,30 @@ class SBOMDocumentTests(unittest.TestCase):
             self.assertIn("Log4j", vulnerability_sheet_text)
             self.assertIn("OSV 开源漏洞数据库", vulnerability_sheet_text)
             self.assertNotIn("JNDI lookup injection in vulnerable Log4j versions.", vulnerability_sheet_text)
-            self.assertNotIn("SecFlow vulnerability intelligence", vulnerability_sheet_text)
+            self.assertNotIn("AegisAl vulnerability intelligence", vulnerability_sheet_text)
             self.assertNotIn("T00:00:00Z", vulnerability_sheet_text)
             self.assertIn('formatCode="yyyy:mm:dd:hh:mm"', styles_xml)
             self.assertIn("JNDI lookup injection in vulnerable Log4j versions.", shared_strings)
+
+    def test_workbook_uses_current_brand_for_table_objects(self) -> None:
+        sbom = build_cyclonedx_sbom(
+            self.scan,
+            project_name="payments",
+            license_scan=fake_license_scan(""),
+        )
+        with patch("app.sbom.intelligence_service.query_dependencies", return_value=fake_match_result()):
+            sbom, matching = match_sbom_vulnerabilities(sbom, self.scan)
+
+        with zipfile.ZipFile(BytesIO(build_sbom_workbook(sbom, matching))) as archive:
+            table_names = [
+                ElementTree.fromstring(archive.read(path)).attrib["name"]
+                for path in sorted(name for name in archive.namelist() if name.startswith("xl/tables/table"))
+            ]
+
+        self.assertEqual(
+            table_names,
+            ["AegisAlSBOMComponents", "AegisAlProjectLicenses", "AegisAlSBOMVulnerabilities"],
+        )
 
     def test_workbook_dates_are_converted_to_china_time(self) -> None:
         self.assertEqual(_china_datetime("2021-12-10T00:00:00Z"), datetime(2021, 12, 10, 8, 0))
@@ -280,8 +300,8 @@ class SBOMDocumentTests(unittest.TestCase):
         self.assertIsNone(_china_datetime("not-a-time"))
 
     def test_intelligence_source_labels_are_chinese(self) -> None:
-        self.assertEqual(localized_intelligence_source("SecFlow vulnerability intelligence"), "SecFlow 漏洞情报库")
-        self.assertEqual(localized_intelligence_source("SecFlow vulnerability intelligence / 漏洞情报"), "SecFlow 漏洞情报库")
+        self.assertEqual(localized_intelligence_source("SecFlow vulnerability intelligence"), "神盾漏洞情报库")
+        self.assertEqual(localized_intelligence_source("SecFlow vulnerability intelligence / 漏洞情报"), "神盾漏洞情报库")
         self.assertEqual(localized_intelligence_source("nvd; github_advisory"), "美国国家漏洞数据库（NVD）；GitHub 安全公告数据库")
 
 
@@ -527,7 +547,7 @@ class SBOMIntentAndAPITests(unittest.TestCase):
             )
             artifact = store.save(
                 content,
-                file_name="SecFlow-payments-SBOM.xlsx",
+                file_name="AegisAl-payments-SBOM.xlsx",
                 generated_at="2026-07-28T00:00:00+00:00",
             )
             with (

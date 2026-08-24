@@ -29,8 +29,8 @@ class ExcelReportOutput(BaseModel):
 
 
 report_excel_mcp = FastMCP(
-    "SecFlow Excel MCP",
-    instructions="Render enterprise XLSX reports only from validated SecFlow canonical report JSON.",
+    "AegisAl Excel MCP",
+    instructions="Render enterprise XLSX reports only from validated AegisAl canonical report JSON.",
 )
 
 
@@ -47,7 +47,7 @@ def render_excel_report(report_document: dict[str, Any], *, output_dir: str) -> 
     artifacts = [
         stage_output_artifact(
             output_dir,
-            file_name="SecFlow-security-report.xlsx",
+            file_name="AegisAl-security-report.xlsx",
             payload=payload,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
@@ -88,7 +88,7 @@ async def excel_mcp_spec() -> dict[str, Any]:
 def _build_xlsx(document: dict[str, Any]) -> tuple[bytes, int]:
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
-    workbook.set_properties({"title": str((document.get("summary") or {}).get("title") or "SecFlow Security Report"), "company": "SecFlow"})
+    workbook.set_properties({"title": str((document.get("summary") or {}).get("title") or "AegisAl Security Report"), "company": "AegisAl"})
     formats = _formats(workbook, document.get("template") or {})
     source = document.get("source") or {}
     facts = source.get("facts") or {}
@@ -127,7 +127,7 @@ def _summary_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, Any], docum
     sheet.set_column("A:A", 24)
     sheet.set_column("B:F", 20)
     sheet.set_row(0, 34)
-    sheet.merge_range("A1:F1", str((document.get("summary") or {}).get("title") or "SecFlow 企业安全报告"), formats["title"])
+    sheet.merge_range("A1:F1", str((document.get("summary") or {}).get("title") or "神盾企业安全报告"), formats["title"])
     statistics = document.get("statistics") if isinstance(document.get("statistics"), dict) else {}
     counts = statistics.get("counts") if isinstance(statistics.get("counts"), dict) else {}
     rows = [

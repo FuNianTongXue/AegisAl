@@ -35,7 +35,7 @@ def build_report_plan(
     return {
         "$schema": REPORT_PLAN_SCHEMA,
         "schema_version": 1,
-        "planner": "SecFlow Report Planner Agent",
+        "planner": "AegisAl Report Planner Agent",
         "created_at": now_iso(),
         "scan_type": scan_type,
         "source_kind": str(source_kind or source.get("source_kind") or "assistant_scan"),
@@ -81,7 +81,7 @@ def validate_report_quality(report_document: dict[str, Any], report_plan: dict[s
     result = {
         "$schema": REPORT_QA_SCHEMA,
         "schema_version": 1,
-        "agent": "SecFlow Report QA Agent",
+        "agent": "AegisAl Report QA Agent",
         "status": "passed" if not errors else "failed",
         "score": round(sum(1 for item in checks if item["passed"]) / len(checks) * 100),
         "verified_at": now_iso(),

@@ -17,15 +17,27 @@ from app.dependencies import scan_dependency_attachments
 from app.agent.assistant_intent import plan_assistant_intent
 from app.agent.translation_agent import translation_agent
 from app.agent.translation_policy import (
+    catalog_partial_translation_audit_is_recoverable,
     catalog_translation_status_is_complete,
+    catalog_translation_status_is_partial,
     fail_closed_translation_payload,
     failed_translation_audit,
+    host_localization_attestation_is_publishable,
+    issue_host_localization_attestation,
+    issue_partial_catalog_translation_attestation,
     issue_stored_translation_attestation,
+    partial_catalog_translation_attestation_is_publishable,
+    partial_catalog_translation_status,
+    public_catalog_records_are_partially_ready,
     public_catalog_records_are_ready,
     translation_audit_is_publishable,
     translation_unavailable_message,
 )
-from app.catalog_translation import record_summary_for_language
+from app.catalog_translation import (
+    partial_catalog_summary,
+    record_summary_for_language,
+    recover_partial_catalog_records,
+)
 from app.langgraph.component_catalog_graph import (
     component_catalog_outcome_answer,
     component_vulnerability_catalog_subgraph,
@@ -53,6 +65,7 @@ def _is_information_session(session_id: Any) -> bool:
 
 
 SYSTEM_PROMPT_TEMPLATE = """你是小安，定位是用户的信息安全专家助手。
+表情符号策略：{emoji_style}
 当用户询问你是谁、你的名字或身份时，必须回答“我是小安，您的信息安全专家助手。”，不要使用模型名称、平台名称或其他身份。
 请使用{language_name}原创回答用户问题，语气专业、简洁、可落地。你只负责安全分析与内容生成，不承担跨语言翻译；上下文中与目标语言不一致的已有内容由 Translation Agent 和离线 Translation MCP 处理。
 系统当前日期为 {current_date}，当前时间为 {current_time}，时区为 Asia/Shanghai（中国标准时间）。用户询问“今天”“当前日期”或相对日期时，必须严格以这里提供的日期时间为准，不得使用模型自身日期或其他时区猜测。
@@ -102,6 +115,7 @@ class AssistantState(TypedDict, total=False):
     top_k: int
     user_id: str
     session_id: str
+    exchange_id: str
     response_language: str
     intent: str
     intent_plan: dict[str, Any]
@@ -135,6 +149,8 @@ class AssistantState(TypedDict, total=False):
     answer: dict[str, Any]
     translation: dict[str, Any]
     catalog_translation_ready: bool
+    catalog_translation_partial_verified: bool
+    host_localization_verified: bool
     trace: list[dict[str, Any]]
     event_sink: Callable[[dict[str, Any]], None]
     content_sink: Callable[[str], None]
@@ -154,6 +170,7 @@ class KnowledgeSecurityGraph:
         user_id: str = "default",
         session_id: str = "default",
         response_language: str = "zh-Hans",
+        emoji_mode: str = "moderate",
         attachments: list[dict[str, Any]] | None = None,
         workspace_path: str = "",
         task_context: dict[str, Any] | None = None,
@@ -168,6 +185,7 @@ class KnowledgeSecurityGraph:
             "user_id": user_id or "default",
             "session_id": session_id or "default",
             "response_language": language,
+            "emoji_mode": emoji_mode if emoji_mode in {"off", "moderate", "active"} else "moderate",
             "intent": "security_knowledge",
             "intent_plan": dict(intent_plan or {}),
             "vulnerability_id": "",
@@ -199,6 +217,8 @@ class KnowledgeSecurityGraph:
             "sbom_operation": {},
             "translation": {},
             "catalog_translation_ready": False,
+            "catalog_translation_partial_verified": False,
+            "host_localization_verified": False,
             "trace": [],
         }
         if event_sink is not None:
@@ -252,16 +272,42 @@ class KnowledgeSecurityGraph:
     @classmethod
     def _final_answer(cls, state: AssistantState) -> dict[str, Any]:
         answer = dict(state["answer"])
+        target_language = state.get("response_language", "zh-Hans")
+        host_localized = bool(state.get("host_localization_verified")) or (
+            host_localization_attestation_is_publishable(answer, target_language)
+        )
+        localization = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
+        partial_catalog = bool(state.get("catalog_translation_partial_verified")) or (
+            partial_catalog_translation_attestation_is_publishable(answer, target_language)
+        )
+        host_source = str(localization.get("source") or "component-catalog-preview")
         answer["trace"] = state.get("trace", [])
         answer = public_answer_payload(answer)
         if cls._can_use_catalog_translation(state):
-            record_count = cls._stored_catalog_record_count(state)
-            answer["translation"] = issue_stored_translation_attestation(
-                answer,
-                target_language=state.get("response_language", "zh-Hans"),
-                record_count=record_count,
-                source="vulnerability-catalog",
-            )
+            if host_localized:
+                answer["translation"] = issue_host_localization_attestation(
+                    answer,
+                    target_language=target_language,
+                    source=host_source,
+                )
+            elif partial_catalog:
+                answer["translation"] = issue_partial_catalog_translation_attestation(
+                    answer,
+                    target_language=target_language,
+                    catalog_status=localization,
+                    source=str(localization.get("source") or "component-vulnerability-catalog"),
+                )
+            else:
+                record_count = cls._stored_catalog_record_count(state)
+                answer["translation"] = issue_stored_translation_attestation(
+                    answer,
+                    target_language=target_language,
+                    record_count=record_count,
+                    source="vulnerability-catalog",
+                )
+        answer["session_id"] = str(state.get("session_id") or "default")
+        if state.get("exchange_id"):
+            answer["exchange_id"] = str(state["exchange_id"])
         return answer
 
     @staticmethod
@@ -701,7 +747,7 @@ class KnowledgeSecurityGraph:
         prompt_presentation = prompt_diff_presentation(
             title="系统提示词变更",
             before=SYSTEM_PROMPT_TEMPLATE,
-            after=system_prompt(state.get("response_language", "zh-Hans")),
+            after=system_prompt(state.get("response_language", "zh-Hans"), emoji_mode=state.get("emoji_mode", "moderate")),
         )
         if result.get("status") == "success":
             return add_trace(
@@ -755,7 +801,11 @@ class KnowledgeSecurityGraph:
         fields = {
             "意图": state.get("intent", "security_knowledge"),
             memory_field: self._memory_label(memory_context),
-            "模型调用状态": "成功" if llm_result.get("status") == "success" else state.get("llm_error", "未调用"),
+            "模型调用状态": (
+                "成功"
+                if llm_result.get("status") == "success"
+                else _public_model_failure_status(state.get("llm_error"), language)
+            ),
         }
         if state.get("task_context"):
             task_context = state["task_context"]
@@ -854,10 +904,11 @@ class KnowledgeSecurityGraph:
                 "当前节点没有可翻译的结构化回复。",
                 status="warning",
             )
+        target_language = str(state.get("response_language") or "zh-Hans")
         try:
             result = translation_agent.translate_json(
                 answer,
-                target_language=str(state.get("response_language") or "zh-Hans"),
+                target_language=target_language,
                 user_id=str(state.get("user_id") or "default"),
                 session_id=str(state.get("session_id") or "default"),
                 content_scope="assistant_response",
@@ -865,10 +916,52 @@ class KnowledgeSecurityGraph:
             audit = dict(result.audit)
             state["translation"] = audit
             translation_completed = translation_audit_is_publishable(audit)
+            translation_partial = (
+                answer.get("mode") == "component_vulnerability_catalog"
+                and isinstance(answer.get("records"), list)
+                and bool(answer["records"])
+                and catalog_partial_translation_audit_is_recoverable(
+                    audit,
+                    target_language,
+                )
+            )
             if translation_completed:
                 translated = public_answer_payload(result.payload)
                 translated["translation"] = audit
                 state["answer"] = translated
+            elif translation_partial:
+                candidate_records = (
+                    result.payload.get("records")
+                    if isinstance(result.payload.get("records"), list)
+                    else []
+                )
+                records = recover_partial_catalog_records(
+                    answer["records"],
+                    candidate_records,
+                    target_language=target_language,
+                )
+                ready_records = sum(
+                    record.get("translation_status") == "translated"
+                    for record in records
+                )
+                translated = dict(answer)
+                translated["summary"] = partial_catalog_summary(
+                    result.payload.get("summary"),
+                    answer.get("summary"),
+                    target_language=target_language,
+                )
+                translated["records"] = records
+                translated["trace"] = []
+                translated["translation"] = partial_catalog_translation_status(
+                    audit,
+                    target_language=target_language,
+                    record_count=len(records),
+                    ready_records=ready_records,
+                )
+                state["answer"] = public_answer_payload(translated)
+                state["translation"] = dict(state["answer"]["translation"])
+                state["catalog_translation_partial_verified"] = False
+                state["trace"] = []
             else:
                 state["answer"] = public_answer_payload(
                     fail_closed_translation_payload(
@@ -885,13 +978,15 @@ class KnowledgeSecurityGraph:
                 (
                     "Translation Agent 已调用翻译 MCP 处理回复 JSON："
                     f"目标语言 {audit['target_language']}，翻译 {audit['translated_fields']} 个字段。"
-                ) if translation_completed else translation_unavailable_message(
-                    state.get("response_language") or "zh-Hans"
+                ) if translation_completed else (
+                    "Translation Agent 返回部分离线译文；已保留核验记录，待补译字段使用中文占位。"
+                    if translation_partial
+                    else translation_unavailable_message(target_language)
                 ),
                 status="completed" if translation_completed else "warning",
                 presentation=tool_call_presentation(
                     "translate_json_payload",
-                    state="completed" if translation_completed else "error",
+                    state="completed" if (translation_completed or translation_partial) else "error",
                     title="Translation MCP",
                     input_summary={
                         "content_scope": "assistant_response",
@@ -903,7 +998,13 @@ class KnowledgeSecurityGraph:
                         "translation_status": audit["translation_status"],
                         "output_sha256": audit["output_sha256"],
                     },
-                    error="" if translation_completed else "翻译结果不完整，未标记为已完成。",
+                    error=(
+                        ""
+                        if translation_completed
+                        else "部分字段待补译，目录记录未标记为完整翻译。"
+                        if translation_partial
+                        else "翻译结果不可用。"
+                    ),
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - preserve the verified response on translation outages.
@@ -1038,6 +1139,7 @@ class KnowledgeSecurityGraph:
         outcome = self._component_catalog_subgraph.start(
             {
                 "question": state.get("question", ""),
+                "top_k": state.get("top_k", 5),
                 "user_id": state.get("user_id", "default"),
                 "session_id": state.get("session_id", "default"),
                 "response_language": state.get("response_language", "zh-Hans"),
@@ -1060,8 +1162,36 @@ class KnowledgeSecurityGraph:
             state.get("response_language", "zh-Hans"),
         )
         answer = public_answer_payload(component_catalog_outcome_answer(outcome))
+        if (
+            not isinstance(answer.get("translation"), dict)
+            and catalog_translation_status_is_partial(
+                catalog_translation,
+                state.get("response_language", "zh-Hans"),
+            )
+            and public_catalog_records_are_partially_ready(
+                answer.get("records"),
+                state.get("response_language", "zh-Hans"),
+            )
+            and len(answer.get("records") or []) == catalog_translation.get("record_count")
+        ):
+            answer["translation"] = issue_partial_catalog_translation_attestation(
+                answer,
+                target_language=state.get("response_language", "zh-Hans"),
+                catalog_status=catalog_translation,
+                source="component-vulnerability-catalog",
+            )
         if isinstance(answer.get("translation"), dict):
             state["translation"] = dict(answer["translation"])
+        state["catalog_translation_partial_verified"] = (
+            partial_catalog_translation_attestation_is_publishable(
+                answer,
+                state.get("response_language", "zh-Hans"),
+            )
+        )
+        state["host_localization_verified"] = host_localization_attestation_is_publishable(
+            answer,
+            state.get("response_language", "zh-Hans"),
+        )
         state["answer"] = answer
         return add_trace(
             state,
@@ -1183,6 +1313,21 @@ class KnowledgeSecurityGraph:
             state["answer"] = public_answer_payload(answer)
             return add_trace(state, "persist_memory", "无有效语义的问题未写入长期记忆。")
         public_answer = public_answer_payload(answer)
+        if state.get("host_localization_verified"):
+            localization = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
+            public_answer["translation"] = issue_host_localization_attestation(
+                public_answer,
+                target_language=state.get("response_language", "zh-Hans"),
+                source=str(localization.get("source") or "component-catalog-preview"),
+            )
+        elif state.get("catalog_translation_partial_verified"):
+            localization = answer.get("translation") if isinstance(answer.get("translation"), dict) else {}
+            public_answer["translation"] = issue_partial_catalog_translation_attestation(
+                public_answer,
+                target_language=state.get("response_language", "zh-Hans"),
+                catalog_status=localization,
+                source=str(localization.get("source") or "component-vulnerability-catalog"),
+            )
         try:
             workspace_path = str(state.get("workspace_path") or "").strip()
             if workspace_path:
@@ -1203,20 +1348,24 @@ class KnowledgeSecurityGraph:
                     ],
                 )
             if _is_information_session(state.get("session_id")):
-                memory_service.add_short_term_exchange(
+                stored = memory_service.add_short_term_exchange(
                     state.get("user_id", "default"),
                     state.get("session_id", "default"),
                     state["question"],
                     public_answer,
                 )
+                if isinstance(stored, dict) and stored.get("id"):
+                    state["exchange_id"] = str(stored["id"])
                 state["answer"] = public_answer
                 return add_trace(state, "persist_memory", "已写入当前咨询的短期记忆，不进入历史归档。")
-            memory_service.add_exchange(
+            stored = memory_service.add_exchange(
                 state.get("user_id", "default"),
                 state["question"],
                 public_answer,
                 session_id=state.get("session_id", "default"),
             )
+            if isinstance(stored, dict) and stored.get("id"):
+                state["exchange_id"] = str(stored["id"])
             state["answer"] = public_answer
             return add_trace(state, "persist_memory", "已写入长期记忆。")
         except Exception as exc:  # noqa: BLE001
@@ -1259,9 +1408,22 @@ class KnowledgeSecurityGraph:
         if state.get("intent") == "component_vulnerability_catalog":
             operation = state.get("catalog_operation")
             status = operation.get("catalog_translation") if isinstance(operation, dict) else None
-            return bool(operation) and catalog_translation_status_is_complete(
-                status,
-                state.get("response_language", "zh-Hans"),
+            return (
+                bool(operation)
+                and catalog_translation_status_is_complete(
+                    status,
+                    state.get("response_language", "zh-Hans"),
+                )
+            ) or bool(state.get("host_localization_verified")) or (
+                host_localization_attestation_is_publishable(
+                    state.get("answer"),
+                    state.get("response_language", "zh-Hans"),
+                )
+            ) or bool(state.get("catalog_translation_partial_verified")) or (
+                partial_catalog_translation_attestation_is_publishable(
+                    state.get("answer"),
+                    state.get("response_language", "zh-Hans"),
+                )
             )
         if not state.get("catalog_translation_ready"):
             return False
@@ -1310,10 +1472,10 @@ class KnowledgeSecurityGraph:
         if records:
             context_parts.append("API 实时查询与图谱富化记录：\n" + "\n".join(format_record_context(record) for record in records[:5]))
         context_text = "\n\n".join(context_parts) or "暂无额外上下文。"
-        prompt = system_prompt(state.get("response_language", "zh-Hans"))
+        prompt = system_prompt(state.get("response_language", "zh-Hans"), emoji_mode=state.get("emoji_mode", "moderate"))
         if state.get("task_context"):
             prompt += (
-                "\n当前问题关联一个已持久化的 SecFlow 扫描任务。"
+                "\n当前问题关联一个已持久化的神盾扫描任务。"
                 "只能使用输入中的结构化任务证据回答；证据不足时必须明确说明，禁止虚构路径、代码、调用链、修复结果或验证结果。"
                 "修复建议必须结合实际用途，并提供可执行的修改、验证步骤和回归扫描建议。"
             )
@@ -1352,7 +1514,7 @@ def format_task_scan_context(task_context: dict[str, Any]) -> str:
         "ruleset_fingerprint": task_context.get("ruleset_fingerprint"),
         "engine_fingerprint": task_context.get("engine_fingerprint"),
     }
-    return "SecFlow 扫描任务可验证事实 JSON：\n" + json.dumps(
+    return "神盾扫描任务可验证事实 JSON：\n" + json.dumps(
         facts,
         ensure_ascii=False,
         sort_keys=True,
@@ -1560,7 +1722,7 @@ def language_name(language: str) -> str:
     return LANGUAGE_NAMES.get(normalize_response_language(language), LANGUAGE_NAMES["zh-Hans"])
 
 
-def system_prompt(language: str, *, now: datetime | None = None) -> str:
+def system_prompt(language: str, *, emoji_mode: str = "moderate", now: datetime | None = None) -> str:
     local_now = now or datetime.now(ASSISTANT_TIMEZONE)
     if local_now.tzinfo is None:
         local_now = local_now.replace(tzinfo=ASSISTANT_TIMEZONE)
@@ -1570,6 +1732,7 @@ def system_prompt(language: str, *, now: datetime | None = None) -> str:
         language_name=language_name(language),
         current_date=local_now.strftime("%Y年%m月%d日"),
         current_time=local_now.strftime("%H:%M:%S"),
+        emoji_style={"off": "不要使用任何表情符号。", "moderate": "在问候、感谢、鼓励或祝贺时必须自然使用 1 个相关表情符号；其他普通回答最多 2 个。专业、安全、代码和错误内容默认不使用。", "active": "在问候、感谢、鼓励或祝贺时必须使用 1 个相关表情符号；其他内容可自然使用少量相关表情符号，每次最多 4 个；代码、命令、URL、文件名和结构化字段中禁止使用。"}.get(emoji_mode, "在问候、感谢、鼓励或祝贺时使用 1 个相关表情符号。"),
     )
 
 
@@ -3097,8 +3260,7 @@ def fallback_answer(state: AssistantState, language: str = "zh-Hans") -> str:
     question = state.get("question", "")
     lowered = question.lower()
     normalized_language = normalize_response_language(language)
-    model_error = sanitize_public_text(str(state.get("llm_error") or "")).strip()
-    model_notice = f"\n\n> 模型服务暂不可用：{model_error}" if model_error else ""
+    model_notice = _public_model_failure_notice(state.get("llm_error"), language)
     if state.get("intent") == "clarification":
         return tr(language, "clarification") if normalized_language != "zh-Hans" else "请输入需要分析的具体安全问题，例如漏洞编号、组件名称、代码风险或修复建议。"
     if state.get("intent") == "dependency_vulnerability_report":
@@ -3152,6 +3314,41 @@ def fallback_answer(state: AssistantState, language: str = "zh-Hans") -> str:
         f"对于非 CVE 问题，系统会优先把{memory_name}与上下文注入模型后回答。"
         + model_notice
     )
+
+
+def _public_model_failure_status(error: Any, language: str) -> str:
+    if not str(error or "").strip():
+        return "未调用" if normalize_response_language(language) == "zh-Hans" else "Not called"
+    messages = {
+        "zh-Hans": "模型请求失败",
+        "zh-Hant": "模型請求失敗",
+        "en": "Model request failed",
+        "ja": "モデル要求に失敗しました",
+        "ko": "모델 요청 실패",
+    }
+    normalized = normalize_response_language(language)
+    return messages.get(normalized, messages["en"])
+
+
+def _public_model_failure_notice(error: Any, language: str) -> str:
+    raw = sanitize_public_text(str(error or "")).strip()
+    if not raw:
+        return ""
+    normalized = normalize_response_language(language)
+    if normalized != "zh-Hans":
+        return ""
+    lowered = raw.casefold()
+    if "only allows codex official clients" in lowered:
+        message = "当前模型服务拒绝了非官方客户端请求（HTTP 403）。请更换允许第三方客户端调用的接口密钥或接口地址。"
+    elif "insufficient balance" in lowered or "insufficient quota" in lowered:
+        message = "模型服务余额不足或调用额度已用完，请充值或更换可用的接口密钥。"
+    elif "http 401" in lowered or "unauthorized" in lowered or "invalid api key" in lowered:
+        message = "模型服务鉴权失败（HTTP 401）。请检查接口密钥是否有效，并确认接口地址与密钥匹配。"
+    elif "http 403" in lowered or "forbidden" in lowered:
+        message = "模型服务拒绝了当前请求（HTTP 403）。请检查账号权限、模型访问范围和接口地址配置。"
+    else:
+        message = "模型连接失败。请检查接口密钥、接口地址、模型名称和网络连通性。"
+    return f"\n\n> {message}"
 
 
 def runtime_status(user_id: str = "default") -> dict[str, Any]:

@@ -5,9 +5,9 @@ from app.settings import APP_VERSION
 
 
 app = FastAPI(
-    title="SecFlow Standalone Security Assistant",
+    title="AegisAl Standalone Security Assistant",
     version=APP_VERSION,
-    description="Standalone LangGraph security Q&A service extracted from SecFlow.",
+    description="Standalone LangGraph security Q&A service provided by AegisAl.",
 )
 app.include_router(assistant_router)
 
@@ -15,7 +15,7 @@ app.include_router(assistant_router)
 @app.get("/")
 def root() -> dict[str, object]:
     return {
-        "service": "secflow-standalone-security-assistant",
+        "service": "aegisai-standalone-security-assistant",
         "version": APP_VERSION,
         "docs": "/docs",
         "assistant_api": "/api/assistant",
@@ -24,4 +24,4 @@ def root() -> dict[str, object]:
 
 @app.get("/health")
 def health() -> dict[str, object]:
-    return {"ok": True, "service": "secflow-standalone-security-assistant", "version": APP_VERSION}
+    return {"ok": True, "service": "aegisai-standalone-security-assistant", "version": APP_VERSION}

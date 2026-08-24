@@ -21,9 +21,9 @@ class MarkdownReportOutput(BaseModel):
 
 
 report_markdown_mcp = FastMCP(
-    "SecFlow Markdown MCP",
+    "AegisAl Markdown MCP",
     instructions=(
-        "Format a SecFlow report as Markdown from verified scan JSON, approved report text, chart data, "
+        "Format an AegisAl report as Markdown from verified scan JSON, approved report text, chart data, "
         "and Mermaid MCP output. Preserve evidence code, line numbers, remediation, and source links."
     ),
 )

@@ -13,6 +13,7 @@ from app.model_usage import model_usage_service
 
 
 LOCAL_PROVIDERS = {"ollama", "vllm", "local"}
+REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     "openai": {
         "name": "OpenAI",
@@ -166,7 +167,7 @@ def llm_public_config(user_id: str = "default") -> dict[str, Any]:
         "model": config.get("model", _default_model(provider)),
         "endpoint": _safe_endpoint(str(config.get("endpoint", ""))),
         "wire_api": str(config.get("wire_api") or ""),
-        "reasoning_effort": str(config.get("reasoning_effort") or ""),
+        "reasoning_effort": _normalized_reasoning_effort(config),
         "reasoning_options": _reasoning_options_for_config(config),
         "disable_response_storage": bool(config.get("disable_response_storage")),
         "enabled": bool(config.get("enabled")),
@@ -206,7 +207,7 @@ def test_llm_config(update: dict[str, Any], user_id: str = "default") -> dict[st
     )
     result = diagnose_chat_completion(
         model,
-        [{"role": "user", "content": "请只回复：SecFlow OK"}],
+        [{"role": "user", "content": "请只回复：AegisAl OK"}],
         record_usage=False,
     )
     return {
@@ -234,6 +235,7 @@ def list_llm_models(update: dict[str, Any], user_id: str = "default") -> dict[st
     current_catalog_provider = str(current.get("catalog_provider") or current.get("provider") or "")
     if (
         not api_key
+        and not bool(update.get("clear_api_key"))
         and provider == current.get("provider")
         and catalog_provider == current_catalog_provider
         and endpoint.rstrip("/") == current_endpoint
@@ -289,6 +291,15 @@ def active_model_from_env(user_id: str = "default") -> dict[str, Any] | None:
         or _default_model(provider)
     ).strip()
 
+    reasoning_effort = _normalized_reasoning_effort(
+        {
+            "provider": provider,
+            "catalog_provider": provider,
+            "model": model,
+            "wire_api": os.getenv("SECFLOW_LLM_WIRE_API", "").strip(),
+            "reasoning_effort": os.getenv("SECFLOW_LLM_REASONING_EFFORT", "").strip(),
+        }
+    )
     return {
         "name": os.getenv("SECFLOW_LLM_NAME") or f"{provider}:{model}",
         "provider": provider,
@@ -300,7 +311,7 @@ def active_model_from_env(user_id: str = "default") -> dict[str, Any] | None:
         "topP": float(os.getenv("SECFLOW_LLM_TOP_P", "0.9")),
         "timeoutMs": int(os.getenv("SECFLOW_LLM_TIMEOUT_MS", "60000")),
         "wireApi": os.getenv("SECFLOW_LLM_WIRE_API", "").strip(),
-        "reasoningEffort": os.getenv("SECFLOW_LLM_REASONING_EFFORT", "").strip(),
+        "reasoningEffort": reasoning_effort,
         "disableResponseStorage": os.getenv("SECFLOW_LLM_DISABLE_RESPONSE_STORAGE", "").strip().lower()
         in {"1", "true", "yes", "on"},
     }
@@ -475,7 +486,7 @@ def _stream_chat_completion(
             {"role": item.get("role", "user"), "content": item.get("content", "")}
             for item in messages
             if item.get("role") != "system"
-        ] or [{"role": "user", "content": "请回复 SecFlow OK"}]
+        ] or [{"role": "user", "content": "请回复 AegisAl OK"}]
         body = {
             "model": active_model.get("model", "claude-3-5-sonnet-latest"),
             "messages": chat_messages,
@@ -739,7 +750,7 @@ def _diagnose_anthropic_completion(
         if item.get("role") != "system"
     ]
     if not chat_messages:
-        chat_messages = [{"role": "user", "content": "请回复 SecFlow OK"}]
+        chat_messages = [{"role": "user", "content": "请回复 AegisAl OK"}]
 
     body: dict[str, Any] = {
         "model": active_model.get("model", "claude-3-5-sonnet-latest"),
@@ -864,6 +875,23 @@ def _reasoning_options_for_config(config: dict[str, Any]) -> list[dict[str, Any]
     return [{"value": "none", "fixed": True}]
 
 
+def _normalized_reasoning_effort(config: dict[str, Any]) -> str:
+    allowed = [str(option.get("value") or "") for option in _reasoning_options_for_config(config)]
+    configured = str(config.get("reasoning_effort") or "").strip()
+    if configured in allowed:
+        return configured
+
+    provider = str(config.get("provider") or "openai").strip().lower()
+    provider_default = str(PROVIDER_DEFAULTS.get(provider, {}).get("reasoning_effort") or "").strip()
+    if provider_default in allowed:
+        return provider_default
+    if "medium" in allowed:
+        return "medium"
+    if "none" in allowed:
+        return "none"
+    return allowed[0]
+
+
 def _safe_endpoint(endpoint: str) -> str:
     if not endpoint:
         return ""
@@ -986,6 +1014,7 @@ def _stored_llm_config(
     config.setdefault("wire_api", defaults.get("wire_api", "responses" if provider == "openai" else "chat"))
     config.setdefault("reasoning_effort", defaults.get("reasoning_effort", ""))
     config.setdefault("disable_response_storage", defaults.get("disable_response_storage", False))
+    config["reasoning_effort"] = _normalized_reasoning_effort(config)
     return config
 
 
@@ -1016,7 +1045,8 @@ def _merge_llm_update(current: dict[str, Any], update: dict[str, Any]) -> dict[s
     catalog_provider_changed = str(merged.get("catalog_provider") or provider) != str(current.get("catalog_provider") or current.get("provider") or "")
     merged["model"] = str(update.get("model") or (defaults["model"] if provider_changed else merged.get("model"))).strip()
     merged["endpoint"] = str(update.get("endpoint") or (defaults["endpoint"] if provider_changed else merged.get("endpoint"))).strip()
-    if provider_changed or catalog_provider_changed:
+    endpoint_changed = merged["endpoint"].rstrip("/") != str(current.get("endpoint") or "").strip().rstrip("/")
+    if provider_changed or catalog_provider_changed or endpoint_changed or bool(update.get("clear_api_key")):
         merged["api_key"] = ""
     if provider_changed:
         merged["wire_api"] = str(defaults.get("wire_api") or ("responses" if provider == "openai" else "chat"))
@@ -1037,11 +1067,16 @@ def _merge_llm_update(current: dict[str, Any], update: dict[str, Any]) -> dict[s
         if source_key in update and update[source_key] is not None:
             merged[target_key] = update[source_key]
     if "reasoning_effort" in update and update.get("reasoning_effort") is not None:
-        merged["reasoning_effort"] = str(update.get("reasoning_effort", "")).strip()
+        reasoning_effort = str(update.get("reasoning_effort", "")).strip()
+        if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(f"不支持的推理强度：{reasoning_effort}")
+        if reasoning_effort:
+            merged["reasoning_effort"] = reasoning_effort
     if "disable_response_storage" in update and update.get("disable_response_storage") is not None:
         merged["disable_response_storage"] = bool(update.get("disable_response_storage"))
     if "wire_api" in update and update.get("wire_api") is not None:
         merged["wire_api"] = str(update.get("wire_api") or "").strip()
+    merged["reasoning_effort"] = _normalized_reasoning_effort(merged)
     return merged
 
 
@@ -1063,6 +1098,6 @@ def _active_model_from_config(config: dict[str, Any]) -> dict[str, Any]:
         "topP": float(config.get("top_p", 0.9)),
         "timeoutMs": int(config.get("timeout_ms", 60000)),
         "wireApi": str(config.get("wire_api") or ""),
-        "reasoningEffort": str(config.get("reasoning_effort") or ""),
+        "reasoningEffort": _normalized_reasoning_effort(config),
         "disableResponseStorage": bool(config.get("disable_response_storage")),
     }

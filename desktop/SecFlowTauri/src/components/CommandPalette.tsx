@@ -1,9 +1,10 @@
-import { Archive, Bot, FileSearch, FolderOpen, Search, Settings, ShieldCheck, Sparkles } from "lucide-react";
+import { Archive, FileSearch, FolderOpen, Search, Settings, ShieldCheck, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useI18n } from "../i18n";
 import { chooseProjectDirectory, openNewTaskWindow } from "../lib/platform";
 import { useAppStore, type WorkspaceView } from "../store/appStore";
+import { BeautifulEmptyState } from "./beautiful-ui/BeautifulUI";
 
 const commands: Array<{ id: string; label: string; hint: string; icon: React.ReactNode; view?: WorkspaceView; action?: "project" | "new" }> = [
   { id: "new", label: "新建安全任务", hint: "开始新的 Agent 对话", icon: <Sparkles />, action: "new" },
@@ -130,7 +131,13 @@ export function CommandPalette() {
               <span><strong>{t(command.label)}</strong><small>{t(command.hint)}</small></span>
             </button>
           ))}
-          {!visible.length ? <p role="status"><Bot size={18} aria-hidden="true" />{t("没有匹配的命令")}</p> : null}
+          {!visible.length ? (
+            <BeautifulEmptyState
+              title={t("没有匹配的命令")}
+              query={query}
+              detail={t("请尝试搜索任务、项目或功能名称")}
+            />
+          ) : null}
         </div>
       </div>
     </div>

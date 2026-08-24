@@ -1,4 +1,4 @@
 interface:
-  display_name: "SecFlow 多 Agent 调度"
+  display_name: "神盾多 Agent 调度"
   short_description: "通过最小权限专业 Agent 和可审计交接执行安全任务"
-  default_prompt: "Use $secflow-multi-agent-supervisor to understand my goal, delegate it to the minimum-permission SecFlow specialist agent, and preserve human approvals and evaluation isolation."
+  default_prompt: "Use $secflow-multi-agent-supervisor to understand my goal, delegate it to the minimum-permission AegisAl specialist agent, and preserve human approvals and evaluation isolation."

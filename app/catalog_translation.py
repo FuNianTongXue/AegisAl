@@ -25,12 +25,41 @@ _TRANSLATION_RETRY_SECONDS = 30.0
 _translation_backoff_until = 0.0
 _translation_backoff_lock = Lock()
 
+_PARTIAL_CATALOG_FACT_FIELDS = (
+    "id",
+    "severity",
+    "cvss_score",
+    "cvss_vector",
+    "aliases",
+    "cwes",
+    "affected_versions",
+    "fixed_versions",
+    "components",
+    "reference_links",
+    "published_at",
+    "updated_at",
+    "known_exploited",
+    "has_poc",
+    "normalization_version",
+)
+_PARTIAL_CATALOG_COMPONENT_FIELDS = (
+    "name",
+    "ecosystem",
+    "affected",
+    "fixed",
+    "version",
+    "versions",
+    "purl",
+    "vendor",
+)
+
 
 def translate_records_for_storage(
     records: list[dict[str, Any]],
     *,
     user_id: str = "default",
     session_id: str = "catalog-ingest",
+    target_languages: tuple[str, ...] = ("zh-Hans", "zh-Hant"),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Translate vulnerability display text once, before it is persisted.
 
@@ -40,13 +69,16 @@ def translate_records_for_storage(
     a later upsert.
     """
 
-    prepared = [_prepare_record(record) for record in records if isinstance(record, dict)]
+    requested_languages = tuple(
+        language for language in dict.fromkeys(target_languages) if language in {"zh-Hans", "zh-Hant"}
+    )
+    prepared = prepare_records_for_storage(records)
     simplified_pending = [
         index for index, record in enumerate(prepared) if not record_translation_ready(record, "zh-Hans")
-    ]
+    ] if requested_languages else []
     traditional_pending = [
         index for index, record in enumerate(prepared) if not record_translation_ready(record, "zh-Hant")
-    ]
+    ] if "zh-Hant" in requested_languages else []
     if not simplified_pending and not traditional_pending:
         return prepared, _aggregate_audit(prepared, invoked=False)
 
@@ -108,7 +140,7 @@ def translate_records_for_storage(
         for index, record in enumerate(prepared)
         if record_translation_ready(record, "zh-Hans")
         and not record_translation_ready(record, "zh-Hant")
-    ]
+    ] if "zh-Hant" in requested_languages else []
     traditional_audit: dict[str, Any] = {}
     if traditional_pending:
         traditional_by_key, traditional_audit = _translate_catalog_fields(
@@ -170,6 +202,164 @@ def translate_records_for_storage(
     elif _offline_runtime_unavailable(tool_audit) or _offline_runtime_unavailable(traditional_audit):
         _open_translation_backoff()
     return prepared, audit
+
+
+def prepare_records_for_storage(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize source records without invoking the offline translation runtime."""
+
+    return [_prepare_record(record) for record in records if isinstance(record, dict)]
+
+
+def recover_partial_catalog_records(
+    source_records: list[dict[str, Any]],
+    translated_records: list[dict[str, Any]],
+    *,
+    target_language: str,
+) -> list[dict[str, Any]]:
+    """Recover verified catalog rows without publishing unresolved source prose.
+
+    Translation output is only a candidate for ``title`` and ``summary``. All
+    identifiers, scores, versions, components, dates, and links come from the
+    verified source projection. Unresolved prose is replaced with a localized
+    placeholder instead of restoring ``*_original`` fields.
+    """
+
+    language = _catalog_target_language(target_language)
+    if language not in {"zh-Hans", "zh-Hant"}:
+        return []
+
+    candidates = [item if isinstance(item, dict) else {} for item in translated_records]
+    candidates_by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in candidates
+        if str(item.get("id") or "").strip()
+    }
+    recovered: list[dict[str, Any]] = []
+    for index, source in enumerate(source_records):
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("id") or "").strip()
+        candidate = candidates_by_id.get(source_id)
+        if candidate is None and index < len(candidates):
+            candidate = candidates[index]
+        candidate = candidate if isinstance(candidate, dict) else {}
+
+        item = _partial_catalog_facts(source)
+        original_title = str(
+            source.get("title_original") or source.get("title") or source_id
+        ).strip()
+        original_summary = str(
+            source.get("summary_original") or source.get("summary") or ""
+        ).strip()
+        title = _partial_catalog_localized_text(
+            candidate.get("title"),
+            _stored_catalog_localized_text(source, "title", language),
+        )
+        if not title and original_title and _MACHINE_TITLE.fullmatch(original_title):
+            title = original_title
+        summary = _partial_catalog_localized_text(
+            candidate.get("summary"),
+            _stored_catalog_localized_text(source, "summary", language),
+        )
+
+        title_ready = bool(title) or not original_title
+        summary_ready = bool(summary) or not original_summary
+        if not title:
+            title = (
+                _ZH_HANT_TITLE_UNAVAILABLE
+                if language == "zh-Hant"
+                else _ZH_TITLE_UNAVAILABLE
+            )
+        if not summary and original_summary:
+            summary = (
+                _ZH_HANT_SUMMARY_UNAVAILABLE
+                if language == "zh-Hant"
+                else _ZH_SUMMARY_UNAVAILABLE
+            )
+
+        item["title"] = title
+        item["summary"] = summary
+        item["content_language"] = language
+        item["translation_status"] = (
+            "translated" if title_ready and summary_ready else "pending"
+        )
+        recovered.append(item)
+    return recovered
+
+
+def partial_catalog_summary(
+    translated_summary: Any,
+    source_summary: Any,
+    *,
+    target_language: str,
+) -> str:
+    """Choose localized catalog summary text for a recoverable partial result."""
+
+    language = _catalog_target_language(target_language)
+    localized = _partial_catalog_localized_text(translated_summary, source_summary)
+    if localized:
+        return localized
+    if language == "zh-Hant":
+        return "部分目錄欄位暫未完成離線翻譯，核驗記錄已保留，待補譯欄位已標記。"
+    return "部分目录字段暂未完成离线翻译，核验记录已保留，待补译字段已标记。"
+
+
+def _partial_catalog_facts(source: dict[str, Any]) -> dict[str, Any]:
+    item = {
+        field: deepcopy(source[field])
+        for field in _PARTIAL_CATALOG_FACT_FIELDS
+        if field in source and field != "components"
+    }
+    components: list[dict[str, Any]] = []
+    for value in source.get("components") or []:
+        if not isinstance(value, dict):
+            continue
+        component = {
+            field: deepcopy(value[field])
+            for field in _PARTIAL_CATALOG_COMPONENT_FIELDS
+            if field in value
+        }
+        if component:
+            components.append(component)
+    if "components" in source:
+        item["components"] = components
+    return item
+
+
+def _stored_catalog_localized_text(
+    source: dict[str, Any],
+    field: str,
+    language: str,
+) -> str:
+    localized_field = (
+        f"{field}_zh_hant" if language == "zh-Hant" else f"{field}_zh"
+    )
+    localized = str(source.get(localized_field) or "").strip()
+    if _CJK.search(localized):
+        return localized
+    if (
+        str(source.get("content_language") or "").strip() == language
+        and str(source.get("translation_status") or "") == "translated"
+    ):
+        return str(source.get(field) or "").strip()
+    return ""
+
+
+def _partial_catalog_localized_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if _CJK.search(text):
+            return text
+    return ""
+
+
+def _catalog_target_language(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    if normalized in {"zh", "zh-cn", "zh-sg", "zh-hans"}:
+        return "zh-Hans"
+    if normalized in {"zh-tw", "zh-hk", "zh-mo", "zh-hant"}:
+        return "zh-Hant"
+    return str(value or "").strip()
 
 
 def _translate_catalog_fields(
@@ -467,9 +657,12 @@ def _clear_translation_backoff() -> None:
 __all__ = [
     "CATALOG_TRANSLATION_LANGUAGE",
     "CATALOG_TRANSLATION_VERSION",
+    "partial_catalog_summary",
+    "prepare_records_for_storage",
     "record_summary_for_language",
     "record_title_for_language",
     "record_translation_ready",
     "records_translation_ready",
+    "recover_partial_catalog_records",
     "translate_records_for_storage",
 ]

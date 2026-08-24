@@ -2,11 +2,13 @@ import { Check, Download, FileText, LoaderCircle, RotateCcw, Square, TriangleAle
 import { useEffect, useState } from "react";
 
 import { api } from "../lib/api";
+import { brandDisplayText } from "../branding";
 import { useI18n } from "../i18n";
 import { saveBinaryArtifact } from "../lib/platform";
 import { useAppStore } from "../store/appStore";
 import type { AgentTask } from "../types";
 import { AgentTimeline } from "./AgentTimeline";
+import { BeautifulTaskRow, type BeautifulStatus } from "./beautiful-ui/BeautifulUI";
 
 export function TaskCard({ task: initialTask, showExecutionDetails = true }: { task: AgentTask; showExecutionDetails?: boolean }) {
   const { locale } = useI18n();
@@ -68,7 +70,7 @@ export function TaskCard({ task: initialTask, showExecutionDetails = true }: { t
       if (!path) throw new Error(`${format === "all" ? "全部格式" : format.toUpperCase()} 报告缺少下载地址。`);
       const response = await api.raw(path);
       const fallbackName = format === "all" ? `${task.workspace_name}-reports.zip` : `${task.workspace_name}.${format}`;
-      await saveBinaryArtifact(String(artifact.file_name || fallbackName), await response.blob());
+      await saveBinaryArtifact(brandDisplayText(artifact.file_name) || fallbackName, await response.blob());
     } catch (error) {
       setDownloadError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -142,11 +144,13 @@ export function TaskCard({ task: initialTask, showExecutionDetails = true }: { t
 
   return (
     <section className={`task-card task-${task.status}`}>
-      <header>
-        <span className="task-state-icon">{reportGenerating ? <LoaderCircle size={15} className="spin" /> : taskIcon(task.status)}</span>
-        <div><strong>{task.workspace_name}</strong><small>{task.objective}</small></div>
-        <span className="status-chip">{reportGenerating ? "报告生成中" : statusLabel(task.status)}</span>
-      </header>
+      <BeautifulTaskRow
+        state={taskPresentationStatus(reportGenerating ? "running" : task.status)}
+        icon={reportGenerating ? <LoaderCircle size={15} className="spin" /> : taskIcon(task.status)}
+        title={task.workspace_name}
+        description={task.objective}
+        meta={reportGenerating ? "报告生成中" : statusLabel(task.status)}
+      />
       <div className="task-metrics">
         <span><small>语言</small><strong>{task.languages.join(" / ") || "识别中"}</strong></span>
         <span><small>已验证风险</small><strong>{findings}</strong></span>
@@ -165,8 +169,8 @@ export function TaskCard({ task: initialTask, showExecutionDetails = true }: { t
         </div>
       ) : null}
       {showExecutionDetails ? <AgentTimeline events={task.events} plan={task.plan} running={running} /> : null}
-      {task.error ? <p className="task-error" role="alert"><TriangleAlert size={14} />{task.error}</p> : null}
-      {downloadError ? <p className="task-error" role="alert"><TriangleAlert size={14} />{downloadError}</p> : null}
+      {task.error ? <p className="task-error" role="alert"><TriangleAlert size={14} />{brandDisplayText(task.error)}</p> : null}
+      {downloadError ? <p className="task-error" role="alert"><TriangleAlert size={14} />{brandDisplayText(downloadError)}</p> : null}
       <footer>
         {scanRunning ? <button className="secondary" disabled={cancelling || task.status === "cancelling"} onClick={() => void cancelScan()}>{cancelling || task.status === "cancelling" ? <LoaderCircle size={14} className="spin" /> : <Square size={14} />}{cancelling || task.status === "cancelling" ? "停止中" : "停止分析"}</button> : null}
         {["failed", "cancelled"].includes(task.status) ? <button className="secondary" onClick={() => void api.taskMutation(task.id, "resume", userId).then(replaceTask)}><RotateCcw size={14} />重新扫描</button> : null}
@@ -182,7 +186,15 @@ export function TaskCard({ task: initialTask, showExecutionDetails = true }: { t
             <select value={format} onChange={(event) => setFormat(event.target.value)} aria-label="报告格式">
               <option value="pdf">PDF</option><option value="html">HTML</option><option value="docx">Word</option><option value="xlsx">Excel</option><option value="md">Markdown</option><option value="all">全部格式</option>
             </select>
-            <button className="primary" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}确认下载</button>
+            <button
+              className="primary"
+              disabled={downloading}
+              onClick={() => void download()}
+              aria-label={downloadLabel(format)}
+            >
+              {downloading ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
+              {downloadLabel(format)}
+            </button>
           </div>
         ) : null}
       </footer>
@@ -197,3 +209,11 @@ function taskIcon(status: string) {
 }
 
 const statusLabel = (status: string) => ({ queued: "排队中", running: "扫描中", completed: "已完成", failed: "失败", interrupted: "等待确认", cancelled: "已停止", cancelling: "停止中" }[status] || status);
+const downloadLabel = (format: string) => format === "all" ? "下载全部格式" : `下载 ${format === "xlsx" ? "Excel" : format.toUpperCase()}`;
+const taskPresentationStatus = (status: string): BeautifulStatus => {
+  if (["queued", "running", "cancelling", "interrupted"].includes(status)) return "running";
+  if (status === "completed") return "completed";
+  if (status === "cancelled") return "cancelled";
+  if (status === "failed") return "error";
+  return "pending";
+};

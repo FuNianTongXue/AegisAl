@@ -59,7 +59,7 @@ describe("TrialGuard", () => {
     const background = screen.getByRole("button", { name: "Background action" });
     background.focus();
 
-    const blocker = await screen.findByRole("alertdialog", { name: "安全智脑试用版不可用" });
+    const blocker = await screen.findByRole("alertdialog", { name: "神盾试用版不可用" });
     expect(blocker).toHaveTextContent("核心功能已停用");
     expect(blocker).toHaveFocus();
     expect(background).toHaveAttribute("aria-hidden", "true");

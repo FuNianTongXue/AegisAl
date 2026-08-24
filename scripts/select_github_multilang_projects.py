@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
 def github_headers() -> dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SecFlow-Multilang-500-Evaluation",
+        "User-Agent": "AegisAl-Multilang-500-Evaluation",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     token = os.getenv("GITHUB_TOKEN", "").strip()

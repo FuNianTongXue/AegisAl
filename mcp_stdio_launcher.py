@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SecFlow MCP stdio Launcher — Unified entry point for all SecFlow MCP servers.
+AegisAl MCP stdio Launcher — Unified entry point for all bundled MCP servers.
 
 Usage:
     python3 mcp_stdio_launcher.py --server <server-id>
@@ -24,7 +24,7 @@ if PROJECT_ROOT not in sys.path:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="SecFlow MCP stdio Launcher")
+    parser = argparse.ArgumentParser(description="AegisAl MCP stdio Launcher")
     parser.add_argument(
         "--server",
         required=True,

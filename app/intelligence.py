@@ -10,10 +10,12 @@ import sqlite3
 import sys
 import time as monotonic_time
 import zipfile
+from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Event, RLock, Thread
 from typing import Any
 
@@ -29,6 +31,7 @@ from app.catalog_translation import (
     record_title_for_language,
     record_translation_ready,
     records_translation_ready,
+    prepare_records_for_storage,
     translate_records_for_storage,
 )
 from app.collectors import (
@@ -81,6 +84,8 @@ _GITHUB_BATCH_PAGE_SIZE = 100
 _GITHUB_BATCH_MAX_PAGES = 50
 _GITHUB_BATCH_MAX_RECORDS = 5_000
 _GITHUB_BATCH_BUDGET_SECONDS = 18.0
+_DASHBOARD_CACHE_SECONDS = 30.0
+_INTERACTIVE_TRANSLATION_RETRY_SECONDS = 5 * 60.0
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 
 
@@ -104,11 +109,14 @@ def _verified_summary_translation_audit(candidate: dict[str, Any]) -> dict[str, 
         "status": "completed",
         "translation_status": "translated",
         "target_language": CATALOG_TRANSLATION_LANGUAGE,
-        "server": "SecFlow Translation MCP",
         "tool": "translate_json_payload",
         "transport": "stdio",
     }
     if any(raw.get(field) != expected for field, expected in required_values.items()):
+        return None
+    # Existing local catalogs may contain the legacy audit label. Accept it
+    # for read compatibility while all newly emitted audits use AegisAl.
+    if raw.get("server") not in {"AegisAl Translation MCP", "SecFlow Translation MCP"}:
         return None
     required_booleans = {
         "offline": True,
@@ -272,10 +280,18 @@ class _VulnerabilityCatalog:
                     ON vulnerabilities(record_date);
                 CREATE INDEX IF NOT EXISTS idx_vulnerabilities_severity
                     ON vulnerabilities(severity);
+                CREATE INDEX IF NOT EXISTS idx_vulnerabilities_recent
+                    ON vulnerabilities(record_date DESC, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_vulnerabilities_severity_recent
+                    ON vulnerabilities(severity, record_date DESC, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_vulnerabilities_update_day
+                    ON vulnerabilities(substr(updated_at, 1, 10));
                 CREATE TABLE IF NOT EXISTS vulnerability_aliases (
                     alias TEXT PRIMARY KEY,
                     canonical_id TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_vulnerability_aliases_cid
+                    ON vulnerability_aliases(canonical_id);
                 CREATE TABLE IF NOT EXISTS vulnerability_components (
                     component_key TEXT NOT NULL,
                     canonical_id TEXT NOT NULL,
@@ -398,7 +414,10 @@ class _VulnerabilityCatalog:
         self.migrate_poc_metrics_incrementally(stop)
         if not stop.is_set():
             self.migrate_encrypted_catalog_incrementally(stop)
-        if not stop.is_set():
+        if (
+            not stop.is_set()
+            and _environment_flag("SECFLOW_ENABLE_FULL_TRANSLATION_BACKFILL", default=False)
+        ):
             self.migrate_catalog_translations_incrementally(stop)
 
     def migrate_catalog_translations_incrementally(
@@ -642,10 +661,24 @@ class _VulnerabilityCatalog:
         if secure_key != key:
             connection.execute("DELETE FROM catalog_metadata WHERE key = ?", (key,))
 
-    def upsert(self, records: list[dict[str, Any]], *, user_id: str = "default") -> list[dict[str, Any]]:
+    def upsert(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        user_id: str = "default",
+        translate: bool = True,
+    ) -> list[dict[str, Any]]:
         if not records:
             return []
-        localized_records, translation_audit = translate_records_for_storage(records, user_id=user_id)
+        if translate:
+            localized_records, translation_audit = translate_records_for_storage(records, user_id=user_id)
+        else:
+            localized_records = prepare_records_for_storage(records)
+            translation_audit = {
+                "pending_records": sum(
+                    not record_translation_ready(record, "zh-Hans") for record in localized_records
+                )
+            }
         stored_records: list[dict[str, Any]] = []
         with self._lock, self._connect() as connection:
             for incoming in localized_records:
@@ -1101,7 +1134,8 @@ class _VulnerabilityCatalog:
             recent_clauses = [*clauses, "severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')"]
             recent_where = f" WHERE {' AND '.join(recent_clauses)}"
             recent_rows = connection.execute(
-                f"SELECT record_json FROM vulnerabilities{recent_where} ORDER BY record_date DESC, updated_at DESC LIMIT 5",
+                f"SELECT record_json FROM vulnerabilities INDEXED BY idx_vulnerabilities_recent{recent_where} "
+                "ORDER BY record_date DESC, updated_at DESC LIMIT 5",
                 values,
             ).fetchall()
             today = datetime.now(timezone.utc).date()
@@ -1130,31 +1164,154 @@ class _VulnerabilityCatalog:
         *,
         start: datetime,
         end: datetime,
+        ecosystems: set[str] | None = None,
+        severities: set[str] | None = None,
+        component_names: set[str] | None = None,
         limit: int = _COMPONENT_EXPORT_RECORD_LIMIT,
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, int]:
         safe_limit = max(1, min(int(limit), _COMPONENT_EXPORT_RECORD_LIMIT))
-        values = [
+        clauses = ["v.record_date >= ?", "v.record_date < ?"]
+        values: list[Any] = [
             start.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
             end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
-            safe_limit + 1,
         ]
+        severity_values = sorted(
+            {str(value).strip().upper() for value in severities or set() if str(value).strip()}
+        )
+        if severity_values:
+            placeholders = ",".join("?" for _ in severity_values)
+            clauses.append(f"v.severity IN ({placeholders})")
+            values.extend(severity_values)
+
+        component_clauses = ["c.canonical_id = v.canonical_id"]
+        ecosystem_values = sorted(
+            {str(value).strip().casefold() for value in ecosystems or set() if str(value).strip()}
+        )
+        if ecosystem_values:
+            predicates = ["c.component_key LIKE ? ESCAPE '\\'" for _ in ecosystem_values]
+            component_clauses.append(f"({' OR '.join(predicates)})")
+            values.extend(f"{_escape_sql_like(value)}|%" for value in ecosystem_values)
+        component_name_values = sorted(
+            {str(value).strip().casefold() for value in component_names or set() if str(value).strip()}
+        )
+        if component_name_values:
+            predicates = ["c.component_key LIKE ? ESCAPE '\\'" for _ in component_name_values]
+            component_clauses.append(f"({' OR '.join(predicates)})")
+            values.extend(f"%|%{_escape_sql_like(value)}%" for value in component_name_values)
+        clauses.append(
+            "EXISTS (SELECT 1 FROM vulnerability_components c WHERE "
+            + " AND ".join(component_clauses)
+            + ")"
+        )
+        where = " AND ".join(clauses)
         with self._connect() as connection:
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM vulnerabilities v WHERE {where}",
+                    values,
+                ).fetchone()[0]
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT v.record_json
                 FROM vulnerabilities v
-                WHERE v.record_date >= ? AND v.record_date < ?
-                  AND EXISTS (
-                      SELECT 1 FROM vulnerability_components c
-                      WHERE c.canonical_id = v.canonical_id
-                  )
+                WHERE {where}
                 ORDER BY v.record_date DESC, v.updated_at DESC
                 LIMIT ?
                 """,
-                values,
+                [*values, safe_limit + 1],
             ).fetchall()
-        truncated = len(rows) > safe_limit
-        return [self._decode_record(str(row["record_json"])) for row in rows[:safe_limit]], truncated
+        truncated = total > safe_limit
+        return [self._decode_record(str(row["record_json"])) for row in rows[:safe_limit]], truncated, total
+
+    def component_export_stats(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        ecosystems: set[str] | None = None,
+        severities: set[str] | None = None,
+        component_names: set[str] | None = None,
+    ) -> tuple[int, int]:
+        vulnerability_where, vulnerability_values, component_where, component_values = (
+            _component_catalog_sql_parts(
+                start=start,
+                end=end,
+                ecosystems=ecosystems,
+                severities=severities,
+                component_names=component_names,
+            )
+        )
+        with self._connect() as connection:
+            total = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM vulnerabilities v
+                    WHERE {vulnerability_where}
+                      AND EXISTS (
+                          SELECT 1
+                          FROM vulnerability_components c
+                          WHERE c.canonical_id = v.canonical_id AND {component_where}
+                      )
+                    """,
+                    [*vulnerability_values, *component_values],
+                ).fetchone()[0]
+            )
+            component_count = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT c.component_key)
+                    FROM vulnerabilities v
+                    JOIN vulnerability_components c ON c.canonical_id = v.canonical_id
+                    WHERE {vulnerability_where} AND {component_where}
+                    """,
+                    [*vulnerability_values, *component_values],
+                ).fetchone()[0]
+            )
+        return total, component_count
+
+    def iter_component_records_in_range(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        ecosystems: set[str] | None = None,
+        severities: set[str] | None = None,
+        component_names: set[str] | None = None,
+        batch_size: int = 128,
+    ) -> Iterator[dict[str, Any]]:
+        vulnerability_where, vulnerability_values, component_where, component_values = (
+            _component_catalog_sql_parts(
+                start=start,
+                end=end,
+                ecosystems=ecosystems,
+                severities=severities,
+                component_names=component_names,
+            )
+        )
+        safe_batch_size = max(1, min(int(batch_size), 1_000))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                SELECT v.record_json
+                FROM vulnerabilities v
+                WHERE {vulnerability_where}
+                  AND EXISTS (
+                      SELECT 1
+                      FROM vulnerability_components c
+                      WHERE c.canonical_id = v.canonical_id AND {component_where}
+                  )
+                ORDER BY v.record_date DESC, v.updated_at DESC
+                """,
+                [*vulnerability_values, *component_values],
+            )
+            while True:
+                rows = cursor.fetchmany(safe_batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    yield self._decode_record(str(row["record_json"]))
 
     @staticmethod
     def _encode_record(record: dict[str, Any]) -> str:
@@ -1198,6 +1355,15 @@ class RealtimeIntelligenceService:
         self._scheduler_thread: Thread | None = None
         self._bootstrap_thread: Thread | None = None
         self._catalog_migration_thread: Thread | None = None
+        self._translation_thread: Thread | None = None
+        self._translation_queue: Queue[tuple[str, str, str]] = Queue()
+        self._queued_translations: set[tuple[str, str]] = set()
+        self._translation_retry_after: dict[tuple[str, str], float] = {}
+        self._dashboard_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    @property
+    def catalog_path(self) -> Path:
+        return self._catalog.path
 
     def query(
         self,
@@ -1223,10 +1389,8 @@ class RealtimeIntelligenceService:
         repair_local_catalog = False
         if identifier:
             local_records = self._catalog.find_by_identifier(identifier.group(0).upper(), limit)
-            if local_records and language == "zh-Hans" and not records_translation_ready(local_records, language):
-                localized = self._catalog.upsert(local_records, user_id=user_id)
-                if localized:
-                    local_records = localized
+            if local_records and language in {"zh-Hans", "zh-Hant"} and not records_translation_ready(local_records, language):
+                self._queue_interactive_translations(local_records, language, user_id=user_id)
             if local_records and not any(_record_needs_realtime_enrichment(record) for record in local_records):
                 merged = _merge_records(local_records)[:limit]
                 merged = _enrich_records_with_reference_patches(merged)
@@ -1290,9 +1454,11 @@ class RealtimeIntelligenceService:
         persisted = {"inserted": 0, "updated": 0}
         persistence = "api-only"
         if merged:
-            stored = self._catalog.upsert(merged, user_id=user_id)
+            stored = self._catalog.upsert(merged, user_id=user_id, translate=False)
             if stored:
                 merged = stored
+            self._invalidate_dashboard_cache()
+            self._queue_interactive_translations(merged, language, user_id=user_id)
             translation_ready = _catalog_translation_status(merged, language)["status"] == "completed"
             if repair_local_catalog:
                 persisted["updated"] = len(merged)
@@ -1301,9 +1467,9 @@ class RealtimeIntelligenceService:
                     _trace(
                         "refresh_local_catalog",
                         (
-                            f"已翻译并补全 {len(merged)} 条本地漏洞事实。"
+                            f"已补全 {len(merged)} 条本地漏洞事实。"
                             if translation_ready
-                            else f"已补全并写入 {len(merged)} 条漏洞事实，中文译文等待后续重试。"
+                            else f"已补全并写入 {len(merged)} 条漏洞事实，译文正在后台准备。"
                         ),
                         "completed" if translation_ready else "warning",
                     )
@@ -1315,9 +1481,9 @@ class RealtimeIntelligenceService:
                     _trace(
                         "persist_local_catalog",
                         (
-                            f"已在入库前完成中文化并写入 {len(merged)} 条漏洞事实。"
+                            f"已写入 {len(merged)} 条漏洞事实。"
                             if translation_ready
-                            else f"已写入 {len(merged)} 条漏洞事实，中文译文等待后续重试。"
+                            else f"已写入 {len(merged)} 条漏洞事实，译文正在后台准备。"
                         ),
                         "completed" if translation_ready else "warning",
                     )
@@ -1407,10 +1573,8 @@ class RealtimeIntelligenceService:
             )
 
         records: list[dict[str, Any]] = self._catalog.find_by_dependencies(queried_dependencies, limit=max(10, len(queried_dependencies) * limit_per_dependency))
-        if records and language == "zh-Hans" and not records_translation_ready(records, language):
-            localized = self._catalog.upsert(records, user_id=user_id)
-            if localized:
-                records = localized
+        if records and language in {"zh-Hans", "zh-Hant"} and not records_translation_ready(records, language):
+            self._queue_interactive_translations(records, language, user_id=user_id)
         local_record_count = len(records)
         source_status: list[dict[str, Any]] = []
         if records:
@@ -1494,17 +1658,19 @@ class RealtimeIntelligenceService:
         merged = _records_by_canonical_vulnerability_id(_merge_records(records))
         merged = [record for record in merged if not record.get("lookup_error")]
         if api_records and merged:
-            stored = self._catalog.upsert(merged, user_id=user_id)
+            stored = self._catalog.upsert(merged, user_id=user_id, translate=False)
             if stored:
                 merged = stored
+            self._invalidate_dashboard_cache()
+            self._queue_interactive_translations(merged, language, user_id=user_id)
             translation_ready = _catalog_translation_status(merged, language)["status"] == "completed"
             trace.append(
                 _trace(
                     "persist_local_catalog",
                     (
-                        f"已在入库前翻译并写回 {len(merged)} 条依赖漏洞事实。"
+                        f"已写回 {len(merged)} 条依赖漏洞事实。"
                         if translation_ready
-                        else f"已写回 {len(merged)} 条依赖漏洞事实，中文译文等待后续重试。"
+                        else f"已写回 {len(merged)} 条依赖漏洞事实，译文正在后台准备。"
                     ),
                     "completed" if translation_ready else "warning",
                 )
@@ -1626,10 +1792,13 @@ class RealtimeIntelligenceService:
                 except Exception:  # noqa: BLE001 - the encrypted catalog remains queryable when upstream sources fail.
                     source_status = self.sources_status()
 
-        records, catalog_truncated = self._catalog.component_records_in_range(
+        records, catalog_truncated, catalog_total = self._catalog.component_records_in_range(
             start=range_start,
             end=range_end,
-            limit=_COMPONENT_EXPORT_RECORD_LIMIT,
+            ecosystems=ecosystem_filter,
+            severities=severity_filter,
+            component_names=name_filter,
+            limit=safe_limit,
         )
         filtered: list[dict[str, Any]] = []
         for record in records:
@@ -1660,8 +1829,10 @@ class RealtimeIntelligenceService:
             key=lambda item: (str(item.get("published_at") or ""), str(item.get("updated_at") or "")),
             reverse=True,
         )
-        total = len(filtered)
+        total = catalog_total
         visible = filtered[:safe_limit]
+        if visible and language in {"zh-Hans", "zh-Hant"} and not records_translation_ready(visible, language):
+            self._queue_interactive_translations(visible, language)
         severity_counts = {severity: 0 for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")}
         component_keys: set[str] = set()
         ecosystem_counts: dict[str, int] = {}
@@ -1727,6 +1898,67 @@ class RealtimeIntelligenceService:
                     if not str(item.get("query") or "").startswith("component-catalog:")
                 ]
         return persisted
+
+    def stream_component_vulnerability_catalog(
+        self,
+        start_date: date | str,
+        end_date: date | str,
+        *,
+        ecosystems: list[str] | None = None,
+        severities: list[str] | None = None,
+        component_names: list[str] | None = None,
+        response_language: str = "zh-Hans",
+        batch_size: int = 128,
+    ) -> tuple[Iterator[dict[str, Any]], dict[str, Any]]:
+        """Read one export record at a time without materializing the catalog."""
+
+        range_start, range_end = _dashboard_date_range(start_date, end_date)
+        if range_start is None or range_end is None:
+            raise ValueError("组件漏洞目录必须提供开始日期和结束日期")
+        ecosystem_filter = {str(value).strip().casefold() for value in ecosystems or [] if str(value).strip()}
+        severity_filter = {str(value).strip().upper() for value in severities or [] if str(value).strip()}
+        name_filter = {str(value).strip().casefold() for value in component_names or [] if str(value).strip()}
+        language = _normalize_response_language(response_language)
+        total, component_count = self._catalog.component_export_stats(
+            start=range_start,
+            end=range_end,
+            ecosystems=ecosystem_filter,
+            severities=severity_filter,
+            component_names=name_filter,
+        )
+        source = self._catalog.iter_component_records_in_range(
+            start=range_start,
+            end=range_end,
+            ecosystems=ecosystem_filter,
+            severities=severity_filter,
+            component_names=name_filter,
+            batch_size=batch_size,
+        )
+
+        def projected_records() -> Iterator[dict[str, Any]]:
+            for record in source:
+                projected = _component_catalog_export_record(
+                    record,
+                    ecosystems=ecosystem_filter,
+                    component_names=name_filter,
+                    language=language,
+                )
+                if projected is not None:
+                    yield projected
+
+        filters = {
+            "ecosystems": sorted(ecosystem_filter),
+            "severities": sorted(severity_filter),
+            "component_names": sorted(name_filter),
+        }
+        return projected_records(), {
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+            "filters": filters,
+            "total": total,
+            "component_count": component_count,
+            "response_language": language,
+        }
 
     @staticmethod
     def export_component_vulnerability_catalog(
@@ -1864,9 +2096,11 @@ class RealtimeIntelligenceService:
 
         merged = _records_by_canonical_vulnerability_id(_merge_records(records))[:_COMPONENT_EXPORT_RECORD_LIMIT]
         if merged and (realtime_records or not records_translation_ready(merged, "zh-Hans")):
-            stored = self._catalog.upsert(merged, user_id=user_id)
+            stored = self._catalog.upsert(merged, user_id=user_id, translate=False)
             if stored:
                 merged = stored
+            self._invalidate_dashboard_cache()
+            self._queue_interactive_translations(merged, "zh-Hans", user_id=user_id)
         ecosystems = sorted({*discovered_ecosystems, *([clean_ecosystem] if clean_ecosystem else [])})
         return merged, {
             "name": clean_name,
@@ -1906,10 +2140,20 @@ class RealtimeIntelligenceService:
                 name="secflow-intelligence-batch-refresh",
             )
             self._scheduler_thread.start()
+            self._translation_thread = Thread(
+                target=self._interactive_translation_loop,
+                args=(stop, startup_delay),
+                daemon=True,
+                name="secflow-vulnerability-translation-priority",
+            )
+            self._translation_thread.start()
             if (
                 self._catalog.encryption_migration_pending()
                 or self._catalog.metrics_migration_pending()
-                or self._catalog.translation_migration_pending()
+                or (
+                    _environment_flag("SECFLOW_ENABLE_FULL_TRANSLATION_BACKFILL", default=False)
+                    and self._catalog.translation_migration_pending()
+                )
             ):
                 self._catalog_migration_thread = Thread(
                     target=self._run_delayed_background_job,
@@ -1936,6 +2180,90 @@ class RealtimeIntelligenceService:
             self._scheduler_stop = None
         if stop:
             stop.set()
+
+    def _queue_interactive_translations(
+        self,
+        records: list[dict[str, Any]],
+        language: str,
+        *,
+        user_id: str = "default",
+    ) -> None:
+        target = _normalize_response_language(language)
+        if target not in {"zh-Hans", "zh-Hant"}:
+            return
+        now = monotonic_time.monotonic()
+        with self._lock:
+            if self._translation_thread is None or not self._translation_thread.is_alive():
+                return
+            for record in records[:50]:
+                if record_translation_ready(record, target):
+                    continue
+                identifier = _canonical_vulnerability_id(record)
+                if not identifier:
+                    continue
+                key = (identifier, target)
+                if key in self._queued_translations:
+                    continue
+                if self._translation_retry_after.get(key, 0.0) > now:
+                    continue
+                self._queued_translations.add(key)
+                self._translation_queue.put((identifier, target, user_id))
+
+    def _interactive_translation_loop(self, stop: Event, startup_delay: float) -> None:
+        if startup_delay > 0 and stop.wait(startup_delay):
+            return
+        while not stop.is_set():
+            try:
+                identifier, language, user_id = self._translation_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            key = (identifier, language)
+            try:
+                records = self._catalog.find_by_identifier(identifier, 1)
+                if not records or record_translation_ready(records[0], language):
+                    continue
+                localized, audit = translate_records_for_storage(
+                    [records[0]],
+                    user_id=user_id,
+                    session_id="interactive-vulnerability-translation",
+                    target_languages=(language,),
+                )
+                persisted = self._catalog.persist_display_translations(localized)
+                ready = bool(localized) and record_translation_ready(localized[0], language)
+                with self._lock:
+                    if persisted and ready:
+                        self._dashboard_cache.clear()
+                        self._translation_retry_after.pop(key, None)
+                    else:
+                        retry_after = float(audit.get("retry_after_seconds") or 0.0)
+                        self._translation_retry_after[key] = monotonic_time.monotonic() + max(
+                            retry_after,
+                            _INTERACTIVE_TRANSLATION_RETRY_SECONDS,
+                        )
+            except Exception:  # noqa: BLE001 - one translation must not stop the priority worker.
+                with self._lock:
+                    self._translation_retry_after[key] = (
+                        monotonic_time.monotonic() + _INTERACTIVE_TRANSLATION_RETRY_SECONDS
+                    )
+            finally:
+                with self._lock:
+                    self._queued_translations.discard(key)
+                self._translation_queue.task_done()
+
+    def _dashboard_cache_key(
+        self,
+        start_date: date | str | None,
+        end_date: date | str | None,
+        language: str,
+    ) -> str:
+        return json.dumps(
+            {"start": str(start_date or ""), "end": str(end_date or ""), "language": language},
+            sort_keys=True,
+        )
+
+    def _invalidate_dashboard_cache(self) -> None:
+        with self._lock:
+            self._dashboard_cache.clear()
 
     def refresh_dashboard_batch(
         self,
@@ -1970,13 +2298,14 @@ class RealtimeIntelligenceService:
             batch_stop = Event()
             try:
                 futures = {
-                    executor.submit(self._query_nvd_batch, query_start, query_end, date_field): "nvd",
+                    executor.submit(self._query_nvd_batch, query_start, query_end, date_field, limit): "nvd",
                     executor.submit(
                         self._query_github_batch,
                         query_start,
                         query_end,
                         date_field,
                         batch_stop,
+                        limit,
                     ): "github_advisory",
                     executor.submit(self._query_cisa_kev): "cisa_kev",
                 }
@@ -2019,9 +2348,11 @@ class RealtimeIntelligenceService:
                 source_status.append({"id": "osv", "status": "failed", "count": 0, "message": "接口查询失败"})
 
             merged = _records_by_canonical_vulnerability_id(_merge_records(records))
-            stored = self._catalog.upsert(merged)
+            stored = self._catalog.upsert(merged, translate=False)
             if stored:
                 merged = stored
+            self._invalidate_dashboard_cache()
+            self._queue_interactive_translations(merged, "zh-Hans")
             public_records = _public_records(merged, "zh-Hans")
             public_sources = _public_source_status(source_status)
             graph = build_knowledge_graph(merged[:20], "batch-dashboard")
@@ -2032,7 +2363,7 @@ class RealtimeIntelligenceService:
                     self._batch_graph = graph
                     self._batch_generated_at = generated_at
                 self._batch_sources = public_sources
-            return self.dashboard(start_date=start_date, end_date=end_date)
+            return self.dashboard(start_date=start_date, end_date=end_date, force_refresh=True)
         finally:
             with self._lock:
                 self._batch_refreshing = False
@@ -2055,10 +2386,17 @@ class RealtimeIntelligenceService:
         start_date: date | str | None = None,
         end_date: date | str | None = None,
         response_language: str = "zh-Hans",
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         language = _normalize_response_language(response_language)
         if language not in {"zh-Hans", "zh-Hant", "en"}:
             raise ValueError(f"Dashboard language is not supported by the offline translator: {language}")
+        cache_key = self._dashboard_cache_key(start_date, end_date, language)
+        if not force_refresh:
+            with self._lock:
+                cached = self._dashboard_cache.get(cache_key)
+                if cached and monotonic_time.monotonic() - cached[0] < _DASHBOARD_CACHE_SECONDS:
+                    return deepcopy(cached[1])
         range_start, range_end = _dashboard_date_range(start_date, end_date)
         with self._lock:
             batch_sources = deepcopy(self._batch_sources)
@@ -2091,19 +2429,11 @@ class RealtimeIntelligenceService:
             }
             recent_records = _public_records(visible_records, language)
         else:
-            visible_records, translation_audit = translate_records_for_storage(
-                visible_records,
-                session_id="dashboard-visible-records",
-            )
-            self._catalog.persist_display_translations(visible_records)
+            translation_audit = _catalog_translation_status(visible_records, language)
             recent_records = _public_records(visible_records, language)
+            self._queue_interactive_translations(visible_records, language)
         ready_records = int(
-            (
-                translation_audit.get("traditional_ready_records")
-                if language == "zh-Hant"
-                else translation_audit.get("ready_records")
-            )
-            or 0
+            translation_audit.get("ready_records") or 0
         )
         record_count = len(visible_records)
         translation_progress = 100 if not record_count else int((ready_records / record_count) * 100)
@@ -2123,7 +2453,7 @@ class RealtimeIntelligenceService:
             "progress": max(0, min(translation_progress, 100)),
             "error": warnings[0] if warnings else "",
         }
-        return {
+        result = {
             "vulnerability_count": snapshot["total"],
             "high_risk_count": severity["CRITICAL"] + severity["HIGH"],
             "query_count": snapshot["total"],
@@ -2153,6 +2483,9 @@ class RealtimeIntelligenceService:
             "translation_ready_count": ready_records,
             "translation_error": str(translation_audit.get("error") or ""),
         }
+        with self._lock:
+            self._dashboard_cache[cache_key] = (monotonic_time.monotonic(), deepcopy(result))
+        return result
 
     def sources_status(self, latest: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         latest = latest or {}
@@ -2344,7 +2677,7 @@ class RealtimeIntelligenceService:
             if stop.is_set():
                 return
             records = _nvd_records_from_items(vulnerabilities[offset : offset + 500])
-            self._catalog.upsert(_records_by_canonical_vulnerability_id(records))
+            self._catalog.upsert(_records_by_canonical_vulnerability_id(records), translate=False)
 
     def _import_osv_dump(self, archive: Path, stop: Event) -> None:
         batch: list[dict[str, Any]] = []
@@ -2362,10 +2695,16 @@ class RealtimeIntelligenceService:
                     continue
                 batch.append(_osv_record(payload))
                 if len(batch) >= 500:
-                    self._catalog.upsert(_records_by_canonical_vulnerability_id(_merge_records(batch)))
+                    self._catalog.upsert(
+                        _records_by_canonical_vulnerability_id(_merge_records(batch)),
+                        translate=False,
+                    )
                     batch = []
         if batch:
-            self._catalog.upsert(_records_by_canonical_vulnerability_id(_merge_records(batch)))
+            self._catalog.upsert(
+                _records_by_canonical_vulnerability_id(_merge_records(batch)),
+                translate=False,
+            )
 
     def _query_source(self, source: str, query: str, limit: int) -> list[dict[str, Any]]:
         if source == "nvd":
@@ -2377,17 +2716,23 @@ class RealtimeIntelligenceService:
         raise KeyError(source)
 
     @staticmethod
-    def _query_nvd_batch(start: datetime, end: datetime, date_field: str) -> list[dict[str, Any]]:
-        page_size = 2000
+    def _query_nvd_batch(
+        start: datetime,
+        end: datetime,
+        date_field: str,
+        limit: int = _BATCH_LIMIT,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), _COMPONENT_REALTIME_RECORD_LIMIT))
         headers = default_headers(auth="primary")
         records: list[dict[str, Any]] = []
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             window_start = start
-            while window_start < end:
+            while window_start < end and len(records) < safe_limit:
                 window_end = min(window_start + timedelta(days=120), end)
                 start_index = 0
                 total_results: int | None = None
-                while total_results is None or start_index < total_results:
+                while (total_results is None or start_index < total_results) and len(records) < safe_limit:
+                    page_size = min(2000, safe_limit - len(records))
                     params: dict[str, str] = {
                         "resultsPerPage": str(page_size),
                         "startIndex": str(start_index),
@@ -2400,7 +2745,7 @@ class RealtimeIntelligenceService:
                     payload = response.json()
                     total_results = int(payload.get("totalResults") or 0)
                     vulnerabilities = payload.get("vulnerabilities", [])
-                    records.extend(_nvd_records_from_items(vulnerabilities))
+                    records.extend(_nvd_records_from_items(vulnerabilities)[: safe_limit - len(records)])
                     if not vulnerabilities:
                         break
                     start_index += len(vulnerabilities)
@@ -2437,7 +2782,9 @@ class RealtimeIntelligenceService:
         end: datetime,
         date_field: str,
         stop: Event | None = None,
+        limit: int = _BATCH_LIMIT,
     ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), _GITHUB_BATCH_MAX_RECORDS))
         headers = default_headers(auth="secondary")
         records: list[dict[str, Any]] = []
         page = 1
@@ -2447,13 +2794,13 @@ class RealtimeIntelligenceService:
         range_value = f"{start.date().isoformat()}..{(end - timedelta(milliseconds=1)).date().isoformat()}"
         filter_key = "updated" if date_field == "modified" else "published"
         with httpx.Client(timeout=8.0, follow_redirects=True) as client:
-            while page <= _GITHUB_BATCH_MAX_PAGES and len(records) < _GITHUB_BATCH_MAX_RECORDS:
+            while page <= _GITHUB_BATCH_MAX_PAGES and len(records) < safe_limit:
                 if stop is not None and stop.is_set():
                     break
                 if monotonic_time.monotonic() >= deadline:
                     break
                 params = {
-                    "per_page": str(_GITHUB_BATCH_PAGE_SIZE),
+                    "per_page": str(min(_GITHUB_BATCH_PAGE_SIZE, safe_limit - len(records))),
                     "page": str(page),
                     "sort": filter_key,
                     "direction": "desc",
@@ -2485,7 +2832,7 @@ class RealtimeIntelligenceService:
                         continue
                     seen_advisory_ids.add(advisory_id)
                     records.append(_github_record(item))
-                    if len(records) >= _GITHUB_BATCH_MAX_RECORDS:
+                    if len(records) >= safe_limit:
                         break
                 if len(items) < _GITHUB_BATCH_PAGE_SIZE or "next" not in response.links:
                     break
@@ -2659,7 +3006,7 @@ class RealtimeIntelligenceService:
 def build_knowledge_graph(records: list[dict[str, Any]], query: str = "", language: str = "zh-Hans") -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
-    localize_summary = query != "batch-dashboard"
+    translate_summary_inline = query != "batch-dashboard" and not query.startswith("component-catalog:")
     language = _normalize_response_language(language)
 
     def node(node_id: str, label: str, node_type: str, **metadata: Any) -> None:
@@ -2681,7 +3028,11 @@ def build_knowledge_graph(records: list[dict[str, Any]], query: str = "", langua
             cvss_score=record.get("cvss_score"),
             title=record_title_for_language(record, language),
             summary=record_summary_for_language(record, language),
-            summary_zh=_localized_vulnerability_summary(record, language) if localize_summary else "",
+            summary_zh=(
+                _localized_vulnerability_summary(record, language)
+                if translate_summary_inline
+                else _nonblocking_vulnerability_summary(record, language)
+            ),
             affected_versions=record.get("affected_versions") or [],
             fixed_versions=record.get("fixed_versions") or [],
             remediation_zh=_vulnerability_remediation(record, language),
@@ -2723,6 +3074,16 @@ def build_knowledge_graph(records: list[dict[str, Any]], query: str = "", langua
         "node_count": len(nodes),
         "edge_count": len(edges),
     }
+
+
+def _nonblocking_vulnerability_summary(record: dict[str, Any], language: str) -> str:
+    language = _normalize_response_language(language)
+    summary = str(record_summary_for_language(record, language) or "").strip()
+    if language == "en" and summary and not _contains_cjk(summary):
+        return sanitize_public_text(summary)
+    if record_translation_ready(record, language) and summary:
+        return sanitize_public_text(summary)
+    return _fallback_vulnerability_summary(record, language)
 
 
 _LANGUAGE_NAMES = {
@@ -3925,6 +4286,112 @@ def _unique(values: list[Any]) -> list[Any]:
     return result
 
 
+def _escape_sql_like(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _component_catalog_sql_parts(
+    *,
+    start: datetime,
+    end: datetime,
+    ecosystems: set[str] | None,
+    severities: set[str] | None,
+    component_names: set[str] | None,
+) -> tuple[str, list[Any], str, list[Any]]:
+    vulnerability_clauses = ["v.record_date >= ?", "v.record_date < ?"]
+    vulnerability_values: list[Any] = [
+        start.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+        end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+    ]
+    severity_values = sorted(
+        {str(value).strip().upper() for value in severities or set() if str(value).strip()}
+    )
+    if severity_values:
+        placeholders = ",".join("?" for _ in severity_values)
+        vulnerability_clauses.append(f"v.severity IN ({placeholders})")
+        vulnerability_values.extend(severity_values)
+
+    component_clauses = ["1 = 1"]
+    component_values: list[Any] = []
+    ecosystem_values = sorted(
+        {str(value).strip().casefold() for value in ecosystems or set() if str(value).strip()}
+    )
+    if ecosystem_values:
+        predicates = ["c.component_key LIKE ? ESCAPE '\\'" for _ in ecosystem_values]
+        component_clauses.append(f"({' OR '.join(predicates)})")
+        component_values.extend(f"{_escape_sql_like(value)}|%" for value in ecosystem_values)
+    component_name_values = sorted(
+        {str(value).strip().casefold() for value in component_names or set() if str(value).strip()}
+    )
+    if component_name_values:
+        predicates = ["c.component_key LIKE ? ESCAPE '\\'" for _ in component_name_values]
+        component_clauses.append(f"({' OR '.join(predicates)})")
+        component_values.extend(f"%|%{_escape_sql_like(value)}%" for value in component_name_values)
+    return (
+        " AND ".join(vulnerability_clauses),
+        vulnerability_values,
+        " AND ".join(component_clauses),
+        component_values,
+    )
+
+
+def _component_catalog_export_record(
+    record: dict[str, Any],
+    *,
+    ecosystems: set[str],
+    component_names: set[str],
+    language: str,
+) -> dict[str, Any] | None:
+    matched_components: list[dict[str, Any]] = []
+    for component in record.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        ecosystem = str(component.get("ecosystem") or "").strip()
+        name = str(component.get("name") or "").strip()
+        lowered_name = name.casefold()
+        if ecosystems and ecosystem.casefold() not in ecosystems:
+            continue
+        if component_names and not any(
+            requested == lowered_name or requested in lowered_name for requested in component_names
+        ):
+            continue
+        matched_components.append(
+            {
+                "ecosystem": ecosystem,
+                "name": name,
+                "affected": _component_export_values(component.get("affected")),
+                "fixed": _component_export_values(component.get("fixed")),
+            }
+        )
+    if not matched_components:
+        return None
+
+    translation_ready = language == "en" or record_translation_ready(record, language)
+    original_title = str(record.get("title_original") or record.get("title") or "").strip()
+    original_summary = str(record.get("summary_original") or record.get("summary") or "").strip()
+    return {
+        "id": str(record.get("id") or ""),
+        "severity": str(record.get("severity") or "UNKNOWN").upper(),
+        "cvss_score": record.get("cvss_score"),
+        "title": record_title_for_language(record, language) if translation_ready else original_title,
+        "summary": record_summary_for_language(record, language) if translation_ready else original_summary,
+        "aliases": _component_export_values(record.get("aliases")),
+        "cwes": _component_export_values(record.get("cwes")),
+        "published_at": str(record.get("published_at") or ""),
+        "updated_at": str(record.get("updated_at") or ""),
+        "affected_versions": _component_export_values(record.get("affected_versions")),
+        "fixed_versions": _component_export_values(record.get("fixed_versions")),
+        "reference_links": _public_reference_links(record),
+        "components": matched_components,
+    }
+
+
+def _component_export_values(value: Any) -> list[Any]:
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value if item is not None]
+    return [value] if value is not None else []
+
+
 def _aggregate_status(statuses: list[dict[str, Any]]) -> str:
     failed = sum(item.get("status") == "failed" for item in statuses)
     if failed == len(statuses) and statuses:
@@ -4026,7 +4493,7 @@ def _public_source_status(statuses: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") -> list[dict[str, Any]]:
-    """Project only verified localized content to the desktop client."""
+    """Project localized content, falling back to public source facts while translation is pending."""
 
     language = _normalize_response_language(language)
     private_keys = {
@@ -4037,8 +4504,6 @@ def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") ->
         "collection",
         "collection_name",
         "provider",
-        "title_original",
-        "summary_original",
         "title_zh",
         "summary_zh",
         "title_zh_hant",
@@ -4049,10 +4514,14 @@ def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") ->
     for record in records:
         item = {key: deepcopy(value) for key, value in record.items() if key not in private_keys}
         translation_ready = language == "en" or record_translation_ready(record, language)
-        localized_title = record_title_for_language(record, language) if translation_ready else ""
-        localized_summary = record_summary_for_language(record, language) if translation_ready else ""
+        original_title = str(record.get("title_original") or record.get("title") or "").strip()
+        original_summary = str(record.get("summary_original") or record.get("summary") or "").strip()
+        localized_title = record_title_for_language(record, language) if translation_ready else original_title
+        localized_summary = record_summary_for_language(record, language) if translation_ready else original_summary
         item["title"] = localized_title
         item["summary"] = localized_summary
+        item["title_original"] = original_title
+        item["summary_original"] = original_summary
         if translation_ready and language == "zh-Hans":
             item["title_zh"] = localized_title
             item["summary_zh"] = localized_summary
@@ -4060,7 +4529,9 @@ def _public_records(records: list[dict[str, Any]], language: str = "zh-Hans") ->
             item["title_zh_hant"] = localized_title
             item["summary_zh_hant"] = localized_summary
         item["reference_links"] = _public_reference_links(record)
-        item["content_language"] = language if translation_ready else "unknown"
+        source_text = f"{original_title} {original_summary}".strip()
+        source_language = "zh-Hans" if _contains_cjk(source_text) else "en"
+        item["content_language"] = language if translation_ready else source_language
         item["translation_status"] = (
             "original"
             if language == "en"

@@ -37,7 +37,7 @@ from go_external_corpus import (
 from score_labeled_security_corpus import binomial_upper_bound
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate SecFlow Go rules on the external labeled corpus.")
+    parser = argparse.ArgumentParser(description="Evaluate AegisAl Go rules on the external labeled corpus.")
     parser.add_argument(
         "--manifest",
         type=Path,

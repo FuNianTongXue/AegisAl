@@ -1,4 +1,4 @@
 interface:
-  display_name: "SecFlow 报告生成"
+  display_name: "神盾报告生成"
   short_description: "通过独立 Mermaid、Markdown、Word、PDF MCP 生成并下载可审计报告"
-  default_prompt: "Use $secflow-report-generation to generate or download an auditable report from completed SecFlow scan JSON, with human confirmation before generation and download."
+  default_prompt: "Use $secflow-report-generation to generate or download an auditable report from completed AegisAl scan JSON, with human confirmation before generation and download."

@@ -1,5 +1,17 @@
-SecFlow Third-Party Notices
+AegisAl Third-Party Notices
 ===========================
+
+Beautiful UI
+------------
+
+Copyright (c) 2026 Shane Levine.
+License: MIT.
+Source: https://www.beautifului.dev/
+
+AegisAl adapts the loading, thinking, tool-chip, task-row, approval-card,
+search-empty-state, streaming, and sidebar-motion interaction patterns to its
+own React/Tauri components and design tokens. The corresponding license text
+is distributed as Beautiful-UI-MIT.txt.
 
 Semgrep OSS 1.170.0
 -------------------
@@ -9,8 +21,8 @@ License: GNU Lesser General Public License version 2.1 (LGPL-2.1-only).
 Source: https://github.com/semgrep/semgrep/tree/v1.170.0
 
 The corresponding license text is distributed as Semgrep-LGPL-2.1.txt.
-SecFlow invokes Semgrep as a separate executable and does not modify Semgrep.
-The rules under Contents/Resources/semgrep-rules are SecFlow-owned rules and
+AegisAl invokes Semgrep as a separate executable and does not modify Semgrep.
+The rules under Contents/Resources/semgrep-rules are AegisAl-owned rules and
 are not copied from the Semgrep Registry.
 
 Tree-sitter Python bindings 0.25.2
@@ -137,7 +149,7 @@ Archive SHA-256: 433e7c4f034d87fbe2353161e05f18646d7999452f801a4e1f0378522b9850a
 License: Creative Commons Attribution 4.0 International (CC-BY-4.0).
 
 The corresponding license text is distributed as OPUS-MT-CC-BY-4.0.txt.
-SecFlow ships only the CTranslate2 model and SentencePiece vocabulary needed
+AegisAl ships only the CTranslate2 model and SentencePiece vocabulary needed
 for local inference; the upstream Stanza runtime and data are not bundled.
 
 CTranslate2 4.8.1

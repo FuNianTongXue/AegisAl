@@ -18,7 +18,7 @@ DEFAULT_MIN_NEGATIVE_CASES = 598
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate a sealed SecFlow CWE-complete security truth manifest before it is "
+            "Validate a sealed AegisAl CWE-complete security truth manifest before it is "
             "eligible for formal qualification scoring."
         )
     )

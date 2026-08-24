@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "SecFlow desktop capabilities",
+  "description": "AegisAl desktop capabilities",
   "windows": ["main", "information", "dashboard", "task-*"],
   "permissions": [
     "core:default",

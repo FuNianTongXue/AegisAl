@@ -86,7 +86,7 @@ def main() -> int:
             "qualification_positive": args.positive,
             "qualification_negative": args.negative,
             "deduplication": "gosec normalized multi-file SHA-256; semgrep unique source path and target line",
-            "label_matching": "external rule CWE must intersect the SecFlow finding CWE",
+            "label_matching": "external rule CWE must intersect the AegisAl finding CWE",
             "leakage_policy": "diagnostic cases may guide tuning; qualification cases remain sealed until rules are frozen",
             "independence_note": "Cases are unique published labels from two independently maintained repositories; observations remain clustered by upstream suite and are not claimed to be IID real-world vulnerabilities.",
         },

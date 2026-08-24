@@ -1,4 +1,4 @@
-"""Public API for the SecFlow plugin runtime."""
+"""Public API for the AegisAl plugin runtime."""
 
 from .context import PluginContext
 from .effects import EffectHandle, EffectScope

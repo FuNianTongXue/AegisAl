@@ -1,9 +1,9 @@
 ---
 name: secflow-project-adaptive-scan
-description: "Adapt SecFlow scans for one user-uploaded project by fusing static-rule findings with AST/CFG/DFG and taint evidence, then producing a bounded project-only analysis Overlay. Use for uploaded workspace or file scans that need project-specific source, sink, sanitizer, parser-definition, false-positive review, or missed-flow recovery. Never use it to tune, label, or score frozen evaluation corpora."
+description: "Adapt AegisAl scans for one user-uploaded project by fusing static-rule findings with AST/CFG/DFG and taint evidence, then producing a bounded project-only analysis Overlay. Use for uploaded workspace or file scans that need project-specific source, sink, sanitizer, parser-definition, false-positive review, or missed-flow recovery. Never use it to tune, label, or score frozen evaluation corpora."
 ---
 
-# SecFlow Project Adaptive Scan
+# AegisAl Project Adaptive Scan
 
 ## Workflow
 

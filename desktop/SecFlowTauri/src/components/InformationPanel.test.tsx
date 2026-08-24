@@ -4,6 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import aegisalEmblem from "../assets/aegisal-emblem.png";
 import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
 import type { AskResult, InformationItem } from "../types";
@@ -46,21 +47,78 @@ describe("InformationPanel", () => {
       } as AskResult;
     });
 
-    render(<InformationPanel open onClose={vi.fn()} />);
+    const { container } = render(<InformationPanel open onClose={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("独立咨询问题"), { target: { value: "查询近期高危漏洞" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("已完成检索。建议优先检查受影响资产。")).toBeInTheDocument();
+    const assistantMark = container.querySelector(
+      ".consultation-conversation .compact-chat.assistant-turn .assistant-gutter .brand-mark",
+    );
+    expect(assistantMark).toHaveStyle({ width: "23px", height: "23px" });
+    expect(assistantMark?.querySelector("img")).toHaveAttribute("src", aegisalEmblem);
+    expect(container.querySelector(".consultation-conversation .assistant-gutter svg")).not.toBeInTheDocument();
     expect(screen.getAllByText("Security MCP").length).toBeGreaterThan(0);
     expect(String(requestBody?.session_id)).toMatch(/^information:/);
     expect(requestBody?.user_id).toBe("tester");
     expect(requestBody?.response_language).toBe("zh-Hans");
     expect(requestBody?.intent_hint).toBe("recent_high_vulnerability_lookup");
-    expect(screen.getByRole("button", { name: /思考过程/ })).toHaveAttribute("aria-expanded", "false");
+    const executionSummary = screen.getByRole("button", { name: /思考完成/ });
+    await waitFor(() => expect(executionSummary).toHaveAttribute("aria-expanded", "false"));
+    fireEvent.click(executionSummary);
+    expect(screen.getByRole("button", { name: /检索漏洞情报，已完成/ })).toHaveAttribute("aria-expanded", "false");
     expect(useAppStore.getState().activeSessionId).toBe("main-session");
     expect(useAppStore.getState().workspacePath).toBe("/tmp/main-workspace");
     expect(useAppStore.getState().activeTaskId).toBe("main-task");
     expect(useAppStore.getState().turns).toEqual([]);
+  });
+
+  it("persists edited translated tables to the active information session", async () => {
+    let informationSession = "";
+    vi.spyOn(api, "streamQuestion").mockImplementation(async (body) => {
+      informationSession = String(body.session_id);
+      return {
+        answer: "已返回翻译后的漏洞记录。",
+        session_id: informationSession,
+        exchange_id: "msg-73",
+        tables: [{
+          id: "information-findings",
+          title: "翻译后的漏洞记录",
+          columns: [
+            { key: "id", label: "漏洞编号", editable: false },
+            { key: "title", label: "标题" },
+          ],
+          rows: [{ id: "CVE-2026-7373", title: "原中文标题" }],
+        }],
+      } as AskResult;
+    });
+    const update = vi.spyOn(api, "updateConversationTableEdits").mockImplementation(
+      async (_sessionId, exchangeId, _userId, tables) => ({ exchange_id: exchangeId, tables }),
+    );
+
+    render(<InformationPanel open onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("独立咨询问题"), { target: { value: "查询漏洞记录" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByRole("table", { name: "翻译后的漏洞记录" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "编辑记录表" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题，第 1" }), {
+      target: { value: "信息中心修订标题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith(
+      informationSession,
+      "msg-73",
+      "tester",
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "information-findings",
+          rows: [{ id: "CVE-2026-7373", title: "信息中心修订标题" }],
+        }),
+      ]),
+    ));
+    expect(await screen.findByText("信息中心修订标题")).toBeInTheDocument();
   });
 
   it("routes ordinary questions directly and clears only the previous short-term session", async () => {
@@ -151,7 +209,7 @@ describe("InformationPanel", () => {
       items: [{
         id: "feed-1",
         title: "供应链安全通告",
-        source_name: "SecFlow",
+        source_name: "AegisAl",
         published_at: "2026-08-01T10:00:00+08:00",
         translation_status: "failed",
         translation_message: "离线翻译暂不可用，请稍后重试。",
@@ -166,13 +224,32 @@ describe("InformationPanel", () => {
     expect(api.information).toHaveBeenCalledOnce();
   });
 
+  it("maps a legacy product-owned feed source at the display boundary", async () => {
+    vi.spyOn(api, "information").mockResolvedValue({
+      items: [{
+        id: "legacy-brand-feed",
+        title: "SecFlow 安全智脑历史来源安全通告",
+        source_name: "SecFlow",
+        published_at: "2026-08-01T10:00:00+08:00",
+      }],
+    });
+
+    render(<InformationPanel open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "资讯" }));
+
+    expect(await screen.findByText("AegisAl 神盾历史来源安全通告")).toBeInTheDocument();
+    expect(screen.queryByText(/SecFlow 安全智脑/)).not.toBeInTheDocument();
+    expect(screen.getByText(/AegisAl ·/)).toBeInTheDocument();
+    expect(screen.queryByText(/SecFlow ·/)).not.toBeInTheDocument();
+  });
+
   it("loads feed artwork through the local image proxy with a source-logo fallback", async () => {
     vi.spyOn(api, "information").mockResolvedValue({
       items: [{
         id: "feed/cover-1",
         title: "带封面的安全资讯",
         source_id: "source/logo-1",
-        source_name: "SecFlow",
+        source_name: "AegisAl",
         image_url: "https://remote.example/blocked-by-csp.png",
       }],
     });
@@ -197,7 +274,7 @@ describe("InformationPanel", () => {
     );
 
     fireEvent.error(sourceImage);
-    expect(await screen.findByText("S")).toHaveClass("source-logo");
+    expect(await screen.findByText("A")).toHaveClass("source-logo");
   });
 
   it("can render as the native status-item window without changing consultation behavior", () => {

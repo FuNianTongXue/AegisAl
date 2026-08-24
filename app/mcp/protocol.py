@@ -40,6 +40,9 @@ from app.storage import DATA_DIR
 MCP_SERVER_REGISTRY = "mcp_servers"
 MCP_TOOL_REGISTRY = "tools"
 MCP_PLUGIN_ID = "secflow.mcp"
+_CODE_SCAN_BATCH_MAX_FILES = 5_000
+_CODE_SCAN_BATCH_MAX_BYTES = 64 * 1024 * 1024
+_CODE_SCAN_PARSE_ERROR_PREVIEW = 2_000
 
 
 def _sha256_json(value: Any) -> str:
@@ -124,7 +127,7 @@ class MCPServerDefinition:
     label: str
     tools: tuple[MCPToolDeclaration, ...]
     plugin_id: str = MCP_PLUGIN_ID
-    plugin_version: str = "1.3.3"
+    plugin_version: str = "1.3.4"
     generation: int = 1
     timeout_seconds: float = 120.0
     max_result_bytes: int = 32 * 1024 * 1024
@@ -183,11 +186,11 @@ class MCPServerDefinition:
 
 
 _BUILTIN_TOOL_SCHEMA_HASHES: dict[tuple[str, str], tuple[str, str]] = {
-    ("code-scan", "scan_language"): ("04dd3d437bbc09c9e325a85fbc0123fc8a46f9d37aadae6dd770108c6304c119", "1ef124b4d36518f39556a56e53887982a4ef484e7e614134de12531cf9f4a99c"),
+    ("code-scan", "scan_language"): ("04dd3d437bbc09c9e325a85fbc0123fc8a46f9d37aadae6dd770108c6304c119", "7dc4fdf886b3f2eefce5f9d5c1047788cd60917f1028ac3e72e9ec813f96136f"),
     ("code-scan", "get_scan_capabilities"): ("40929fc0f8856e6104ce66e0e26ed88a6e709644fb250126bff3356a2e2bbd8b", "418f98cc9a6438af4cd4ba9f0e4517350d7c3ae9e36647e8ce91b2523630a56a"),
     ("component-detail", "build_component_vulnerability_detail"): ("81cb10e7b01a5c5dddf6516bfab5342d64812000c9e971a347da5fabb4c97c06", "3db84fbfa6a1e5f4bd75f0242810248820662c503a428a05aa3a8b5064b48a1e"),
     ("excel", "export_component_vulnerabilities"): ("c9d08c39520d707baad5206eb07646ae91a8fc69c9f10c20e8b6f7da8870833f", "bd7ca4bdd6892f1493b19f0f55e0a0db7f5e533921a164c96a4a47dee5f53966"),
-    ("excel", "export_component_vulnerability_catalog"): ("83dc9805648d689d68fbd85b1df76dcd8aada399eaa53b8d50d6baab4db15765", "bd7ca4bdd6892f1493b19f0f55e0a0db7f5e533921a164c96a4a47dee5f53966"),
+    ("excel", "export_component_vulnerability_catalog"): ("d1782e62e257cce9bcac8188c206739e3c84b8a057bda33af651d8606dbb567d", "bd7ca4bdd6892f1493b19f0f55e0a0db7f5e533921a164c96a4a47dee5f53966"),
     ("d3-sankey", "build_component_sankey"): ("e9b9dc18616233be6c67b93dfee3f155a37f9bb8f47ce453f22f9cc48d1f965a", "a1970816ad394dc1f3dbd0a929d8bac02407d1936aceab4ce9b8ae3db70dba85"),
     ("license-scan", "identify_project_licenses"): ("a1ceba71afb355e77387225165f1a037579a473fde7e066f1129246d0f09c0b6", "78a06b9deff7a08c1310534df7d2055556888acbe5ffa5082c2a78d1eae67e61"),
     ("sbom-excel", "export_project_sbom_excel"): ("a67406f4bb2b9d3f04a2b6aae5834d677a2fa19a885785b62d44997dc4ed4830", "bd7ca4bdd6892f1493b19f0f55e0a0db7f5e533921a164c96a4a47dee5f53966"),
@@ -239,7 +242,7 @@ def _artifact_contract(
 BUILTIN_MCP_SERVERS = (
     MCPServerDefinition(
         "code-scan",
-        "SecFlow Code Scan MCP",
+        "AegisAl Code Scan MCP",
         (
             _tool("code-scan", "scan_language", "Scan one selected language in an authorized workspace."),
             _tool("code-scan", "get_scan_capabilities", "Return code scan engine capabilities."),
@@ -249,12 +252,12 @@ BUILTIN_MCP_SERVERS = (
     ),
     MCPServerDefinition(
         "component-detail",
-        "SecFlow Component Detail MCP",
+        "AegisAl Component Detail MCP",
         (_tool("component-detail", "build_component_vulnerability_detail"),),
     ),
     MCPServerDefinition(
         "excel",
-        "SecFlow Component Excel MCP",
+        "AegisAl Component Excel MCP",
         (
             _tool(
                 "excel",
@@ -271,20 +274,21 @@ BUILTIN_MCP_SERVERS = (
                 ),
             ),
         ),
+        timeout_seconds=900.0,
     ),
     MCPServerDefinition(
         "d3-sankey",
-        "SecFlow D3 Sankey MCP",
+        "AegisAl D3 Sankey MCP",
         (_tool("d3-sankey", "build_component_sankey"),),
     ),
     MCPServerDefinition(
         "license-scan",
-        "SecFlow License MCP",
+        "AegisAl License MCP",
         (_tool("license-scan", "identify_project_licenses"),),
     ),
     MCPServerDefinition(
         "sbom-excel",
-        "SecFlow SBOM Excel MCP",
+        "AegisAl SBOM Excel MCP",
         (
             _tool(
                 "sbom-excel",
@@ -297,27 +301,27 @@ BUILTIN_MCP_SERVERS = (
     ),
     MCPServerDefinition(
         "translation",
-        "SecFlow Translation MCP",
+        "AegisAl Translation MCP",
         (_tool("translation", "translate_json_payload"),),
     ),
     MCPServerDefinition(
         "report-chart",
-        "SecFlow Report Chart MCP",
+        "AegisAl Report Chart MCP",
         (_tool("report-chart", "build_scan_report_charts"),),
     ),
     MCPServerDefinition(
         "report-template",
-        "SecFlow Template MCP",
+        "AegisAl Template MCP",
         (_tool("report-template", "resolve_report_template"),),
     ),
     MCPServerDefinition(
         "report-sarif",
-        "SecFlow SARIF MCP",
+        "AegisAl SARIF MCP",
         (_tool("report-sarif", "build_scan_sarif"),),
     ),
     MCPServerDefinition(
         "report-mermaid",
-        "SecFlow Mermaid MCP",
+        "AegisAl Mermaid MCP",
         (
             _tool(
                 "report-mermaid",
@@ -333,12 +337,12 @@ BUILTIN_MCP_SERVERS = (
     ),
     MCPServerDefinition(
         "report-markdown",
-        "SecFlow Markdown MCP",
+        "AegisAl Markdown MCP",
         (_tool("report-markdown", "render_markdown_report"),),
     ),
     MCPServerDefinition(
         "report-word",
-        "SecFlow Word MCP",
+        "AegisAl Word MCP",
         (
             _tool(
                 "report-word",
@@ -351,7 +355,7 @@ BUILTIN_MCP_SERVERS = (
     ),
     MCPServerDefinition(
         "report-excel",
-        "SecFlow Report Excel MCP",
+        "AegisAl Report Excel MCP",
         (
             _tool(
                 "report-excel",
@@ -364,7 +368,7 @@ BUILTIN_MCP_SERVERS = (
     ),
     MCPServerDefinition(
         "report-pdf",
-        "SecFlow PDF MCP",
+        "AegisAl PDF MCP",
         (
             _tool(
                 "report-pdf",
@@ -461,7 +465,7 @@ class MCPPluginService:
                     definition, agent_id, tool_id, arguments, "host_policy"
                 )
                 raise MCPConfigurationError(
-                    f"{artifact_policy.output_argument} is owned by the SecFlow Host"
+                    f"{artifact_policy.output_argument} is owned by the AegisAl Host"
                 )
             if (
                 definition.connection is not None
@@ -898,43 +902,81 @@ class CodeScanMCPClient:
     ) -> dict[str, Any]:
         if not self.enabled:
             raise CodeScanMCPError("Code Scan MCP stdio transport is disabled")
+        batches = _partition_code_scan_sources(workspace_path, source_paths)
+        context_manifests = _code_scan_context_manifests(manifest_files)
+        result: dict[str, Any] | None = None
+        envelopes: list[dict[str, Any]] = []
+        runtime_audits: list[dict[str, Any]] = []
         try:
-            payload = call_mcp_tool(
-                agent_id="code_scan_agent",
-                tool_id="mcp__code_scan__scan_language",
-                arguments={
-                    "workspace_path": workspace_path,
-                    "language": language,
-                    "source_paths": source_paths,
-                    "manifest_files": manifest_files,
-                    "dependency_scan": dependency_scan,
-                    "rule_paths": rule_paths,
-                    "complete_scan": bool(complete_scan),
-                    "cancel_marker": "",
-                },
-                timeout_seconds=self._read_timeout,
-                cancelled=cancelled,
-            )
+            for batch_index, batch_paths in enumerate(batches):
+                if cancelled():
+                    raise CodeScanMCPError("Code Scan MCP call was cancelled")
+                payload = call_mcp_tool(
+                    agent_id="code_scan_agent",
+                    tool_id="mcp__code_scan__scan_language",
+                    arguments={
+                        "workspace_path": workspace_path,
+                        "language": language,
+                        "source_paths": batch_paths,
+                        "manifest_files": manifest_files if batch_index == 0 else context_manifests,
+                        "dependency_scan": dependency_scan,
+                        "rule_paths": rule_paths,
+                        "complete_scan": bool(complete_scan),
+                        "cancel_marker": "",
+                    },
+                    timeout_seconds=self._read_timeout,
+                    cancelled=cancelled,
+                )
+                batch_result = payload.get("result")
+                if not isinstance(batch_result, dict):
+                    raise CodeScanMCPError("Code Scan MCP returned no structured scan result")
+                result = _merge_code_scan_batch_result(result, batch_result)
+                envelopes.append(
+                    {
+                        key: payload.get(key)
+                        for key in (
+                            "schema_version",
+                            "server",
+                            "tool",
+                            "process_id",
+                            "language",
+                            "started_at",
+                            "completed_at",
+                            "duration_ms",
+                            "input_sha256",
+                            "output_sha256",
+                        )
+                    }
+                )
+                runtime_audit = payload.get("_mcp_runtime")
+                runtime_audits.append(dict(runtime_audit) if isinstance(runtime_audit, dict) else {})
         except Exception as exc:  # noqa: BLE001 - normalize the task boundary.
             message = "Code Scan MCP call was cancelled" if cancelled() else str(exc)
             raise CodeScanMCPError(message or type(exc).__name__) from exc
-        result = payload.get("result")
-        if not isinstance(result, dict):
+        if result is None or not envelopes:
             raise CodeScanMCPError("Code Scan MCP returned no structured scan result")
-        runtime_audit = payload.get("_mcp_runtime") if isinstance(payload.get("_mcp_runtime"), dict) else {}
+
+        first = envelopes[0]
+        last = envelopes[-1]
+        runtime_audit = _merge_code_scan_runtime_audits(runtime_audits)
+        result["scan_batches"] = len(batches)
+        result["scanned_source_files"] = len(source_paths)
         result["_scan_mcp"] = {
-            "schema_version": int(payload.get("schema_version") or 1),
-            "server": str(payload.get("server") or "SecFlow Code Scan MCP"),
+            "schema_version": int(first.get("schema_version") or 1),
+            "server": str(first.get("server") or "AegisAl Code Scan MCP").replace(
+                "SecFlow Code Scan MCP", "AegisAl Code Scan MCP"
+            ),
             "tool": "scan_language",
             "transport": str(runtime_audit.get("transport") or "stdio"),
             "endpoint": "managed-child-process",
-            "process_id": int(payload.get("process_id") or 0),
-            "language": str(payload.get("language") or language),
-            "started_at": str(payload.get("started_at") or ""),
-            "completed_at": str(payload.get("completed_at") or ""),
-            "duration_ms": int(payload.get("duration_ms") or 0),
-            "server_input_sha256": str(payload.get("input_sha256") or ""),
-            "server_output_sha256": str(payload.get("output_sha256") or ""),
+            "process_id": int(first.get("process_id") or 0),
+            "language": str(first.get("language") or language),
+            "started_at": str(first.get("started_at") or ""),
+            "completed_at": str(last.get("completed_at") or ""),
+            "duration_ms": sum(int(item.get("duration_ms") or 0) for item in envelopes),
+            "server_input_sha256": _aggregate_digest(envelopes, "input_sha256"),
+            "server_output_sha256": _aggregate_digest(envelopes, "output_sha256"),
+            "batch_count": len(batches),
             **runtime_audit,
         }
         return result
@@ -946,6 +988,290 @@ class CodeScanMCPClient:
     def cancel_active_scan(self) -> None:
         # Active calls observe the task's cancellation callback and revoke the child.
         return None
+
+
+def _partition_code_scan_sources(workspace_path: str, source_paths: list[str]) -> list[list[str]]:
+    if not source_paths:
+        return [[]]
+    max_files = _bounded_environment_int(
+        "SECFLOW_CODE_SCAN_BATCH_MAX_FILES",
+        _CODE_SCAN_BATCH_MAX_FILES,
+        minimum=1,
+        maximum=50_000,
+    )
+    max_bytes = _bounded_environment_int(
+        "SECFLOW_CODE_SCAN_BATCH_MAX_BYTES",
+        _CODE_SCAN_BATCH_MAX_BYTES,
+        minimum=1 * 1024 * 1024,
+        maximum=512 * 1024 * 1024,
+    )
+    workspace = Path(workspace_path).expanduser()
+    base = workspace if workspace.is_dir() else workspace.parent
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_bytes = 0
+    for source_path in source_paths:
+        size = _code_scan_source_size(base, source_path)
+        if current and (len(current) >= max_files or current_bytes + size > max_bytes):
+            batches.append(current)
+            current = []
+            current_bytes = 0
+        current.append(source_path)
+        current_bytes += size
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _code_scan_source_size(workspace: Path, relative_path: str) -> int:
+    try:
+        candidate = (workspace / relative_path).resolve(strict=True)
+        candidate.relative_to(workspace.resolve(strict=True))
+        if candidate.is_file() and not candidate.is_symlink():
+            return max(1, int(candidate.stat().st_size))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return 1
+
+
+def _code_scan_context_manifests(manifest_files: list[str]) -> list[str]:
+    return [
+        item
+        for item in manifest_files
+        if Path(item).name.casefold() in {"cmakelists.txt", "compile_commands.json"}
+    ]
+
+
+def _merge_code_scan_batch_result(
+    current: dict[str, Any] | None,
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = _plain_json(incoming)
+    if current is None:
+        current = dict(value)
+        current["files"] = _parse_error_file_previews(value.get("files"))
+        current["syntax_summary"] = _merge_syntax_summaries({}, value.get("syntax_summary"))
+        current["diagnostics"] = _bounded_unique_values(value.get("diagnostics"), limit=200)
+        current["findings"] = []
+        current["review_findings"] = []
+        current["finding_count"] = 0
+        current["review_finding_count"] = 0
+        current["batch_count"] = 0
+    else:
+        current["status"] = _merged_scan_status(current.get("status"), value.get("status"))
+        current["mode"] = _merged_scan_mode(current.get("mode"), value.get("mode"))
+        current["cli_status"] = _merged_scan_status(current.get("cli_status"), value.get("cli_status"))
+        current["generated_at"] = value.get("generated_at") or current.get("generated_at")
+        current["rule_paths"] = _bounded_unique_values(
+            [*(current.get("rule_paths") or []), *(value.get("rule_paths") or [])],
+            limit=2_000,
+        )
+        current["files"] = _parse_error_file_previews(
+            [*(current.get("files") or []), *(value.get("files") or [])]
+        )
+        current["diagnostics"] = _bounded_unique_values(
+            [*(current.get("diagnostics") or []), *(value.get("diagnostics") or [])],
+            limit=200,
+        )
+        current["scenario_nodes"] = _bounded_unique_mappings(
+            [*(current.get("scenario_nodes") or []), *(value.get("scenario_nodes") or [])],
+            limit=1_000,
+        )
+        current["conditional_edges"] = _bounded_unique_mappings(
+            [*(current.get("conditional_edges") or []), *(value.get("conditional_edges") or [])],
+            limit=1_000,
+        )
+        current["syntax_summary"] = _merge_syntax_summaries(
+            current.get("syntax_summary"),
+            value.get("syntax_summary"),
+        )
+        current["transport_compaction"] = _merge_transport_compaction(
+            current.get("transport_compaction"),
+            value.get("transport_compaction"),
+        )
+        current["result_truncated"] = bool(current.get("result_truncated")) or bool(
+            value.get("result_truncated")
+        )
+
+    finding_limit = _bounded_environment_int(
+        "SECFLOW_STATIC_MAX_FINDINGS",
+        500,
+        minimum=1,
+        maximum=5_000,
+    )
+    for key, count_key, truncated_key in (
+        ("findings", "finding_count", "findings_truncated"),
+        ("review_findings", "review_finding_count", "review_findings_truncated"),
+    ):
+        combined = [*(current.get(key) or []), *(value.get(key) or [])]
+        unique, truncated = _bounded_unique_mappings_with_truncation(combined, limit=finding_limit)
+        current[key] = unique
+        current[count_key] = len(unique)
+        current[truncated_key] = bool(current.get(truncated_key)) or truncated
+    current["batch_count"] = int(current.get("batch_count") or 0) + 1
+    return current
+
+
+def _merge_syntax_summaries(current: Any, incoming: Any) -> dict[str, Any]:
+    left = dict(current) if isinstance(current, Mapping) else {}
+    right = dict(incoming) if isinstance(incoming, Mapping) else {}
+    numeric_fields = {
+        "parsed_files",
+        "parse_error_files",
+        "raw_parse_error_files",
+        "recovered_parse_error_files",
+        "ast_node_count",
+        "cfg_node_count",
+        "cfg_edge_count",
+        "dfg_edge_count",
+        "parse_error_file_name_count",
+        "omitted_parse_error_file_names",
+    }
+    merged = {**left, **right}
+    for key in numeric_fields:
+        merged[key] = int(left.get(key) or 0) + int(right.get(key) or 0)
+    merged["languages"] = _bounded_unique_values(
+        [*(left.get("languages") or []), *(right.get("languages") or [])],
+        limit=64,
+    )
+    names = _bounded_unique_values(
+        [*(left.get("parse_error_file_names") or []), *(right.get("parse_error_file_names") or [])],
+        limit=_CODE_SCAN_PARSE_ERROR_PREVIEW,
+    )
+    merged["parse_error_file_names"] = names
+    merged["parse_error_file_names_truncated"] = (
+        bool(left.get("parse_error_file_names_truncated"))
+        or bool(right.get("parse_error_file_names_truncated"))
+        or int(merged.get("parse_error_files") or 0) > len(names)
+    )
+    return merged
+
+
+def _merge_transport_compaction(current: Any, incoming: Any) -> dict[str, Any]:
+    left = dict(current) if isinstance(current, Mapping) else {}
+    right = dict(incoming) if isinstance(incoming, Mapping) else {}
+    numeric_fields = {
+        "source_file_count",
+        "retained_file_details",
+        "omitted_file_details",
+        "omitted_parse_error_file_details",
+        "graph_previews_omitted",
+        "graph_preview_nodes_omitted",
+        "graph_preview_edges_omitted",
+    }
+    merged = {**left, **right}
+    for key in numeric_fields:
+        merged[key] = int(left.get(key) or 0) + int(right.get(key) or 0)
+    merged["parse_error_file_limit"] = max(
+        int(left.get("parse_error_file_limit") or 0),
+        int(right.get("parse_error_file_limit") or 0),
+    )
+    merged["parse_error_file_details_truncated"] = bool(
+        left.get("parse_error_file_details_truncated")
+    ) or bool(right.get("parse_error_file_details_truncated"))
+    return merged
+
+
+def _parse_error_file_previews(value: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in value or []:
+        if not isinstance(item, Mapping):
+            continue
+        syntax = item.get("syntax") if isinstance(item.get("syntax"), Mapping) else {}
+        if not syntax.get("parse_error"):
+            continue
+        result.append(_plain_json(item))
+        if len(result) >= _CODE_SCAN_PARSE_ERROR_PREVIEW:
+            break
+    return result
+
+
+def _bounded_unique_values(value: Any, *, limit: int) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for item in value or []:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _bounded_unique_mappings(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    return _bounded_unique_mappings_with_truncation(value, limit=limit)[0]
+
+
+def _bounded_unique_mappings_with_truncation(
+    value: Any,
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    truncated = False
+    for item in value or []:
+        if not isinstance(item, Mapping):
+            continue
+        normalized = _plain_json(item)
+        key = _sha256_json(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(result) >= limit:
+            truncated = True
+            continue
+        result.append(normalized)
+    return result, truncated
+
+
+def _merged_scan_status(left: Any, right: Any) -> str:
+    values = {str(left or "").casefold(), str(right or "").casefold()} - {""}
+    if values == {"completed"}:
+        return "completed"
+    if "failed" in values:
+        return "failed"
+    if "completed" in values and values <= {"completed", "warning"}:
+        return "completed"
+    return str(right or left or "warning")
+
+
+def _merged_scan_mode(left: Any, right: Any) -> str:
+    left_value = str(left or "")
+    right_value = str(right or "")
+    return left_value if left_value == right_value else (right_value or left_value or "bundled-cli")
+
+
+def _merge_code_scan_runtime_audits(audits: list[dict[str, Any]]) -> dict[str, Any]:
+    values = [item for item in audits if item]
+    if not values:
+        return {"batch_call_ids": [], "result_size_bytes": 0}
+    first = values[0]
+    return {
+        **first,
+        "input_sha256": _aggregate_digest(values, "input_sha256"),
+        "output_sha256": _aggregate_digest(values, "output_sha256"),
+        "result_size_bytes": sum(int(item.get("result_size_bytes") or 0) for item in values),
+        "status": "completed" if all(item.get("status") == "completed" for item in values) else "partial",
+        "batch_call_ids": [str(item.get("call_id") or "") for item in values if item.get("call_id")],
+    }
+
+
+def _aggregate_digest(values: list[Mapping[str, Any]], key: str) -> str:
+    digests = [str(item.get(key) or "") for item in values if str(item.get(key) or "")]
+    if not digests:
+        return ""
+    return digests[0] if len(digests) == 1 else _sha256_json(digests)
+
+
+def _bounded_environment_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def _verify_discovered_tools(
@@ -1011,7 +1337,35 @@ def _builtin_environment(server_id: str) -> dict[str, str]:
             if name.startswith("SECFLOW_SEMGREP_") or name.startswith("SECFLOW_JAVA_FLOW_")
         )
         common_names.update({"SECFLOW_BUNDLED_SEMGREP_BIN", "SECFLOW_STATIC_MAX_FINDINGS"})
-    return {name: os.environ[name] for name in common_names if name in os.environ}
+    environment = {name: os.environ[name] for name in common_names if name in os.environ}
+    if server_id == "excel":
+        from app.intelligence import intelligence_service
+
+        environment["SECFLOW_VULNERABILITY_CATALOG_PATH"] = str(
+            intelligence_service.catalog_path.resolve(strict=False)
+        )
+        for name in (
+            "SECFLOW_KEYCHAIN_SERVICE",
+            "SECFLOW_KEYCHAIN_PATH",
+            "SECFLOW_SECURITY_CLI",
+            "SECFLOW_DISABLE_KEYCHAIN",
+            "SECFLOW_DISABLE_DPAPI",
+        ):
+            if name in os.environ:
+                environment[name] = os.environ[name]
+        default_keychain = Path.home() / "Library" / "Keychains" / "login.keychain-db"
+        if "SECFLOW_KEYCHAIN_PATH" not in environment and default_keychain.is_file():
+            environment["SECFLOW_KEYCHAIN_PATH"] = str(default_keychain)
+        configured_key_file = os.getenv("SECFLOW_STORAGE_KEY_FILE", "").strip()
+        key_candidates = (
+            Path(configured_key_file).expanduser() if configured_key_file else None,
+            DATA_DIR / ".secflow-local-storage-key.dpapi",
+            DATA_DIR / ".secflow-local-storage.key",
+        )
+        key_file = next((path for path in key_candidates if path is not None and path.is_file()), None)
+        if key_file is not None:
+            environment["SECFLOW_STORAGE_KEY_FILE"] = str(key_file.resolve(strict=False))
+    return environment
 
 
 __all__ = [

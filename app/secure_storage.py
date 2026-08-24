@@ -8,11 +8,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 import zlib
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -22,8 +24,9 @@ ENVELOPE_MARKER = "__secflow_encrypted__"
 ENVELOPE_VERSION = 1
 KEYCHAIN_SERVICE = "com.secflow.ai.mac.intelligence"
 KEYCHAIN_ACCOUNT = "local-storage-master-v1"
+KEYCHAIN_ITEM_NOT_FOUND_EXIT_CODE = 44
 WINDOWS_KEY_FILE_NAME = ".secflow-local-storage-key.dpapi"
-WINDOWS_DPAPI_DESCRIPTION = "SecFlow local storage master key"
+WINDOWS_DPAPI_DESCRIPTION = "AegisAl local storage master key"
 WINDOWS_DPAPI_ENTROPY = hashlib.sha256(b"SecFlow:Windows:LocalStorage:v1").digest()
 _MASTER_KEY_CACHE: bytes | None = None
 _MASTER_KEY_CACHE_SOURCE = ""
@@ -69,21 +72,38 @@ def encrypt_bytes(plaintext: bytes, purpose: str) -> dict[str, Any]:
 
 def decrypt_bytes(envelope: dict[str, Any], purpose: str) -> bytes:
     if not _is_envelope(envelope):
-        raise ValueError("not a SecFlow encrypted envelope")
+        raise ValueError("not an AegisAl encrypted envelope")
     envelope_purpose = str(envelope.get("purpose") or "")
     if envelope_purpose and envelope_purpose != purpose:
         raise ValueError("encrypted payload purpose mismatch")
-    master = _master_key()
     salt = _unb64(str(envelope["salt"]))
     inner_nonce = _unb64(str(envelope["innerNonce"]))
     outer_nonce = _unb64(str(envelope["outerNonce"]))
     payload = _unb64(str(envelope["payload"]))
     aad = _aad(envelope_purpose or purpose)
-    inner_key = _derive_key(master, salt, f"{purpose}:inner".encode("utf-8"))
-    outer_key = _derive_key(master, salt, f"{purpose}:outer".encode("utf-8"))
-    inner_ciphertext = AESGCM(outer_key).decrypt(outer_nonce, payload, aad)
-    compressed = AESGCM(inner_key).decrypt(inner_nonce, inner_ciphertext, aad)
-    return zlib.decompress(compressed)
+    master = _master_key()
+    cache_source = _master_key_cache_source(os.getenv("SECFLOW_STORAGE_MASTER_KEY", "").strip())
+
+    def decrypt_with(key: bytes) -> bytes:
+        inner_key = _derive_key(key, salt, f"{purpose}:inner".encode("utf-8"))
+        outer_key = _derive_key(key, salt, f"{purpose}:outer".encode("utf-8"))
+        inner_ciphertext = AESGCM(outer_key).decrypt(outer_nonce, payload, aad)
+        compressed = AESGCM(inner_key).decrypt(inner_nonce, inner_ciphertext, aad)
+        return zlib.decompress(compressed)
+
+    try:
+        return decrypt_with(master)
+    except InvalidTag as exc:
+        initial_invalid_tag = exc
+
+    for recovery_key in _decryption_recovery_keys(master):
+        try:
+            plaintext = decrypt_with(recovery_key)
+        except InvalidTag:
+            continue
+        _cache_master_key(recovery_key, cache_source)
+        return plaintext
+    raise initial_invalid_tag
 
 
 def is_encrypted_text(text: str) -> bool:
@@ -159,7 +179,7 @@ def _derive_key(master: bytes, salt: bytes, info: bytes) -> bytes:
 def _master_key() -> bytes:
     global _MASTER_KEY_CACHE, _MASTER_KEY_CACHE_SOURCE
     env_key = os.getenv("SECFLOW_STORAGE_MASTER_KEY", "").strip()
-    cache_source = f"env:{hashlib.sha256(env_key.encode('utf-8')).hexdigest()}" if env_key else "runtime"
+    cache_source = _master_key_cache_source(env_key)
     if _MASTER_KEY_CACHE is not None and _MASTER_KEY_CACHE_SOURCE == cache_source:
         return _MASTER_KEY_CACHE
 
@@ -184,6 +204,58 @@ def _master_key() -> bytes:
     return _MASTER_KEY_CACHE
 
 
+def _decryption_recovery_keys(failed_key: bytes) -> list[bytes]:
+    """Return existing alternate keys after the cached key fails authentication.
+
+    A transient macOS Keychain failure previously made the runtime create and
+    cache a fallback file key. Trying only that key caused an InvalidTag even
+    after Keychain access recovered, and StateStore then replaced the user's
+    settings. Decryption may safely try existing local key providers because a
+    candidate is accepted only after AES-GCM authentication succeeds.
+    """
+
+    env_key = os.getenv("SECFLOW_STORAGE_MASTER_KEY", "").strip()
+    if env_key:
+        return []
+
+    candidates: list[bytes] = []
+    seen = {failed_key}
+
+    def add(key: bytes | None) -> None:
+        if key is not None and key not in seen:
+            seen.add(key)
+            candidates.append(key)
+
+    add(_load_keychain_key(create_if_missing=False))
+    if sys.platform == "win32" and os.getenv("SECFLOW_DISABLE_DPAPI") != "1":
+        add(_load_existing_dpapi_key())
+    add(_load_existing_file_key())
+    return candidates
+
+
+def _master_key_cache_source(env_key: str) -> str:
+    if env_key:
+        return f"env:{hashlib.sha256(env_key.encode('utf-8')).hexdigest()}"
+    runtime_identity = "\0".join(
+        (
+            sys.platform,
+            _keychain_service(),
+            os.getenv("SECFLOW_KEYCHAIN_PATH", "").strip(),
+            os.getenv("SECFLOW_TRIAL_ENABLED", "").strip(),
+            os.getenv("SECFLOW_DISABLE_KEYCHAIN", "").strip(),
+            os.getenv("SECFLOW_DISABLE_DPAPI", "").strip(),
+            str(_file_key_path().expanduser().resolve(strict=False)),
+        )
+    )
+    return f"runtime:{hashlib.sha256(runtime_identity.encode('utf-8')).hexdigest()}"
+
+
+def _cache_master_key(key: bytes, source: str) -> None:
+    global _MASTER_KEY_CACHE, _MASTER_KEY_CACHE_SOURCE
+    _MASTER_KEY_CACHE = key
+    _MASTER_KEY_CACHE_SOURCE = source
+
+
 def _key_provider_name() -> str:
     if os.getenv("SECFLOW_STORAGE_MASTER_KEY", "").strip():
         return "environment"
@@ -194,15 +266,65 @@ def _key_provider_name() -> str:
     return "local fallback key file"
 
 
-def _load_keychain_key() -> bytes | None:
-    if sys.platform != "darwin" or os.getenv("SECFLOW_DISABLE_KEYCHAIN") == "1":
+def _load_keychain_key(*, create_if_missing: bool = True) -> bytes | None:
+    context = _keychain_cli_context()
+    if context is None:
         return None
-    security = Path(os.getenv("SECFLOW_SECURITY_CLI", "/usr/bin/security"))
-    if not security.exists():
+    security, keychain_arguments = context
+
+    existing, item_missing = _read_keychain_key(security, keychain_arguments)
+    if existing is not None:
+        return existing
+    if not create_if_missing or not item_missing:
         return None
 
+    file_key_path = _file_key_path()
+    existing_file_key = (
+        _wait_for_existing_file_key()
+        if file_key_path.is_file()
+        else _load_existing_file_key()
+    )
+    key_material = existing_file_key or os.urandom(32)
+    encoded = base64.b64encode(key_material).decode("ascii")
     try:
-        existing = subprocess.run(
+        created = subprocess.run(
+            [
+                str(security),
+                "add-generic-password",
+                "-s",
+                _keychain_service(),
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+                encoded,
+                *keychain_arguments,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    # Never update an existing item here. Concurrent backend processes may all
+    # observe an empty Keychain on first launch; the add without -U lets only
+    # one process win. A successful add is authoritative for this process;
+    # losers re-read the winner below.
+    if created.returncode == 0:
+        return _decode_persisted_key(encoded)
+    persisted, _ = _read_keychain_key(security, keychain_arguments)
+    if persisted is not None:
+        return persisted
+    return None
+
+
+def _read_keychain_key(
+    security: Path,
+    keychain_arguments: list[str],
+) -> tuple[bytes | None, bool]:
+    try:
+        result = subprocess.run(
             [
                 str(security),
                 "find-generic-password",
@@ -211,41 +333,43 @@ def _load_keychain_key() -> bytes | None:
                 "-a",
                 KEYCHAIN_ACCOUNT,
                 "-w",
+                *keychain_arguments,
             ],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-    except subprocess.TimeoutExpired:
-        return None
-    if existing.returncode == 0 and existing.stdout.strip():
-        return _decode_or_derive_key(existing.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return None, False
+    if result.returncode == 0 and result.stdout.strip():
+        try:
+            # Existing releases accepted either a raw passphrase or an
+            # encoded 32-byte key. Keep both forms readable during migration.
+            return _decode_or_derive_key(result.stdout.strip()), False
+        except ValueError:
+            return None, False
+    return None, _keychain_item_missing(result)
 
-    encoded = base64.b64encode(os.urandom(32)).decode("ascii")
-    try:
-        created = subprocess.run(
-            [
-                str(security),
-                "add-generic-password",
-                "-U",
-                "-s",
-                _keychain_service(),
-                "-a",
-                KEYCHAIN_ACCOUNT,
-                "-w",
-                encoded,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+
+def _keychain_item_missing(result: subprocess.CompletedProcess[str]) -> bool:
+    error = str(result.stderr or "").lower()
+    return (
+        result.returncode in {KEYCHAIN_ITEM_NOT_FOUND_EXIT_CODE, -25300}
+        or "could not be found" in error
+        or "item not found" in error
+    )
+
+
+def _keychain_cli_context() -> tuple[Path, list[str]] | None:
+    if sys.platform != "darwin" or os.getenv("SECFLOW_DISABLE_KEYCHAIN") == "1":
         return None
-    if created.returncode == 0:
-        return _decode_or_derive_key(encoded)
-    return None
+    security = Path(os.getenv("SECFLOW_SECURITY_CLI", "/usr/bin/security"))
+    if not security.exists():
+        return None
+    configured_keychain = Path(os.getenv("SECFLOW_KEYCHAIN_PATH", "").strip()).expanduser()
+    keychain_arguments = [str(configured_keychain)] if configured_keychain.is_file() else []
+    return security, keychain_arguments
 
 
 def _keychain_service() -> str:
@@ -253,30 +377,62 @@ def _keychain_service() -> str:
 
 
 def _load_or_create_file_key() -> bytes:
-    configured_path = os.getenv("SECFLOW_STORAGE_KEY_FILE", "").strip()
-    if configured_path:
-        key_path = Path(configured_path)
-    else:
-        key_path = Path(os.getenv("SECFLOW_DATA_DIR", "data")) / ".secflow-local-storage.key"
+    key_path = _file_key_path()
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    if key_path.exists():
-        return _decode_or_derive_key(key_path.read_text(encoding="utf-8").strip())
+    existing = _load_existing_file_key()
+    if existing is not None:
+        return existing
+
     encoded = base64.b64encode(os.urandom(32)).decode("ascii")
-    key_path.write_text(encoded, encoding="utf-8")
     try:
-        key_path.chmod(0o600)
-    except OSError:
-        pass
-    return _decode_or_derive_key(encoded)
+        descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        winner = _wait_for_existing_file_key()
+        if winner is None:
+            raise OSError("local storage key file exists but is unreadable")
+        return winner
+    with os.fdopen(descriptor, "w", encoding="utf-8") as key_file:
+        key_file.write(encoded)
+        key_file.flush()
+        os.fsync(key_file.fileno())
+    return _decode_persisted_key(encoded)
+
+
+def _wait_for_existing_file_key() -> bytes | None:
+    # Another backend process may have won O_EXCL and still be flushing its
+    # value. Wait briefly for that atomic creator; never replace its file.
+    for _ in range(40):
+        winner = _load_existing_file_key()
+        if winner is not None:
+            return winner
+        time.sleep(0.01)
+    return None
+
+
+def _load_existing_file_key() -> bytes | None:
+    key_path = _file_key_path()
+    if not key_path.is_file():
+        return None
+    try:
+        raw = key_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None
+        return _decode_or_derive_key(raw)
+    except (OSError, ValueError):
+        return None
+
+
+def _file_key_path() -> Path:
+    configured_path = os.getenv("SECFLOW_STORAGE_KEY_FILE", "").strip()
+    return (
+        Path(configured_path)
+        if configured_path
+        else Path(os.getenv("SECFLOW_DATA_DIR", "data")) / ".secflow-local-storage.key"
+    )
 
 
 def _load_or_create_dpapi_key() -> bytes:
-    configured_path = os.getenv("SECFLOW_STORAGE_KEY_FILE", "").strip()
-    key_path = (
-        Path(configured_path)
-        if configured_path
-        else Path(os.getenv("SECFLOW_DATA_DIR", "data")) / WINDOWS_KEY_FILE_NAME
-    )
+    key_path = _dpapi_key_path()
     key_path.parent.mkdir(parents=True, exist_ok=True)
     if key_path.exists():
         protected = base64.b64decode(key_path.read_text(encoding="ascii").strip(), validate=True)
@@ -292,6 +448,27 @@ def _load_or_create_dpapi_key() -> bytes:
     temporary_path.write_text(encoded, encoding="ascii")
     temporary_path.replace(key_path)
     return key
+
+
+def _load_existing_dpapi_key() -> bytes | None:
+    key_path = _dpapi_key_path()
+    if not key_path.is_file():
+        return None
+    try:
+        protected = base64.b64decode(key_path.read_text(encoding="ascii").strip(), validate=True)
+        key = _dpapi_unprotect(protected)
+    except (OSError, ValueError):
+        return None
+    return key if len(key) == 32 else None
+
+
+def _dpapi_key_path() -> Path:
+    configured_path = os.getenv("SECFLOW_STORAGE_KEY_FILE", "").strip()
+    return (
+        Path(configured_path)
+        if configured_path
+        else Path(os.getenv("SECFLOW_DATA_DIR", "data")) / WINDOWS_KEY_FILE_NAME
+    )
 
 
 class _DataBlob(ctypes.Structure):
@@ -345,6 +522,25 @@ def _decode_or_derive_key(value: str) -> bytes:
         decoded = decoder(raw)
         if decoded and len(decoded) == 32:
             return decoded
+    return hashlib.sha256(raw.encode("utf-8")).digest()
+
+
+def _decode_persisted_key(value: str) -> bytes:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("invalid persisted local storage key")
+    for decoder in (_decode_base64, _decode_hex):
+        decoded = decoder(raw)
+        if decoded and len(decoded) == 32:
+            return decoded
+    # Values written by the first storage implementation were arbitrary text
+    # passphrases. Keep those installations readable while rejecting an empty
+    # or malformed generated value instead of silently deriving from it.
+    if len(raw) >= 40 and all(
+        character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+        for character in raw
+    ):
+        raise ValueError("invalid persisted local storage key")
     return hashlib.sha256(raw.encode("utf-8")).digest()
 
 

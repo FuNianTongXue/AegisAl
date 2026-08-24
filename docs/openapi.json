@@ -1,31 +1,15 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "SecFlow Knowledge Security Assistant",
+    "title": "AegisAl Knowledge Security Assistant",
     "description": "A source-available LangGraph knowledge security assistant by ShenSiQi.",
-    "version": "1.3.3"
+    "version": "1.3.4"
   },
   "paths": {
     "/": {
       "get": {
         "summary": "Root",
         "operationId": "root__get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui": {
-      "get": {
-        "summary": "Ui",
-        "operationId": "ui_ui_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -895,6 +879,30 @@
       "get": {
         "summary": "Vulnerabilities",
         "operationId": "vulnerabilities_api_vulnerabilities_get",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 160,
+              "default": "",
+              "title": "Query"
+            }
+          },
+          {
+            "name": "response_language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 24,
+              "default": "zh-Hans",
+              "title": "Response Language"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -902,6 +910,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -946,6 +964,27 @@
                 }
               ],
               "title": "End Date"
+            }
+          },
+          {
+            "name": "response_language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 24,
+              "default": "zh-Hans",
+              "title": "Response Language"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Refresh"
             }
           }
         ],
@@ -1108,6 +1147,17 @@
               "default": false,
               "title": "Refresh"
             }
+          },
+          {
+            "name": "response_language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 24,
+              "default": "zh-Hans",
+              "title": "Response Language"
+            }
           }
         ],
         "responses": {
@@ -1138,6 +1188,19 @@
       "post": {
         "summary": "Refresh Information",
         "operationId": "refresh_information_api_information_refresh_post",
+        "parameters": [
+          {
+            "name": "response_language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 24,
+              "default": "zh-Hans",
+              "title": "Response Language"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1145,6 +1208,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1620,6 +1693,18 @@
             "schema": {
               "type": "string",
               "title": "Artifact Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "default": "default",
+              "title": "User Id"
             }
           }
         ],
@@ -3196,6 +3281,76 @@
         }
       }
     },
+    "/api/assistant/conversations/{session_id}/exchanges/{exchange_id}/table-edits": {
+      "patch": {
+        "summary": "Update Assistant Conversation Table Edits",
+        "operationId": "update_assistant_conversation_table_edits_api_assistant_conversations__session_id__exchanges__exchange_id__table_edits_patch",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exchange_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exchange Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "default": "default",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantStructuredDataEditRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/assistant/conversations/{session_id}/archive": {
       "post": {
         "summary": "Archive Assistant Conversation",
@@ -3451,6 +3606,16 @@
             "title": "Font Size",
             "default": "default"
           },
+          "emoji_mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "moderate",
+              "active"
+            ],
+            "title": "Emoji Mode",
+            "default": "moderate"
+          },
           "launch_at_login": {
             "type": "boolean",
             "title": "Launch At Login",
@@ -3534,6 +3699,16 @@
             "title": "Response Language",
             "default": "zh-Hans"
           },
+          "emoji_mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "moderate",
+              "active"
+            ],
+            "title": "Emoji Mode",
+            "default": "moderate"
+          },
           "intent_hint": {
             "anyOf": [
               {
@@ -3577,6 +3752,139 @@
           "archived"
         ],
         "title": "AssistantConversationArchiveRequest"
+      },
+      "AssistantDataTableEdit": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Type",
+            "default": "records-table"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "caption": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caption"
+          },
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/AssistantDataTableEditColumn"
+            },
+            "type": "array",
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Columns"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Rows"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          },
+          "edited": {
+            "type": "boolean",
+            "title": "Edited",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "columns"
+        ],
+        "title": "AssistantDataTableEdit"
+      },
+      "AssistantDataTableEditColumn": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Label"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "date",
+                  "link",
+                  "number",
+                  "status",
+                  "tags",
+                  "text"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "editable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Editable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label"
+        ],
+        "title": "AssistantDataTableEditColumn"
       },
       "AssistantInterruptResumeRequest": {
         "properties": {
@@ -3647,6 +3955,24 @@
         ],
         "title": "AssistantInterruptResumeRequest",
         "description": "Resume any assistant-owned LangGraph interrupt without coupling the client to one subgraph."
+      },
+      "AssistantStructuredDataEditRequest": {
+        "properties": {
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/AssistantDataTableEdit"
+            },
+            "type": "array",
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Tables"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tables"
+        ],
+        "title": "AssistantStructuredDataEditRequest"
       },
       "AssistantTaskActionRequest": {
         "properties": {
@@ -4089,13 +4415,18 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 300
+                "maxLength": 8192
               },
               {
                 "type": "null"
               }
             ],
             "title": "Api Key"
+          },
+          "clear_api_key": {
+            "type": "boolean",
+            "title": "Clear Api Key",
+            "default": false
           },
           "enabled": {
             "type": "boolean",
@@ -4224,13 +4555,18 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 300
+                "maxLength": 8192
               },
               {
                 "type": "null"
               }
             ],
             "title": "Api Key"
+          },
+          "clear_api_key": {
+            "type": "boolean",
+            "title": "Clear Api Key",
+            "default": false
           },
           "timeout_ms": {
             "type": "integer",

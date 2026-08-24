@@ -47,7 +47,7 @@ jobs:
         run: ./scripts/build_tauri_windows.ps1 -Edition formal -OutputDir dist/windows-x86_64/formal
       - uses: actions/upload-artifact@v4
         with:
-          name: secflow-v1.3.3-windows-x86-64-formal
+          name: aegisal-v1.3.4-windows-x86-64-formal
           path: dist/windows-x86_64/formal/*.exe
           if-no-files-found: error
           retention-days: 14
@@ -86,11 +86,11 @@ jobs:
         run: |
           bash scripts/build_tauri_macos.sh
           mkdir -p dist/macos-x86_64/formal
-          cp "desktop/SecFlowTauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/安全智脑_1.3.3_x64.dmg" \
-            dist/macos-x86_64/formal/SecFlow-v1.3.3-macOS-x86_64-Formal.dmg
+          cp "desktop/SecFlowTauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/神盾_1.3.4_x64.dmg" \
+            dist/macos-x86_64/formal/神盾-AegisAl-v1.3.4-macOS-x86_64-Formal.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: secflow-v1.3.3-macos-x86-64-formal
+          name: aegisal-v1.3.4-macos-x86-64-formal
           path: dist/macos-x86_64/formal/*.dmg
           if-no-files-found: error
           retention-days: 14

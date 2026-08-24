@@ -15,6 +15,8 @@ _PRIVATE_KEYS = {
     "provenance",
     "collection",
     "collection_name",
+    "catalog_translation",
+    "translation_audit",
     "retrieval_path",
     "provider",
 }

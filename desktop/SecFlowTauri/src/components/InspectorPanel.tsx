@@ -1,5 +1,6 @@
-import { Activity, CheckCircle2, Circle, Clock3, Cpu, Database, HardDrive, Network, Square, XCircle } from "lucide-react";
+import { Activity, Cpu, Database, HardDrive, Network } from "lucide-react";
 
+import { brandDisplayText } from "../branding";
 import { useAppStore } from "../store/appStore";
 import type { AgentTask, TraceItem } from "../types";
 
@@ -34,32 +35,9 @@ export function InspectorPanel() {
           <span><HardDrive /><small>数据边界</small><strong>本机</strong></span>
         </div>
       </section>
-      <section className="inspector-section execution-plan-section">
-        <h3><Clock3 size={14} />执行计划</h3>
-        <span className="sr-only" role="status" aria-live="polite">{currentStep ? `${currentStep.title}：${currentStep.message || statusLabel(currentStep.status)}` : running ? "综合分析中" : "等待任务"}</span>
-        {steps.length ? (
-          <ol className="plan-list">
-            {steps.map((step, index) => (
-              <li key={`${step.node}:${index}`} className={step.status}>
-                {stepIcon(step.status)}
-                <span>
-                  <strong>{step.title}</strong>
-                  <small>{step.message || statusLabel(step.status)}</small>
-                </span>
-              </li>
-            ))}
-            {running && !steps.some((step) => step.status === "running") ? (
-              <li className="running">
-                <span className="running-dot" />
-                <span><strong>综合分析中</strong><small>正在固化证据和结论</small></span>
-              </li>
-            ) : null}
-          </ol>
-        ) : <p className="inspector-empty">任务开始后在此显示实时执行计划。</p>}
-      </section>
       <section className="inspector-section process-section">
         <h3>进程</h3>
-        <div className="process-row"><span className={running ? "live-dot" : "idle-dot"} /><div><strong>{currentStep?.title || task?.current_node || "等待任务"}</strong><small>{running ? "running" : currentStep ? statusLabel(currentStep.status) : "idle"}</small></div></div>
+        <div className="process-row"><span className={running ? "live-dot" : "idle-dot"} /><div><strong>{brandDisplayText(currentStep?.title || task?.current_node) || "等待任务"}</strong><small>{running ? "running" : currentStep ? statusLabel(currentStep.status) : "idle"}</small></div></div>
         <div className="process-row"><span className={online ? "live-dot" : "idle-dot"} /><div><strong>FastAPI Control</strong><small>{online ? "HTTP + SSE" : "连接中"}</small></div></div>
       </section>
     </aside>
@@ -98,14 +76,6 @@ function normalizeStatus(status: string): ExecutionStep["status"] {
   if (["running", "started"].includes(status)) return "running";
   if (status === "cancelled") return "cancelled";
   return "pending";
-}
-
-function stepIcon(status: ExecutionStep["status"]) {
-  if (status === "completed") return <CheckCircle2 />;
-  if (status === "failed") return <XCircle />;
-  if (status === "running") return <span className="running-dot" />;
-  if (status === "cancelled") return <Square />;
-  return <Circle />;
 }
 
 const statusLabel = (status: ExecutionStep["status"]) => ({

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
 import unittest
 import zipfile
 from datetime import date
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.agent import assistant_intent
+from app.agent.translation_policy import host_localization_attestation_is_publishable
 from app.api.routes import application
 from app.intelligence import RealtimeIntelligenceService
 from app.langgraph import assistant_graph
@@ -23,6 +25,7 @@ from app.langgraph.component_catalog_graph import (
     component_catalog_outcome_answer,
     component_vulnerability_catalog_subgraph,
 )
+from app.vulnerability_export import build_component_vulnerability_catalog_workbook_stream
 
 
 TODAY = date(2026, 7, 28)
@@ -86,7 +89,7 @@ def _artifact() -> dict:
     return {
         "id": "component-xlsx-20260728000000-abcdef123456",
         "kind": "excel",
-        "file_name": "SecFlow-component-vulnerabilities-2026-07-01-to-2026-07-28.xlsx",
+        "file_name": "AegisAl-component-vulnerabilities-2026-07-01-to-2026-07-28.xlsx",
         "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "download_path": "/api/assistant/artifacts/component-xlsx-20260728000000-abcdef123456",
         "sha256": "a" * 64,
@@ -97,7 +100,7 @@ def _artifact() -> dict:
 
 def _translation_agent_audit(**overrides: object) -> dict:
     audit = {
-        "server": "SecFlow Translation MCP",
+        "server": "AegisAl Translation MCP",
         "tool": "translate_json_payload",
         "transport": "stdio",
         "status": "completed",
@@ -136,6 +139,15 @@ def _mcp_arguments(mock, tool_id: str) -> dict:
         if call.kwargs.get("tool_id") == tool_id:
             return dict(call.kwargs.get("arguments") or {})
     raise AssertionError(f"MCP tool was not called: {tool_id}")
+
+
+def _workbook_xml_text(content: bytes) -> str:
+    with zipfile.ZipFile(BytesIO(content)) as archive:
+        return "".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.endswith(".xml")
+        )
 
 
 class AlwaysUsableTrial:
@@ -293,6 +305,85 @@ class AssistantIntentPlannerTests(unittest.TestCase):
 
 
 class ComponentCatalogServiceTests(unittest.TestCase):
+    def test_catalog_indexes_alias_cleanup_by_canonical_id(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
+            with service._catalog._connect() as connection:  # noqa: SLF001
+                indexes = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA index_list(vulnerability_aliases)").fetchall()
+                }
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN DELETE FROM vulnerability_aliases WHERE canonical_id = ?",
+                    ("CVE-2026-0001",),
+                ).fetchall()
+
+        self.assertIn("idx_vulnerability_aliases_cid", indexes)
+        self.assertTrue(any("idx_vulnerability_aliases_cid" in str(row[3]) for row in plan))
+
+    def test_range_query_filters_before_decrypting_visible_records(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
+            records = [
+                _record(
+                    f"CVE-2026-{8000 + index}",
+                    f"2026-07-{24 - index:02d}T00:00:00+00:00",
+                    severity="HIGH",
+                    components=[
+                        {
+                            "ecosystem": "npm",
+                            "name": f"demo-package-{index}",
+                            "affected": ["< 2"],
+                            "fixed": ["2"],
+                        }
+                    ],
+                )
+                for index in range(8)
+            ]
+            records.extend(
+                _record(
+                    f"CVE-2026-{8100 + index}",
+                    f"2026-07-{15 - index:02d}T00:00:00+00:00",
+                    severity="HIGH" if index < 4 else "MEDIUM",
+                    components=[
+                        {
+                            "ecosystem": "PyPI" if index < 4 else "npm",
+                            "name": "unrelated" if index < 4 else f"demo-package-medium-{index}",
+                            "affected": ["< 1"],
+                            "fixed": ["1"],
+                        }
+                    ],
+                )
+                for index in range(7)
+            )
+            service._catalog.upsert(records, translate=False)  # noqa: SLF001
+            decode_record = service._catalog._decode_record  # noqa: SLF001
+
+            with (
+                patch.object(service._catalog, "_decode_record", wraps=decode_record) as decode,
+                patch(
+                    "app.intelligence.translation_agent.translate_json",
+                    side_effect=AssertionError("catalog previews must not synchronously translate graph summaries"),
+                ) as translate,
+            ):
+                result = service.query_component_vulnerability_catalog(
+                    "2026-07-01",
+                    "2026-07-28",
+                    ecosystems=["npm"],
+                    severities=["HIGH"],
+                    component_names=["demo-package"],
+                    include_realtime=False,
+                    limit=2,
+                )
+
+        self.assertEqual(result["total"], 8)
+        self.assertEqual(len(result["records"]), 2)
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(decode.call_count, 2)
+        translate.assert_not_called()
+        self.assertTrue(all(record["severity"] == "HIGH" for record in result["records"]))
+        self.assertTrue(all(record["components"][0]["ecosystem"] == "npm" for record in result["records"]))
+
     def test_range_and_component_filters_are_applied_to_fixed_result(self) -> None:
         with TemporaryDirectory() as directory:
             service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
@@ -347,16 +438,110 @@ class ComponentCatalogServiceTests(unittest.TestCase):
         self.assertEqual(metadata["total"], 1)
         with zipfile.ZipFile(BytesIO(content)) as archive:
             workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
-            shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
+        workbook_text = _workbook_xml_text(content)
         for sheet_name in ("目录摘要", "漏洞明细", "组件版本范围", "参考链接"):
             self.assertIn(sheet_name, workbook_xml)
-        self.assertIn("结果指纹", shared_strings)
-        self.assertIn(result["result_sha256"], shared_strings)
-        self.assertIn("组件范围记录", shared_strings)
-        self.assertIn("高危", shared_strings)
-        self.assertNotIn(">HIGH<", shared_strings)
+        self.assertIn("结果指纹", workbook_text)
+        self.assertIn(result["result_sha256"], workbook_text)
+        self.assertIn("组件范围记录", workbook_text)
+        self.assertIn("高危", workbook_text)
+        self.assertNotIn(">HIGH<", workbook_text)
 
-    def test_report_summary_writeback_stays_hidden_until_catalog_translation_is_complete(self) -> None:
+    def test_catalog_export_streams_filtered_records_in_bounded_batches(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
+            service._catalog.upsert(  # noqa: SLF001 - isolated persistence fixture.
+                [
+                    _record(
+                        "CVE-2026-7201",
+                        "2026-07-24T00:00:00+00:00",
+                        components=[
+                            {"ecosystem": "npm", "name": "stream-demo", "affected": ["< 2"], "fixed": ["2"]},
+                            {"ecosystem": "Maven", "name": "other", "affected": ["< 4"], "fixed": ["4"]},
+                        ],
+                    ),
+                    _record(
+                        "CVE-2026-7202",
+                        "2026-07-23T00:00:00+00:00",
+                        severity="MEDIUM",
+                        components=[{"ecosystem": "npm", "name": "stream-demo", "affected": ["< 1"], "fixed": []}],
+                    ),
+                ],
+                translate=False,
+            )
+            decode_record = service._catalog._decode_record  # noqa: SLF001
+            with patch.object(service._catalog, "_decode_record", wraps=decode_record) as decode:
+                records, metadata = service.stream_component_vulnerability_catalog(
+                    "2026-07-01",
+                    "2026-07-28",
+                    ecosystems=["npm"],
+                    severities=["HIGH"],
+                    component_names=["stream-demo"],
+                    response_language="en",
+                    batch_size=1,
+                )
+                self.assertNotIsInstance(records, list)
+                exported = list(records)
+
+        self.assertEqual(metadata["total"], 1)
+        self.assertEqual(decode.call_count, 1)
+        self.assertEqual([record["id"] for record in exported], ["CVE-2026-7201"])
+        self.assertEqual(
+            exported[0]["components"],
+            [{"ecosystem": "npm", "name": "stream-demo", "affected": ["< 2"], "fixed": ["2"]}],
+        )
+        self.assertNotIn("provenance", exported[0])
+
+    def test_streaming_workbook_rejects_count_mismatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "预期 2 条，实际 1 条"):
+            build_component_vulnerability_catalog_workbook_stream(
+                iter([_catalog_result()["records"][0]]),
+                start_date="2026-07-01",
+                end_date="2026-07-28",
+                filters=_catalog_result()["filters"],
+                generated_at="2026-07-28T00:00:00+00:00",
+                expected_total=2,
+            )
+
+    def test_streaming_workbook_keeps_10k_records_within_bounded_memory(self) -> None:
+        def records():
+            for index in range(10_001):
+                yield {
+                    **_record(
+                        f"CVE-2026-{80_000 + index}",
+                        "2026-07-24T00:00:00+00:00",
+                        components=[
+                            {
+                                "ecosystem": "npm",
+                                "name": f"package-{index}",
+                                "affected": ["< 2"],
+                                "fixed": ["2"],
+                            }
+                        ],
+                    ),
+                    "reference_links": [],
+                }
+
+        tracemalloc.start()
+        try:
+            content, metadata = build_component_vulnerability_catalog_workbook_stream(
+                records(),
+                start_date="2026-07-01",
+                end_date="2026-07-28",
+                filters={"ecosystems": ["npm"], "severities": ["HIGH"], "component_names": []},
+                generated_at="2026-07-28T00:00:00+00:00",
+                expected_total=10_001,
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(metadata["total"], 10_001)
+        self.assertLess(peak, 96 * 1024 * 1024)
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            self.assertIsNone(archive.testzip())
+
+    def test_report_summary_writeback_falls_back_to_source_until_catalog_translation_is_complete(self) -> None:
         with TemporaryDirectory() as directory:
             service = RealtimeIntelligenceService(Path(directory) / "catalog.sqlite3")
             source = _record(
@@ -404,7 +589,7 @@ class ComponentCatalogServiceTests(unittest.TestCase):
             stored["catalog_translation"]["translation_agent"],
             _translation_agent_audit(),
         )
-        self.assertEqual(result["records"][0]["summary"], "")
+        self.assertEqual(result["records"][0]["summary"], source["summary"])
         self.assertEqual(result["catalog_translation"]["status"], "pending")
 
     def test_report_summary_writeback_rejects_missing_or_unsafe_translation_audit(self) -> None:
@@ -490,6 +675,37 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         self.assertEqual(completed["artifacts"], [_artifact()])
         self.assertEqual(query.call_count, 1)
         self.assertEqual(excel.call_count, 1)
+        self.assertEqual(started["records"][0]["id"], "CVE-2026-7001")
+        self.assertEqual(started["total"], 1)
+        self.assertEqual(query.call_args_list[0].kwargs["limit"], 200)
+        self.assertFalse(query.call_args_list[0].kwargs["include_realtime"])
+
+    def test_excel_mcp_receives_query_contract_without_materialized_records(self) -> None:
+        graph = ComponentVulnerabilityCatalogSubgraph()
+        preview = {**_catalog_result(), "total": 3, "truncated": True}
+        with (
+            patch(
+                "app.langgraph.component_catalog_graph.intelligence_service.query_component_vulnerability_catalog",
+                return_value=preview,
+            ) as query,
+            patch("app.langgraph.component_catalog_graph.call_mcp_tool", side_effect=_catalog_mcp_call) as mcp,
+            patch("app.langgraph.component_catalog_graph.publish_mcp_workbook", return_value=_artifact()),
+        ):
+            started = graph.start({**self.payload, "top_k": 5})
+            graph.resume(
+                started["thread_id"],
+                decision="confirm",
+                user_id="catalog-user",
+                session_id="catalog-session",
+            )
+
+        self.assertEqual(query.call_count, 1)
+        self.assertEqual(query.call_args_list[0].kwargs["limit"], 200)
+        arguments = _mcp_arguments(mcp, "mcp__excel__export_component_vulnerability_catalog")
+        self.assertNotIn("records", arguments)
+        self.assertEqual(arguments["expected_total"], 3)
+        self.assertEqual(arguments["expected_result_sha256"], "1" * 64)
+        self.assertEqual(arguments["filters"], preview["filters"])
 
     def test_catalog_preview_and_chart_severity_are_localized_for_chinese(self) -> None:
         catalog = {
@@ -532,11 +748,11 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
 
         self.assertEqual(generated["interrupt"]["kind"], "component_excel_download_confirmation")
         translate.assert_not_called()
-        excel_records = _mcp_arguments(
+        excel_arguments = _mcp_arguments(
             mcp, "mcp__excel__export_component_vulnerability_catalog"
-        )["records"]
-        self.assertEqual(excel_records[0]["summary"], "演示包存在高危缓冲区溢出漏洞。")
-        self.assertEqual(excel_records[0]["id"], "CVE-2026-7001")
+        )
+        self.assertNotIn("records", excel_arguments)
+        self.assertEqual(excel_arguments["response_language"], "zh-Hans")
         translation_traces = [item for item in generated["trace"] if item["node"] == "component_catalog.translation_cache"]
         self.assertTrue(any("预先存储" in item["message"] for item in translation_traces))
 
@@ -558,10 +774,11 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
 
         self.assertEqual(generated["interrupt"]["kind"], "component_excel_download_confirmation")
         translate.assert_not_called()
-        excel_records = _mcp_arguments(
+        excel_arguments = _mcp_arguments(
             mcp, "mcp__excel__export_component_vulnerability_catalog"
-        )["records"]
-        self.assertEqual(excel_records[0]["summary"], "CVE-2026-7001 summary")
+        )
+        self.assertNotIn("records", excel_arguments)
+        self.assertEqual(excel_arguments["expected_total"], 1)
         warning = [item for item in generated["trace"] if item["node"] == "component_catalog.translation_cache"]
         self.assertEqual(warning[0]["status"], "warning")
         self.assertIn("未重复执行离线翻译", warning[0]["message"])
@@ -607,14 +824,15 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
             )
 
         translate.assert_not_called()
-        excel_records = _mcp_arguments(
+        excel_arguments = _mcp_arguments(
             mcp, "mcp__excel__export_component_vulnerability_catalog"
-        )["records"]
-        self.assertEqual(len(excel_records), 25)
-        self.assertTrue(all(str(item["summary"]).endswith("summary") for item in excel_records))
+        )
+        self.assertNotIn("records", excel_arguments)
+        self.assertEqual(excel_arguments["expected_total"], 25)
         translation_traces = [item for item in generated["trace"] if item["node"] == "component_catalog.translation_cache"]
         self.assertTrue(any("25 条" in item["message"] for item in translation_traces))
         self.assertTrue(any(item["status"] == "warning" for item in translation_traces))
+        self.assertEqual(len(started["records"]), 25)
 
     def test_generation_and_download_can_be_cancelled_independently(self) -> None:
         generation_graph = ComponentVulnerabilityCatalogSubgraph()
@@ -695,7 +913,7 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
     def test_outcome_answer_exposes_preview_before_export(self) -> None:
         answer = component_catalog_outcome_answer(
             {
-                "summary": "- CVE-2026-7001 | HIGH | demo-package",
+                "summary": "已核验组件漏洞目录。\n- CVE-2026-7001 | HIGH | demo-package",
                 "fields": {"漏洞数量": "1"},
                 "chart_data": {},
                 "artifacts": [],
@@ -705,6 +923,57 @@ class ComponentCatalogSubgraphTests(unittest.TestCase):
         )
         self.assertIn("CVE-2026-7001", answer["summary"])
         self.assertEqual(answer["artifacts"], [])
+        self.assertEqual(answer["translation"]["translation_status"], "host-localized")
+
+    def test_outcome_answer_keeps_all_public_translated_record_fields(self) -> None:
+        record = {
+            **_catalog_result()["records"][0],
+            "title": "演示组件漏洞",
+            "summary": "演示组件存在输入校验漏洞。",
+            "title_original": "Demo component vulnerability",
+            "summary_original": "The demo component has an input validation issue.",
+            "reference_links": ["https://example.test/CVE-2026-7001"],
+            "translation_audit": {"internal": True},
+        }
+        answer = component_catalog_outcome_answer(
+            {
+                "summary": "已核验组件漏洞目录。",
+                "fields": {"漏洞数量": "1"},
+                "records": [record],
+                "total": 1,
+                "chart_data": {},
+                "artifacts": [],
+                "trace": [],
+            }
+        )
+
+        self.assertEqual(answer["total"], 1)
+        self.assertEqual(answer["records"][0]["title"], "演示组件漏洞")
+        for field in (
+            "aliases",
+            "cwes",
+            "affected_versions",
+            "fixed_versions",
+            "components",
+            "reference_links",
+        ):
+            self.assertIn(field, answer["records"][0])
+        self.assertNotIn("references", answer["records"][0])
+        self.assertNotIn("translation_audit", answer["records"][0])
+
+    def test_outcome_answer_does_not_attest_unlocalized_preview(self) -> None:
+        answer = component_catalog_outcome_answer(
+            {
+                "summary": "Component catalog preview is ready.",
+                "fields": {"漏洞数量": "1"},
+                "chart_data": {},
+                "artifacts": [],
+                "interrupt": {"kind": "component_excel_generation_confirmation"},
+                "trace": [],
+            }
+        )
+
+        self.assertNotIn("translation", answer)
 
 
 class MainAssistantCatalogRoutingTests(unittest.TestCase):
@@ -722,7 +991,7 @@ class MainAssistantCatalogRoutingTests(unittest.TestCase):
             "status": "interrupted",
             "thread_id": "component-catalog-test",
             "interrupt": {"kind": "component_excel_generation_confirmation", "question": "是否生成 Excel？"},
-            "summary": "- CVE-2026-7001 | HIGH | demo-package",
+            "summary": "已核验组件漏洞目录。\n- CVE-2026-7001 | 高危 | demo-package",
             "fields": {"漏洞数量": "1"},
             "chart_data": {},
             "artifacts": [],
@@ -738,11 +1007,18 @@ class MainAssistantCatalogRoutingTests(unittest.TestCase):
                 return_value={"enabled": True, "stats": {}, "injectedMessages": []},
             ),
             patch.object(assistant_graph.memory_service, "add_exchange", return_value=None),
+            patch.object(
+                assistant_graph.translation_agent,
+                "translate_json",
+                side_effect=AssertionError("host-localized catalog previews must bypass Translation MCP"),
+            ),
         ):
             result = assistant_graph.KnowledgeSecurityGraph().invoke("本月 npm 高危组件漏洞清单")
 
         self.assertEqual(result["mode"], "component_vulnerability_catalog")
         self.assertEqual(result["interrupt"]["kind"], "component_excel_generation_confirmation")
+        self.assertEqual(result["translation"]["translation_status"], "host-localized")
+        self.assertTrue(host_localization_attestation_is_publishable(result, "zh-Hans"))
 
 
 if __name__ == "__main__":

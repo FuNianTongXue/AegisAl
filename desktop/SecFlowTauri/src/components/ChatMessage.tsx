@@ -1,18 +1,23 @@
-import { Check, Copy, Download, ExternalLink, FileText, FolderOpen, LoaderCircle, RefreshCcw, ShieldCheck } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, FileText, FolderOpen, LoaderCircle, RefreshCcw } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { clientLocaleTag, useI18n } from "../i18n";
+import { brandDisplayText, brandMarkdownDisplayText, remarkBrandDisplayText } from "../branding";
 import { api } from "../lib/api";
 import { saveBinaryArtifact } from "../lib/platform";
 import { useAppStore } from "../store/appStore";
-import type { AssistantArtifact, AssistantInterrupt, ChatTurn, EvidenceSource, TraceItem } from "../types";
+import type { AskResult, AssistantInterrupt, ChatTurn, EvidenceSource, TraceItem } from "../types";
 import { AgentTimeline } from "./AgentTimeline";
+import { AssistantResultData } from "./AssistantResultData";
+import { BrandMark } from "./BrandMark";
 import { MermaidBlock } from "./MermaidBlock";
 import { ProfileAvatar } from "./ProfileAvatar";
+import { MarkdownDataCell, MarkdownDataHeaderCell, MarkdownDataTable } from "./StructuredDataTable";
 import { TaskCard } from "./TaskCard";
-import { ToolCall } from "./ToolCall";
+import { BeautifulApprovalCard } from "./beautiful-ui/BeautifulUI";
+import { DownloadRecommendationCard } from "./beautiful-ui/DownloadRecommendationCard";
 
 export function ChatMessage({
   turn,
@@ -20,20 +25,36 @@ export function ChatMessage({
   compact = false,
   autoExpandThinking,
   showExecutionDetails = true,
+  onResultChange,
 }: {
   turn: ChatTurn;
   onRegenerate?: () => void;
   compact?: boolean;
   autoExpandThinking?: boolean;
   showExecutionDetails?: boolean;
+  onResultChange?: (result: AskResult) => void | Promise<void>;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [copied, setCopied] = useState(false);
   const sources = turn.result?.evidence_sources || turn.result?.sources || [];
   const toolCalls = useMemo(() => (turn.trace || []).filter(isToolTrace), [turn.trace]);
   const running = turn.state === "streaming";
   const interrupt = turn.result?.interrupt;
   const artifacts = (turn.result?.artifacts || []).filter((item) => item.download_path);
+  const awaitingDownloadConfirmation = isDownloadInterrupt(interrupt);
+  const legacyExcelDownloadInterrupt = isExcelDownloadInterrupt(interrupt);
+  const legacyExcelDownloadKey = legacyExcelDownloadInterrupt
+    ? `${String(interrupt?.thread_id || "")}:${String(interrupt?.interrupt_id || "")}`
+    : "";
+  const legacyExcelDownloadRef = useRef<{
+    key: string;
+    result: ChatTurn["result"] | null;
+    applied: boolean;
+  }>({ key: legacyExcelDownloadKey, result: null, applied: false });
+  if (legacyExcelDownloadRef.current.key !== legacyExcelDownloadKey) {
+    legacyExcelDownloadRef.current = { key: legacyExcelDownloadKey, result: null, applied: false };
+  }
+  const canBridgeLegacyExcelDownload = legacyExcelDownloadInterrupt && artifacts.length > 0;
   const profile = useAppStore((state) => state.settings?.profile);
   const userId = useAppStore((state) => state.userId);
 
@@ -59,38 +80,89 @@ export function ChatMessage({
 
   return (
     <article className={`chat-turn assistant-turn ${turn.state || "completed"} ${compact ? "compact-chat" : ""}`}>
-      <div className="assistant-gutter"><span><ShieldCheck size={16} /></span></div>
+      <div className="assistant-gutter"><BrandMark size={compact ? 23 : 32} /></div>
       <div className="assistant-content">
         {!running && turn.result ? <AssistantMeta turn={turn} toolCalls={toolCalls} /> : null}
-        {showExecutionDetails ? <AgentTimeline trace={turn.trace} running={running} autoExpand={autoExpandThinking ?? false} /> : null}
+        {showExecutionDetails && !turn.task ? <AgentTimeline trace={turn.trace} running={running} autoExpand={autoExpandThinking ?? false} /> : null}
         {turn.task ? <TaskCard task={turn.task} showExecutionDetails={showExecutionDetails} /> : null}
-        {running && !turn.content ? <ResponseSkeleton /> : null}
-        {turn.content ? (
+        {turn.content || (!running && turn.result) ? (
           <div className={`markdown-body ${running ? "stream-active" : ""}`}>
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer">{children}<ExternalLink size={11} /></a>,
-                code: ({ className, children }) => {
-                  const language = /language-(\w+)/.exec(className || "")?.[1];
-                  const value = String(children).replace(/\n$/, "");
-                  if (language === "mermaid") return <MermaidBlock code={value} />;
-                  return className ? <CodeBlock language={language || "code"} code={value} /> : <code>{children}</code>;
-                },
-              }}
-            >
-              {turn.content}
-            </ReactMarkdown>
+            {turn.content ? (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkBrandDisplayText]}
+                components={{
+                  a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer">{children}<ExternalLink size={11} /></a>,
+                  table: ({ children }) => <MarkdownDataTable label={t("数据表格，可横向滚动")}>{children}</MarkdownDataTable>,
+                  th: ({ node: _node, children, ...props }) => <MarkdownDataHeaderCell {...props}>{children}</MarkdownDataHeaderCell>,
+                  td: ({ node: _node, children, ...props }) => <MarkdownDataCell {...props}>{children}</MarkdownDataCell>,
+                  code: ({ className, children }) => {
+                    const language = /language-(\w+)/.exec(className || "")?.[1];
+                    const value = String(children).replace(/\n$/, "");
+                    if (language === "mermaid") return <MermaidBlock code={value} />;
+                    return className ? <CodeBlock language={language || "code"} code={value} /> : <code>{children}</code>;
+                  },
+                }}
+              >
+                {turn.content}
+              </ReactMarkdown>
+            ) : null}
+            {!running ? (
+              <AssistantResultData
+                result={turn.result}
+                content={turn.content}
+                onResultChange={onResultChange}
+              />
+            ) : null}
             {running ? <span className="stream-caret" /> : null}
           </div>
         ) : null}
-        {showExecutionDetails && toolCalls.length ? <ToolCalls items={toolCalls} /> : null}
-        {!running && interrupt ? <ReportActionCard turn={turn} interrupt={interrupt} /> : null}
-        {artifacts.length ? <ArtifactDownloads items={artifacts} /> : null}
+        {!running && interrupt && (!legacyExcelDownloadInterrupt || !canBridgeLegacyExcelDownload)
+          ? <ReportActionCard turn={turn} interrupt={interrupt} />
+          : null}
+        {artifacts.length && (!awaitingDownloadConfirmation || canBridgeLegacyExcelDownload) ? (
+          <DownloadRecommendationCard
+            items={artifacts}
+            onDownload={canBridgeLegacyExcelDownload
+              ? async (artifact) => {
+                  let answer = legacyExcelDownloadRef.current.result;
+                  let downloadArtifact = artifact;
+                  if (!answer) {
+                    const session = useAppStore.getState();
+                    answer = await resumeAction(
+                      {
+                        thread_id: String(interrupt?.thread_id || ""),
+                        interrupt_id: String(interrupt?.interrupt_id || ""),
+                        decision: "confirm",
+                        user_id: String(interrupt?.user_id || session.userId),
+                        session_id: String(interrupt?.session_id || session.activeSessionId || "default"),
+                        response_language: locale,
+                      },
+                      String(interrupt?.thread_id || ""),
+                    );
+                    downloadArtifact = (answer?.artifacts || []).find((item) => item.download_path) || artifact;
+                    legacyExcelDownloadRef.current.result = answer;
+                  }
+                  const path = String(downloadArtifact.download_path || "");
+                  if (!path) throw new Error(t("下载制品尚未准备好，请重试。"));
+                  const response = await api.raw(path);
+                  const saved = await saveBinaryArtifact(
+                    brandDisplayText(downloadArtifact.file_name || artifact.file_name) || "Excel",
+                    await response.blob(),
+                  );
+                  if (saved === false) return false;
+                  if (answer && !legacyExcelDownloadRef.current.applied) {
+                    legacyExcelDownloadRef.current.applied = true;
+                    applyActionResult(turn, answer);
+                  }
+                  return true;
+                }
+              : undefined}
+          />
+        ) : null}
         {sources.length ? <Sources sources={sources} /> : null}
         {!compact && !running && turn.state !== "error" ? (
           <div className="message-actions">
-            <button type="button" title={t("复制")} aria-label={t("复制")} onClick={() => void navigator.clipboard.writeText(turn.content).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200); })}>{copied ? <Check /> : <Copy />}</button>
+            <button type="button" title={t("复制")} aria-label={t("复制")} onClick={() => void navigator.clipboard.writeText(brandMarkdownDisplayText(turn.content)).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200); })}>{copied ? <Check /> : <Copy />}</button>
             {onRegenerate ? <button type="button" title={t("重新生成")} aria-label={t("重新生成")} onClick={onRegenerate}><RefreshCcw /></button> : null}
           </div>
         ) : null}
@@ -130,21 +202,13 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   );
 }
 
-function ToolCalls({ items }: { items: TraceItem[] }) {
-  return <section className="tool-calls"><h4>工具调用 <span>{items.length}</span></h4>{items.map((item, index) => <ToolCall key={`${item.node}:${index}`} item={item} />)}</section>;
-}
-
 function Sources({ sources }: { sources: EvidenceSource[] }) {
   return (
     <details className="sources-panel">
       <summary>参考来源 <span>{sources.length}</span></summary>
-      <ol>{sources.map((source, index) => <li key={source.id || `${source.title}:${index}`}><a href={source.url} target="_blank" rel="noreferrer"><span>{index + 1}</span><strong>{source.title}</strong><small>{source.source || safeHost(source.url)}</small></a></li>)}</ol>
+      <ol>{sources.map((source, index) => <li key={source.id || `${source.title}:${index}`}><a href={source.url} target="_blank" rel="noreferrer"><span>{index + 1}</span><strong>{brandDisplayText(source.title)}</strong><small>{brandDisplayText(source.source) || safeHost(source.url)}</small></a></li>)}</ol>
     </details>
   );
-}
-
-function ResponseSkeleton() {
-  return <div className="response-skeleton" aria-label="正在生成"><span /><span /><span /><span /></div>;
 }
 
 /** Action card for report-generation / report-download interrupts on chat turns. */
@@ -157,10 +221,11 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
   const firstAction = useRef<HTMLButtonElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const threadId = String(interrupt.thread_id || "");
-  const question = interrupt.question || interrupt.message || "";
-  const detail = interrupt.detail || "";
+  const question = brandDisplayText(interrupt.question || interrupt.message || "");
+  const detail = brandDisplayText(interrupt.detail || "");
   const formats = (interrupt.formats || []).filter(Boolean);
-  const isDownload = interrupt.kind === "report_download_confirmation" || formats.length > 0;
+  const isDownload = isDownloadInterrupt(interrupt);
+  const [resolvedDownload, setResolvedDownload] = useState<ChatTurn["result"] | null>(null);
 
   useEffect(() => {
     if (!threadId) return;
@@ -180,6 +245,10 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
     setBusy(true);
     setError("");
     try {
+      if (decision === "cancel" && resolvedDownload) {
+        applyActionResult(turn, resolvedDownload);
+        return;
+      }
       const state = useAppStore.getState();
       const payload = {
         thread_id: threadId,
@@ -196,14 +265,17 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
       // The unified assistant endpoint routes report-*, sbom-*, and
       // component-catalog-* threads to their owning graph; the report-only
       // endpoint would 409 for non-report interrupts.
-      const outcome = threadId.startsWith("report-")
-        ? await api.resumeReportAction(payload)
-        : await api.resumeAssistantInterrupt(payload);
-      const answer = (outcome.answer || outcome) as ChatTurn["result"];
-      useAppStore.getState().updateTurn(turn.id, {
-        content: String(answer?.summary || answer?.answer || turn.content),
-        result: { ...(turn.result || {}), ...(answer || {}) } as ChatTurn["result"],
-      });
+      const answer = resolvedDownload || await resumeAction(payload, threadId);
+      if (decision === "confirm" && isDownload) {
+        const artifact = (answer?.artifacts || []).find((item) => item.download_path);
+        if (!artifact) throw new Error(t("下载制品尚未准备好，请重试。"));
+        if (!resolvedDownload) setResolvedDownload(answer);
+        const response = await api.raw(String(artifact.download_path));
+        const saved = await saveBinaryArtifact(brandDisplayText(artifact.file_name) || "report", await response.blob());
+        if (saved === false) return;
+      }
+      applyActionResult(turn, answer);
+      setResolvedDownload(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -220,14 +292,12 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
   }[String(interrupt.kind || "")] || t("确认生成报告");
 
   return (
-    <div
+    <BeautifulApprovalCard
       className="report-action-card"
-      role="alertdialog"
-      aria-live="assertive"
-      aria-busy={busy}
-      aria-labelledby={question ? titleId : undefined}
-      aria-label={question ? undefined : confirmLabel}
-      aria-describedby={detail ? detailId : undefined}
+      busy={busy}
+      labelledBy={question ? titleId : undefined}
+      label={question ? undefined : confirmLabel}
+      describedBy={detail ? detailId : undefined}
     >
       {question ? <strong id={titleId}>{question}</strong> : null}
       {detail ? <p id={detailId}>{detail}</p> : null}
@@ -238,7 +308,7 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
             {t("全部格式 ZIP")}
           </button>
         ) : null}
-        {isDownload
+        {isDownload && formats.length
           ? formats.map((format, index) => (
               <button ref={formats.length === 1 && index === 0 ? firstAction : undefined} key={format} type="button" className="primary" disabled={busy} onClick={() => void decide("confirm", format)}>
                 {busy ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
@@ -247,64 +317,48 @@ function ReportActionCard({ turn, interrupt }: { turn: ChatTurn; interrupt: Assi
             ))
           : (
               <button ref={firstAction} type="button" className="primary" disabled={busy} onClick={() => void decide("confirm")}>
-                {busy ? <LoaderCircle size={14} className="spin" /> : <FileText size={14} />}
+                {busy ? <LoaderCircle size={14} className="spin" /> : isDownload ? <Download size={14} /> : <FileText size={14} />}
                 {confirmLabel}
               </button>
             )}
-        <button ref={isDownload && !formats.length ? firstAction : undefined} type="button" className="secondary" disabled={busy} onClick={() => void decide("cancel")}>{t("取消")}</button>
+        <button type="button" className="secondary" disabled={busy} onClick={() => void decide("cancel")}>{t("取消")}</button>
       </div>
-      {error ? <div className="message-error" role="alert"><span>{error}</span></div> : null}
-    </div>
+      {error ? <div className="message-error" role="alert"><span>{brandDisplayText(error)}</span></div> : null}
+    </BeautifulApprovalCard>
   );
 }
 
-/** Download actions for generated report artifacts on chat turns. */
-function ArtifactDownloads({ items }: { items: AssistantArtifact[] }) {
-  const { t } = useI18n();
-  const [pending, setPending] = useState("");
-  const [error, setError] = useState("");
-  const [announcement, setAnnouncement] = useState("");
+const DOWNLOAD_INTERRUPT_KINDS = new Set([
+  "report_download_confirmation",
+]);
+const EXCEL_DOWNLOAD_INTERRUPT_KINDS = new Set([
+  "component_excel_download_confirmation",
+  "sbom_excel_download_confirmation",
+]);
 
-  // Route through the native save panel (Tauri) so the user can choose the
-  // destination directory and rename the file; a bare <a download> inside the
-  // webview silently drops the file into the default download location.
-  const download = async (item: AssistantArtifact) => {
-    const path = String(item.download_path || "");
-    const fileName = String(item.file_name || "report");
-    if (!path) return;
-    setPending(path);
-    setError("");
-    setAnnouncement(`${t("正在下载")} ${fileName}…`);
-    try {
-      const response = await api.raw(path);
-      await saveBinaryArtifact(fileName, await response.blob());
-      setAnnouncement(`${fileName} ${t("已保存")}`);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setAnnouncement("");
-    } finally {
-      setPending("");
-    }
-  };
+function isDownloadInterrupt(interrupt?: AssistantInterrupt) {
+  return Boolean(interrupt && DOWNLOAD_INTERRUPT_KINDS.has(String(interrupt.kind || "")));
+}
 
-  return (
-    <div className="report-artifacts" role="region" aria-label={t("可下载的报告文件")} aria-live="polite" aria-busy={Boolean(pending)}>
-      {items.map((item) => (
-        <button
-          key={item.id || item.download_path}
-          type="button"
-          disabled={Boolean(pending)}
-          aria-label={`${pending === String(item.download_path) ? t("正在下载") : t("下载")} ${item.file_name}`}
-          onClick={() => void download(item)}
-        >
-          {pending === String(item.download_path) ? <LoaderCircle size={13} className="spin" /> : <Download size={13} />}
-          <span className="artifact-file-name" title={item.file_name} dir="auto" style={{ minWidth: 0, maxWidth: "min(460px, 60vw)", overflowWrap: "anywhere", textAlign: "left" }}>{item.file_name}</span>
-        </button>
-      ))}
-      <span style={VISUALLY_HIDDEN_STYLE}>{announcement}</span>
-      {error ? <div className="message-error" role="alert"><span>{error}</span></div> : null}
-    </div>
-  );
+function isExcelDownloadInterrupt(interrupt?: AssistantInterrupt) {
+  return Boolean(interrupt && EXCEL_DOWNLOAD_INTERRUPT_KINDS.has(String(interrupt.kind || "")));
+}
+
+async function resumeAction(
+  payload: Parameters<typeof api.resumeAssistantInterrupt>[0],
+  threadId: string,
+) {
+  const outcome = threadId.startsWith("report-")
+    ? await api.resumeReportAction(payload)
+    : await api.resumeAssistantInterrupt(payload);
+  return (outcome.answer || outcome) as ChatTurn["result"];
+}
+
+function applyActionResult(turn: ChatTurn, answer: ChatTurn["result"]) {
+  useAppStore.getState().updateTurn(turn.id, {
+    content: String(answer?.summary || answer?.answer || turn.content),
+    result: { ...(turn.result || {}), ...(answer || {}) } as ChatTurn["result"],
+  });
 }
 
 const isToolTrace = (item: TraceItem) => Boolean(
@@ -325,15 +379,3 @@ const isAgenticTurn = (turn: ChatTurn) => {
 };
 const safeHost = (url?: string) => { try { return url ? new URL(url).hostname : ""; } catch { return ""; } };
 const formatElapsed = (value: number) => value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(1)}s`;
-
-const VISUALLY_HIDDEN_STYLE = {
-  position: "absolute",
-  width: 1,
-  height: 1,
-  padding: 0,
-  margin: -1,
-  overflow: "hidden",
-  clip: "rect(0, 0, 0, 0)",
-  whiteSpace: "nowrap",
-  border: 0,
-} as const;

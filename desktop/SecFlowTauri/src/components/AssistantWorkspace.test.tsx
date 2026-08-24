@@ -33,6 +33,7 @@ describe("AssistantWorkspace project routing", () => {
       workspaceName: "kafka",
       composerAttachment: null,
       composerAttachmentLeaving: false,
+      inspectorOpen: false,
       health: undefined,
       tasks: [{ id: "old-task", workspace_path: "/Users/test/projects/old" } as AgentTask],
       turns: [],
@@ -89,7 +90,7 @@ describe("AssistantWorkspace project routing", () => {
     expect(screen.queryByText("本机安全服务暂时不可用，请刷新本机服务后重试。")).not.toBeInTheDocument();
   });
 
-  it("routes submitted progress to the inspector without showing execution details in the conversation", async () => {
+  it("keeps submitted progress compact without forcing the inspector open", async () => {
     vi.spyOn(api, "workspaceAction").mockReturnValue(new Promise(() => {}) as never);
     render(<AssistantWorkspace />);
 
@@ -99,9 +100,13 @@ describe("AssistantWorkspace project routing", () => {
     await waitFor(() => expect(useAppStore.getState().turns.some((turn) => (
       turn.trace?.some((item) => item.message === "已提交项目目标，正在进入分析流程…")
     ))).toBe(true));
-    expect(useAppStore.getState().inspectorOpen).toBe(true);
-    expect(screen.queryByText("已提交项目目标，正在进入分析流程…")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("正在生成")).toBeInTheDocument();
+    expect(useAppStore.getState().inspectorOpen).toBe(false);
+    expect(screen.getByText("已提交项目目标，正在进入分析流程…")).toBeInTheDocument();
+    const executionSummary = screen.getByRole("button", { name: /正在思考 submit objective/ });
+    expect(executionSummary).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(executionSummary);
+    expect(screen.getByRole("list", { name: "执行过程" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("正在生成")).not.toBeInTheDocument();
   });
 
   it("asks for the scan type when the question uses common check wording", async () => {
@@ -270,12 +275,56 @@ describe("AssistantWorkspace project routing", () => {
     expect(turns.some((turn) => turn.state === "streaming")).toBe(false);
   });
 
-  it("uses the shared Information Center mark inside the kinetic welcome stage", () => {
+  it("includes the selected emoji mode when streaming a regular question", async () => {
+    useAppStore.setState({
+      activeTaskId: "",
+      workspacePath: "",
+      workspaceName: "",
+      tasks: [],
+      turns: [],
+      health: { ok: true } as never,
+      settings: {
+        profile: {
+          display_name: "分析员",
+          email: "analyst@example.com",
+          department: "安全运营中心",
+          role: "安全分析师",
+        },
+        preferences: {
+          language: "zh-Hans",
+          dark_mode: false,
+          font_size: "default",
+          emoji_mode: "active",
+        },
+      },
+    });
+    const streamQuestion = vi.spyOn(api, "streamQuestion").mockResolvedValue({ answer: "你好 👋" } as never);
+    vi.spyOn(api, "conversations").mockResolvedValue([]);
+    render(<AssistantWorkspace />);
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "你好" } });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+
+    await waitFor(() => expect(streamQuestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: "你好",
+        response_language: "zh-Hans",
+        emoji_mode: "active",
+      }),
+      expect.any(Object),
+      expect.any(AbortSignal),
+    ));
+  });
+
+  it("uses the local sparkles and glowing-card welcome stage without decorative icons", () => {
     useAppStore.setState({ turns: [] });
     render(<AssistantWorkspace />);
 
-    expect(screen.getByTestId("kinetic-grid")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "SecFlow 信息中心标识" })).toBeInTheDocument();
+    const stage = screen.getByTestId("aceternity-sparkles-stage");
+    expect(stage).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "AegisAl 信息中心标识" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /扫描代码项目|查询最新漏洞|导出 SBOM/ })).toHaveLength(3);
+    expect(stage.querySelector(".empty-suggestions svg")).not.toBeInTheDocument();
   });
 
   it("renders the latest 60 turns, reveals older batches, and resets the window for a new session", async () => {
@@ -365,5 +414,62 @@ describe("AssistantWorkspace project routing", () => {
       expect.any(Object),
       expect.any(AbortSignal),
     ));
+  });
+
+  it("persists edited translated tables and writes the saved snapshot back to the turn", async () => {
+    const turn: ChatTurn = {
+      id: "msg-42:assistant",
+      role: "assistant",
+      content: "已返回翻译后的记录。",
+      createdAt: "2026-08-23T09:00:00+08:00",
+      state: "completed",
+      result: {
+        answer: "已返回翻译后的记录。",
+        session_id: "translated-session",
+        tables: [{
+          id: "translated-findings",
+          title: "翻译后的漏洞记录",
+          columns: [
+            { key: "id", label: "漏洞编号", editable: false },
+            { key: "title", label: "标题" },
+          ],
+          rows: [{ id: "CVE-2026-4242", title: "原中文标题" }],
+        }],
+      },
+    };
+    useAppStore.setState({
+      activeTaskId: "",
+      activeSessionId: "translated-session",
+      workspacePath: "",
+      workspaceName: "",
+      tasks: [],
+      turns: [turn],
+      health: { ok: true } as never,
+    });
+    const update = vi.spyOn(api, "updateConversationTableEdits").mockImplementation(
+      async (_sessionId, exchangeId, _userId, tables) => ({ exchange_id: exchangeId, tables }),
+    );
+
+    render(<AssistantWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑记录表" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题，第 1" }), {
+      target: { value: "保存后的中文标题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith(
+      "translated-session",
+      "msg-42",
+      "analyst",
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "translated-findings",
+          rows: [{ id: "CVE-2026-4242", title: "保存后的中文标题" }],
+        }),
+      ]),
+    ));
+    await waitFor(() => expect(
+      useAppStore.getState().turns[0].result?.structured_data_edits?.[0].rows[0],
+    ).toEqual({ id: "CVE-2026-4242", title: "保存后的中文标题" }));
   });
 });

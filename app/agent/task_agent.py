@@ -59,6 +59,7 @@ MAX_WORKSPACE_FILE_BYTES = 500_000
 MAX_WORKSPACE_TOTAL_BYTES = 6_000_000
 MAX_AGENT_DEPENDENCIES = 2_000
 MAX_AGENT_FINDINGS_PER_LANGUAGE = 2_000
+MAX_AGENT_FILE_PATH_PREVIEW = 300
 SCAN_HEARTBEAT_INTERVAL_SECONDS = 5.0
 LANGUAGE_ORDER = ("java", "python", "go", "c", "cpp", "csharp", "rust", "solidity")
 LANGUAGE_LABELS = {
@@ -296,7 +297,7 @@ class TaskAgentGraph:
             for language in LANGUAGE_ORDER
         ]
         return {
-            "name": "SecFlow Workspace Task Agent",
+            "name": "AegisAl Workspace Task Agent",
             "nodes": [
                 {"id": "inspect_workspace", "label": "检查授权工作区"},
                 {"id": "detect_languages", "label": "识别项目语言"},
@@ -346,7 +347,7 @@ class TaskAgentGraph:
                     "max_adaptation_iterations": MAX_ADAPTATION_ITERATIONS,
                     "evaluation_mode": "frozen_evaluation",
                     "user_scan_transport": "mcp-stdio",
-                    "mcp_server": "SecFlow Code Scan MCP",
+                "mcp_server": "AegisAl Code Scan MCP",
                     "mcp_tools": ["scan_language"],
                     "delegated_agents": ["sbom_agent:identify_project_licenses"],
                     "skill": project_adaptive_skill_metadata(),
@@ -679,7 +680,7 @@ class TaskAgentGraph:
             {
                 "transport": "stdio",
                 "endpoint": "managed-child-process",
-                "mcp_server": "SecFlow License MCP",
+                "mcp_server": "AegisAl License MCP",
                 "mcp_tool": "identify_project_licenses",
                 "registry": "https://opensource.org/api/licenses",
             },
@@ -856,7 +857,7 @@ class TaskAgentGraph:
                 "language": language,
                 "rules": [Path(item).name for item in rules],
                 "transport": self._scan_transport(state["task_id"]),
-                "mcp_server": "SecFlow Code Scan MCP" if self._uses_scan_mcp(state["task_id"]) else "",
+                "mcp_server": "AegisAl Code Scan MCP" if self._uses_scan_mcp(state["task_id"]) else "",
                 "mcp_tool": "scan_language" if self._uses_scan_mcp(state["task_id"]) else "",
             },
         )
@@ -1473,7 +1474,7 @@ class TaskAgentGraph:
                     if isinstance(item, dict)
                 ),
                 "transport": "stdio" if state.get("scan_mcp_invocations") else "in-process",
-                "server": "SecFlow Code Scan MCP" if state.get("scan_mcp_invocations") else "",
+                "server": "AegisAl Code Scan MCP" if state.get("scan_mcp_invocations") else "",
                 "tool": "scan_language" if state.get("scan_mcp_invocations") else "",
                 "invocation_count": len(state.get("scan_mcp_invocations", [])),
                 "tools": sorted(
@@ -1489,7 +1490,7 @@ class TaskAgentGraph:
                 "enabled": bool(state.get("license_mcp_invocations")),
                 "transport": "stdio" if state.get("license_mcp_invocations") else "disabled",
                 "endpoint": "managed-child-process" if state.get("license_mcp_invocations") else "",
-                "server": "SecFlow License MCP" if state.get("license_mcp_invocations") else "",
+                "server": "AegisAl License MCP" if state.get("license_mcp_invocations") else "",
                 "tool": "identify_project_licenses" if state.get("license_mcp_invocations") else "",
                 "invocation_count": len(state.get("license_mcp_invocations", [])),
                 "tools": sorted(
@@ -2806,13 +2807,16 @@ def compact_language_result(
 ) -> dict[str, Any]:
     findings = list(result.get("findings") or [])
     review_findings = list(result.get("review_findings") or [])
+    file_preview = list(source_paths[:MAX_AGENT_FILE_PATH_PREVIEW])
     return {
         "language": language,
         "status": str(result.get("status") or "warning"),
         "mode": str(result.get("mode") or "internal-fallback"),
         "cli_status": str(result.get("cli_status") or ""),
         "file_count": len(source_paths),
-        "files": list(source_paths) if complete_scan else source_paths[:300],
+        "files": file_preview,
+        "file_preview_count": len(file_preview),
+        "files_truncated": len(source_paths) > len(file_preview),
         "rule_files": [Path(item).name for item in rule_paths],
         "syntax_summary": deepcopy(result.get("syntax_summary") or {}),
         "parse_error_file_details": compact_parse_error_file_details(result),

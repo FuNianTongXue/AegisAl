@@ -24,9 +24,9 @@ class PDFReportOutput(BaseModel):
 
 
 report_pdf_mcp = FastMCP(
-    "SecFlow PDF MCP",
+    "AegisAl PDF MCP",
     instructions=(
-        "Render verified SecFlow report JSON into a PDF. Preserve evidence code line breaks and line "
+        "Render verified AegisAl report JSON into a PDF. Preserve evidence code line breaks and line "
         "numbers, remediation, native chart summaries, Chinese labels, and China Standard Time."
     ),
 )
@@ -34,7 +34,7 @@ report_pdf_mcp = FastMCP(
 
 @report_pdf_mcp.tool(
     name="render_pdf_report",
-    description="Render verified SecFlow report JSON as a PDF artifact.",
+    description="Render verified AegisAl report JSON as a PDF artifact.",
     structured_output=True,
 )
 def render_pdf_report(
@@ -58,7 +58,7 @@ def render_pdf_report(
     artifacts = [
         stage_output_artifact(
             output_dir,
-            file_name="SecFlow-security-report.pdf",
+            file_name="AegisAl-security-report.pdf",
             payload=payload,
             media_type="application/pdf",
         )

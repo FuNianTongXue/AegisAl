@@ -124,6 +124,22 @@ class GithubMultilangEvaluationTests(unittest.TestCase):
             ],
         )
 
+    def test_complete_scan_keeps_a_bounded_file_path_preview(self) -> None:
+        source_paths = [f"src/file_{index}.java" for index in range(10_000)]
+
+        compact = compact_language_result(
+            "java",
+            {"status": "completed", "files": [], "findings": []},
+            source_paths,
+            [],
+            complete_scan=True,
+        )
+
+        self.assertEqual(compact["file_count"], 10_000)
+        self.assertEqual(compact["file_preview_count"], 300)
+        self.assertEqual(compact["files"], source_paths[:300])
+        self.assertTrue(compact["files_truncated"])
+
     def test_scan_project_restores_semgrep_timeout_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "scripts.evaluate_github_multilang.TaskAgentGraph",

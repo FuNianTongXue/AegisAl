@@ -13,6 +13,9 @@ from app.agent.assistant_service import (
     assistant_content_chunks,
     expired_assistant_operation,
     invoke_assistant_question,
+    public_stream_trace_event,
+    public_stream_trace_identity,
+    public_stream_trace_items,
     resume_assistant_operation,
 )
 from app.langgraph.assistant_graph import knowledge_graph
@@ -25,6 +28,7 @@ from app.models import (
     AskRequest,
     AssistantConversationArchiveRequest,
     AssistantInterruptResumeRequest,
+    AssistantStructuredDataEditRequest,
 )
 from app.privacy import sanitize_public_text
 from app.reports import report_artifact_store
@@ -58,11 +62,28 @@ async def ask_stream(payload: AskRequest) -> StreamingResponse:
     async def stream():
         queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        emitted_trace: set[str] = set()
+
+        def enqueue(event_name: str, data: dict[str, Any]) -> None:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (event_name, data))
+            except RuntimeError:
+                # The client may disconnect while the worker thread is finishing.
+                pass
 
         def emit_trace(item: dict[str, Any]) -> None:
-            del item
+            event = public_stream_trace_event(item)
+            if event is None:
+                return
+            identity = public_stream_trace_identity(event)
+            if identity in emitted_trace:
+                return
+            emitted_trace.add(identity)
+            enqueue("trace", event)
 
         def emit_content(delta: str) -> None:
+            # Model deltas are not public until translation/publication policy has
+            # accepted the complete answer. Only final accepted chunks are sent.
             del delta
 
         def run_graph() -> None:
@@ -73,16 +94,17 @@ async def ask_stream(payload: AskRequest) -> StreamingResponse:
                     event_sink=emit_trace,
                     content_sink=emit_content,
                 )
-                final_trace = result.get("trace") if isinstance(result.get("trace"), list) else []
+                result = dict(result)
+                final_trace = public_stream_trace_items(result.get("trace"))
+                result["trace"] = final_trace
                 for item in final_trace:
-                    if isinstance(item, dict):
-                        loop.call_soon_threadsafe(queue.put_nowait, ("trace", dict(item)))
+                    emit_trace(item)
                 for delta in assistant_content_chunks(str(result.get("summary") or "")):
-                    loop.call_soon_threadsafe(queue.put_nowait, ("content", {"delta": delta}))
-                loop.call_soon_threadsafe(queue.put_nowait, ("result", result))
+                    enqueue("content", {"delta": delta})
+                enqueue("result", result)
             except Exception as exc:  # noqa: BLE001
                 message = sanitize_public_text(str(exc)).strip() or "Assistant response generation failed."
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", {"message": message}))
+                enqueue("error", {"message": message})
 
         worker = asyncio.create_task(asyncio.to_thread(run_graph))
         try:
@@ -116,7 +138,7 @@ def download_artifact(
         path = component_artifact_store.resolve(artifact_id, user_id=user_id)
         file_name = str(
             component_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
-            or "SecFlow-component-vulnerabilities.xlsx"
+            or "AegisAl-component-vulnerabilities.xlsx"
         )
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except KeyError:
@@ -124,7 +146,7 @@ def download_artifact(
             path = sbom_artifact_store.resolve(artifact_id, user_id=user_id)
             file_name = str(
                 sbom_artifact_store.metadata(artifact_id, user_id=user_id).get("file_name")
-                or "SecFlow-project-SBOM.xlsx"
+                or "AegisAl-project-SBOM.xlsx"
             )
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         except KeyError as exc:
@@ -173,6 +195,33 @@ def conversation_detail(
         return _ok(memory_service.get_conversation(user_id, session_id), "Conversation loaded.")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+
+@router.patch("/conversations/{session_id}/exchanges/{exchange_id}/table-edits", response_model=ApiResponse)
+def update_conversation_table_edits(
+    session_id: str,
+    exchange_id: str,
+    payload: AssistantStructuredDataEditRequest,
+    user_id: str = Query(default="default", min_length=1, max_length=120),
+) -> ApiResponse:
+    _validate_session_id(session_id)
+    if not exchange_id or len(exchange_id) > 200:
+        raise HTTPException(status_code=422, detail="Invalid exchange ID.")
+    try:
+        update_tables = (
+            memory_service.update_short_term_exchange_table_edits
+            if session_id.startswith("information:")
+            else memory_service.update_exchange_table_edits
+        )
+        tables = update_tables(
+            user_id,
+            session_id,
+            exchange_id,
+            [table.model_dump(mode="json", exclude_none=True) for table in payload.tables],
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation exchange not found.") from exc
+    return _ok({"exchange_id": exchange_id, "tables": tables}, "Conversation table edits saved.")
 
 
 @router.post("/conversations/{session_id}/archive", response_model=ApiResponse)

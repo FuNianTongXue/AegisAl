@@ -1,4 +1,4 @@
-"""Skill contributions exposed through the SecFlow plugin runtime."""
+"""Skill contributions exposed through the AegisAl plugin runtime."""
 
 from .runtime import (
     SKILL_REGISTRY,

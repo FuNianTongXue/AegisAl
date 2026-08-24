@@ -1,25 +1,26 @@
-import { AlertCircle, Check, ChevronDown, LoaderCircle, Wrench } from "lucide-react";
 import { useState } from "react";
 
+import { brandDisplayText } from "../branding";
 import type { TraceItem } from "../types";
+import { BeautifulToolChipTrigger } from "./beautiful-ui/BeautifulUI";
 
 export function ToolCall({ item }: { item: TraceItem }) {
   const [open, setOpen] = useState(false);
   const state = item.status === "failed" ? "error" : item.status === "running" ? "running" : "completed";
   const presentation = item.presentation?.kind === "tool_call" ? item.presentation : undefined;
-  const toolName = item.tool_name || stringValue(presentation?.tool_name) || item.title || item.node;
+  const toolName = brandDisplayText(item.tool_name || stringValue(presentation?.tool_name) || item.title || item.node);
   const input = item.input || objectValue(presentation?.input);
   const output = item.output || presentation?.output;
-  const error = item.error || stringValue(presentation?.error);
+  const error = brandDisplayText(item.error || stringValue(presentation?.error));
   return (
     <div className={`tool-call ${state} tool-stream-in`}>
-      <button onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-        <span>{state === "running" ? <LoaderCircle className="spin" /> : state === "error" ? <AlertCircle /> : <Check />}</span>
-        <Wrench size={14} />
-        <strong>{toolName}</strong>
-        <small>{item.duration_ms ? `${(item.duration_ms / 1000).toFixed(1)}s` : stateLabel(state)}</small>
-        <ChevronDown size={14} className={open ? "" : "rotated"} />
-      </button>
+      <BeautifulToolChipTrigger
+        state={state}
+        name={toolName}
+        meta={item.duration_ms ? `${(item.duration_ms / 1000).toFixed(1)}s` : stateLabel(state)}
+        open={open}
+        onToggle={() => setOpen((value) => !value)}
+      />
       <div className={`tool-call-collapse ${open ? "expanded" : ""}`} aria-hidden={!open}>
         <div className="tool-call-collapse-inner">
           <div className="tool-call-content">

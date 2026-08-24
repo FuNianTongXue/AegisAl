@@ -24,6 +24,15 @@ afterEach(() => {
 });
 
 describe("IntelligenceView metrics", () => {
+  it("shows a loading state instead of temporary zero metrics", () => {
+    vi.spyOn(api, "dashboard").mockReturnValue(new Promise<never>(() => {}));
+
+    const { container } = render(<IntelligenceView />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("正在加载漏洞记录…");
+    expect(container.querySelector(".stat-grid")).toBeNull();
+  });
+
   it("renders CISA KEV, public PoC totals, and the seven-day update trend", async () => {
     vi.spyOn(api, "dashboard").mockResolvedValue({
       records: [],
@@ -55,7 +64,7 @@ describe("IntelligenceView metrics", () => {
     expect(screen.getByRole("img", { name: "近 7 天情报更新趋势" })).toBeInTheDocument();
     expect(screen.getAllByText(/^0[78]\/\d{2}$/)).toHaveLength(7);
     expect(screen.getByRole("table", { name: "最近更新的高风险漏洞情报" })).toBeInTheDocument();
-    expect(api.dashboard).toHaveBeenCalledWith("zh-Hans");
+    expect(api.dashboard).toHaveBeenCalledWith("zh-Hans", false);
     expect(screen.getByText("漏洞目录同步完成")).toBeInTheDocument();
     expect(screen.queryByText(/离线译文/)).not.toBeInTheDocument();
     expect(screen.queryByText("简体中文")).not.toBeInTheDocument();
@@ -90,13 +99,14 @@ describe("IntelligenceView metrics", () => {
     expect(screen.queryByText("简体中文")).not.toBeInTheDocument();
   });
 
-  it("does not publish a pending mixed-language title", async () => {
+  it("shows the source title while translation is pending", async () => {
     vi.spyOn(api, "dashboard").mockResolvedValue({
       records: [{
         id: "CVE-2026-76008",
-        title: "远程 URI 参数 Parsing vulnerability",
+        title: "Remote URI parsing vulnerability",
+        title_original: "Remote URI parsing vulnerability",
         severity: "high",
-        content_language: "unknown",
+        content_language: "en",
         translation_status: "pending",
       }],
       stats: { total: 1, high: 1 },
@@ -108,8 +118,8 @@ describe("IntelligenceView metrics", () => {
 
     render(<IntelligenceView />);
 
-    expect(await screen.findByText("漏洞内容准备中")).toBeInTheDocument();
+    expect(await screen.findByText("Remote URI parsing vulnerability")).toBeInTheDocument();
     expect(screen.queryByText(/离线译文/)).not.toBeInTheDocument();
-    expect(screen.queryByText("远程 URI 参数 Parsing vulnerability")).not.toBeInTheDocument();
+    expect(screen.queryByText("漏洞内容准备中")).not.toBeInTheDocument();
   });
 });

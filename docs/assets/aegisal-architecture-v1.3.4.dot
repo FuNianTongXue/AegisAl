@@ -1,0 +1,169 @@
+digraph AegisAlArchitecture {
+  graph [
+    rankdir=TB,
+    bgcolor="#FFFFFF",
+    color="#D7DEE8",
+    dpi=144,
+    fontname="PingFang SC",
+    fontsize=24,
+    label="神盾 / AegisAl v1.3.4\n跨平台知识安全架构",
+    labelloc=t,
+    nodesep=0.28,
+    pad=0.28,
+    ratio=fill,
+    ranksep=0.38,
+    size="13.333,7.5!",
+    splines=polyline
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    color="#B9C5D4",
+    fillcolor="#FFFFFF",
+    fontcolor="#18212F",
+    fontname="PingFang SC",
+    fontsize=10,
+    margin="0.13,0.08",
+    penwidth=1.1
+  ];
+
+  edge [
+    color="#64748B",
+    fontcolor="#475569",
+    fontname="PingFang SC",
+    fontsize=8,
+    arrowsize=0.65,
+    penwidth=1.1
+  ];
+
+  subgraph cluster_clients {
+    label="1. 跨平台客户端";
+    labeljust=l;
+    style="rounded,filled";
+    color="#C9D8EC";
+    fillcolor="#F4F8FD";
+    fontcolor="#244A73";
+    fontsize=13;
+
+    platforms [label="Windows x86_64  |  macOS arm64  |  macOS x86_64", fillcolor="#E6F0FC"];
+    tauri [label="Tauri 2 Desktop Host\n版本注入 · 后端完整性校验", fillcolor="#DDECFB"];
+    react [label="React / TypeScript UI\n工作区 · 情报 · 可编辑表格 · 报告", fillcolor="#E9F5F2"];
+    trial [label="7 天试用授权门禁\n首次成功启动起连续 168 小时", fillcolor="#FFF3DA", color="#E8BE64"];
+
+    { rank=same; platforms; tauri; react; trial; }
+    platforms -> tauri [label="native bundle"];
+    tauri -> react [label="WebView2 / WKWebView"];
+    trial -> react [style=dashed, label="access guard"];
+  }
+
+  subgraph cluster_service {
+    label="2. 本地服务与协议";
+    labeljust=l;
+    style="rounded,filled";
+    color="#B9DBD5";
+    fillcolor="#F2FAF8";
+    fontcolor="#1E5C54";
+    fontsize=13;
+
+    api [label="FastAPI Local API\n127.0.0.1 · OpenAPI v1.3.4", fillcolor="#DDF4EF"];
+    transport [label="REST + SSE\nHealth / Streaming / Interrupt", fillcolor="#E7F7F3"];
+    sidecar [label="Python Sidecar Lifecycle\nIPC / Process · Parent Watch", fillcolor="#E7F7F3"];
+    workers [label="2 × Task Worker\nSQLite Task Store", fillcolor="#DDF4EF"];
+
+    { rank=same; api; transport; sidecar; workers; }
+    api -> transport;
+    sidecar -> api [label="spawn / restart"];
+    api -> workers [label="external-process"];
+  }
+
+  subgraph cluster_agents {
+    label="3. LangGraph Multi-Agent 编排";
+    labeljust=l;
+    style="rounded,filled";
+    color="#C7D4E8";
+    fillcolor="#F6F8FC";
+    fontcolor="#304A6E";
+    fontsize=13;
+
+    supervisor [label="Supervisor\nPlan · Route · Handoff", fillcolor="#DCE7F7", color="#7E9CC3", penwidth=1.4];
+    conversation [label="Conversation +\nProject Context Agents"];
+    scan [label="Code Scan + Component + SBOM\n5000 files / 64 MiB batches"];
+    intelligence [label="Intelligence +\nReport Agents"];
+    aggregator [label="Result Aggregator\nUnified Response / Artifact", fillcolor="#E8EFF9"];
+
+    { rank=same; conversation; scan; intelligence; }
+    supervisor -> conversation [label="handoff"];
+    supervisor -> scan [label="handoff"];
+    supervisor -> intelligence [label="handoff"];
+    conversation -> aggregator;
+    scan -> aggregator;
+    intelligence -> aggregator;
+  }
+
+  subgraph cluster_capabilities {
+    label="4. 安全能力与 MCP";
+    labeljust=l;
+    style="rounded,filled";
+    color="#C7DCCB";
+    fillcolor="#F5FAF5";
+    fontcolor="#315B39";
+    fontsize=13;
+
+    fabric [label="Host-managed MCP stdio\nAgent allowlists · isolated processes", fillcolor="#E3F2E5"];
+    semgrep [label="Semgrep\nFrozen Static Rules"];
+    treesitter [label="Tree-sitter\nAST / CFG / DFG / Taint"];
+    fusion [label="Evidence Fusion\n主告警 · 复核候选 · 解析缺口", fillcolor="#EAF6EB"];
+    reports [label="Word · PDF · XLSX · HTML\nMarkdown · SARIF", fillcolor="#FFF2DC", color="#E3B763"];
+
+    { rank=same; fabric; semgrep; treesitter; fusion; reports; }
+    semgrep -> fusion;
+    treesitter -> fusion;
+    fabric -> fusion [label="MCP"];
+    fusion -> reports [label="Unified Report JSON"];
+  }
+
+  subgraph cluster_data {
+    label="5. 本地数据与外部情报";
+    labeljust=l;
+    style="rounded,filled";
+    color="#D7D4C4";
+    fillcolor="#FCFBF6";
+    fontcolor="#655D39";
+    fontsize=13;
+
+    local [label="Keychain / DPAPI · Encrypted State\nTask Store · Memory · Artifacts", fillcolor="#F2F6F9"];
+    catalog [label="Vulnerability Catalog\nCVE / GHSA / CWE / Component", fillcolor="#EDF5F1"];
+    external [label="NVD · GitHub Advisory\nOSV · CISA KEV", fillcolor="#FFF0DA", color="#E5B663"];
+
+    { rank=same; local; catalog; external; }
+    external -> catalog [label="Fetch · Normalize · Deduplicate", color="#D28B32", fontcolor="#9A651F"];
+    catalog -> local [label="local-first"];
+  }
+
+  tauri -> sidecar [label="IPC / Process", color="#326A9A", fontcolor="#326A9A"];
+  react -> transport [label="REST / SSE", color="#326A9A", fontcolor="#326A9A"];
+  transport -> supervisor [label="request / stream"];
+  aggregator -> fabric [label="tool call / interrupt"];
+  fusion -> local [label="evidence / artifacts"];
+  intelligence -> catalog [label="query / enrich"];
+
+  privacy [
+    label="PRIVACY BOUNDARY\nSecrets masked\nLocal-only by default",
+    shape=note,
+    fillcolor="#FCE8E8",
+    color="#CF7777",
+    fontcolor="#833C3C"
+  ];
+  release [
+    label="RELEASE BOUNDARY\nFormal: local archive\nPublic: 7-day trial only",
+    shape=note,
+    fillcolor="#F4ECFA",
+    color="#A886C2",
+    fontcolor="#5E3F75"
+  ];
+
+  { rank=same; privacy; release; }
+  api -> privacy [style=dashed, color="#CF7777", arrowhead=none, constraint=false];
+  trial -> release [style=dashed, color="#A886C2", arrowhead=none, constraint=false];
+}

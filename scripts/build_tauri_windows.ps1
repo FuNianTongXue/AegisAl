@@ -30,7 +30,7 @@ if (-not $OutputDir) {
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-    throw "SecFlow Windows Tauri packages must be built on Windows x86_64."
+    throw "神盾 Windows Tauri packages must be built on Windows x86_64."
 }
 if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) {
     throw "The build requires a Windows x86_64 host and x86_64 Python."
@@ -72,7 +72,7 @@ $BackendArguments = @(
     "--specpath", $BackendBuildDir, (Join-Path $RootDir "app\macos_backend.py")
 )
 & $Python @BackendArguments
-if ($LASTEXITCODE -ne 0) { throw "SecFlow backend packaging failed." }
+if ($LASTEXITCODE -ne 0) { throw "神盾 backend packaging failed." }
 Copy-Item -Path (Join-Path $BackendBuildDir "dist\secflow-backend\*") -Destination $BackendRuntimeDir -Recurse -Force
 $BundledTranslationManifest = Get-ChildItem -LiteralPath $BackendRuntimeDir -Filter "manifest.json" -File -Recurse |
     Where-Object { $_.FullName.Replace('\', '/') -like "*/app/resources/translation-models/opus-mt-en-zh-1.9/manifest.json" } |
@@ -88,10 +88,11 @@ $SemgrepArguments = @(
     "--specpath", $SemgrepBuildDir, (Join-Path $RootDir "app\semgrep_runner.py")
 )
 & $Python @SemgrepArguments
-if ($LASTEXITCODE -ne 0) { throw "SecFlow Semgrep packaging failed." }
+if ($LASTEXITCODE -ne 0) { throw "神盾 Semgrep packaging failed." }
 Copy-Item -Path (Join-Path $SemgrepBuildDir "dist\secflow-semgrep\*") -Destination (Join-Path $ResourcesDir "semgrep") -Recurse -Force
 Copy-Item -Path (Join-Path $RulesPath "*") -Destination (Join-Path $ResourcesDir "semgrep-rules") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $RootDir "licenses\THIRD-PARTY-NOTICES.txt") -Destination (Join-Path $ResourcesDir "licenses\THIRD-PARTY-NOTICES.txt") -Force
+Copy-Item -LiteralPath (Join-Path $RootDir "licenses\Beautiful-UI-MIT.txt") -Destination (Join-Path $ResourcesDir "licenses\Beautiful-UI-MIT.txt") -Force
 Copy-Item -LiteralPath (Join-Path $RootDir "licenses\NumPy-BSD-3-Clause.txt") -Destination (Join-Path $ResourcesDir "licenses\NumPy-BSD-3-Clause.txt") -Force
 Copy-Item -LiteralPath (Join-Path $RootDir "licenses\CTranslate2-MIT.txt") -Destination (Join-Path $ResourcesDir "licenses\CTranslate2-MIT.txt") -Force
 Copy-Item -LiteralPath (Join-Path $RootDir "licenses\SentencePiece-Apache-2.0.txt") -Destination (Join-Path $ResourcesDir "licenses\SentencePiece-Apache-2.0.txt") -Force
@@ -122,7 +123,7 @@ finally {
 $NsisDir = Join-Path $TauriSourceDir "target\$TargetTriple\release\bundle\nsis"
 $Installer = Get-ChildItem -LiteralPath $NsisDir -Filter "*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $Installer) { throw "No NSIS installer found in $NsisDir" }
-$FinalPath = Join-Path $OutputDir "SecFlow-v$Version-Windows-x86_64-$EditionLabel-Setup.exe"
+$FinalPath = Join-Path $OutputDir "神盾-AegisAl-v$Version-Windows-x86_64-$EditionLabel-Setup.exe"
 Copy-Item -LiteralPath $Installer.FullName -Destination $FinalPath -Force
 Get-FileHash -Algorithm SHA256 -LiteralPath $FinalPath
-Write-Host "SecFlow Windows package: $FinalPath"
+Write-Host "神盾 AegisAl Windows package: $FinalPath"

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{exit, Command};
 
 fn main() {
-    let executable = env::current_exe().expect("cannot resolve SecFlow launcher path");
+    let executable = env::current_exe().expect("cannot resolve 神盾 launcher path");
     let executable_name = executable
         .file_name()
         .and_then(|value| value.to_str())
@@ -29,6 +29,6 @@ fn main() {
         .args(env::args_os().skip(1))
         .env("PYTHONPATH", &backend_dir)
         .status()
-        .expect("failed to launch the bundled SecFlow Python runtime");
+        .expect("failed to launch the bundled 神盾 Python runtime");
     exit(status.code().unwrap_or(1));
 }

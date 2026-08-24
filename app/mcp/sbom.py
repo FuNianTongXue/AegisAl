@@ -40,7 +40,7 @@ _CHINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 sbom_excel_mcp = FastMCP(
-    "SecFlow SBOM Excel MCP",
+    "AegisAl SBOM Excel MCP",
     instructions=(
         "Consume canonical CycloneDX-compatible JSON with project-license evidence and optional vulnerability-match JSON, "
         "then create an auditable XLSX workbook without querying or mutating source facts."
@@ -68,7 +68,7 @@ def export_project_sbom_excel(
         raise ValueError("漏洞匹配 JSON 必须是对象")
     timestamp = str(generated_at or (sbom.get("metadata") or {}).get("timestamp") or now_iso())
     content = build_sbom_workbook(sbom, matching)
-    file_name = f"SecFlow-{_safe_file_part(project_name)}-SBOM.xlsx"
+    file_name = f"AegisAl-{_safe_file_part(project_name)}-SBOM.xlsx"
     reference = stage_output_artifact(
         output_dir,
         file_name=file_name,
@@ -89,9 +89,9 @@ def build_sbom_workbook(sbom: dict[str, Any], matching: dict[str, Any]) -> bytes
     workbook = xlsxwriter.Workbook(output, {"in_memory": True, "constant_memory": False})
     workbook.set_properties(
         {
-            "title": "SecFlow Project SBOM",
+            "title": "AegisAl Project SBOM",
             "subject": "CycloneDX-compatible software bill of materials, license identification, and vulnerability matching",
-            "author": "SecFlow SBOM Agent",
+            "author": "AegisAl SBOM Agent",
             "comments": "Generated from canonical JSON supplied to the SBOM Excel MCP.",
         }
     )
@@ -187,7 +187,7 @@ def _write_summary_sheet(
     sheet.hide_gridlines(2)
     sheet.set_column("A:A", 24)
     sheet.set_column("B:B", 58)
-    sheet.merge_range("A1:B2", "SecFlow 项目 SBOM", formats["title"])
+    sheet.merge_range("A1:B2", "神盾项目 SBOM", formats["title"])
     sheet.set_row(0, 26)
     metadata = sbom.get("metadata") if isinstance(sbom.get("metadata"), dict) else {}
     project = metadata.get("component") if isinstance(metadata.get("component"), dict) else {}
@@ -250,7 +250,7 @@ def _write_components_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, An
             cell_format = formats["warning"] if column in {4, 10} and str(values[10]).lower() != "true" else formats["body"]
             sheet.write(row, column, _safe_cell(value), cell_format)
     if components:
-        sheet.add_table(0, 0, len(components), len(headers) - 1, {"name": "SecFlowSBOMComponents", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]})
+        sheet.add_table(0, 0, len(components), len(headers) - 1, {"name": "AegisAlSBOMComponents", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]})
     sheet.freeze_panes(1, 0)
     sheet.autofilter(0, 0, max(1, len(components)), len(headers) - 1) if not components else None
 
@@ -295,7 +295,7 @@ def _write_licenses_sheet(
             0,
             len(licenses),
             len(headers) - 1,
-            {"name": "SecFlowProjectLicenses", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]},
+            {"name": "AegisAlProjectLicenses", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]},
         )
     sheet.freeze_panes(1, 0)
     sheet.autofilter(0, 0, max(1, len(licenses)), len(headers) - 1) if not licenses else None
@@ -343,7 +343,7 @@ def _write_vulnerabilities_sheet(
             else:
                 sheet.write(row, column, _safe_cell(value), cell_format)
     if vulnerabilities:
-        sheet.add_table(0, 0, len(vulnerabilities), len(headers) - 1, {"name": "SecFlowSBOMVulnerabilities", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]})
+        sheet.add_table(0, 0, len(vulnerabilities), len(headers) - 1, {"name": "AegisAlSBOMVulnerabilities", "style": "Table Style Medium 2", "columns": [{"header": value} for value in headers]})
     sheet.freeze_panes(1, 0)
     sheet.autofilter(0, 0, max(1, len(vulnerabilities)), len(headers) - 1) if not vulnerabilities else None
 
@@ -363,7 +363,7 @@ def _write_audit_sheet(workbook: xlsxwriter.Workbook, formats: dict[str, Any], s
         ("SBOM JSON SHA-256", hashlib.sha256(canonical.encode("utf-8")).hexdigest()),
         ("漏洞匹配 JSON SHA-256", hashlib.sha256(matching_json.encode("utf-8")).hexdigest() if matching else "未执行"),
         ("CycloneDX serialNumber", sbom.get("serialNumber") or ""),
-        ("生成工具", "SecFlow SBOM Excel MCP / export_project_sbom_excel"),
+        ("生成工具", "AegisAl SBOM Excel MCP / export_project_sbom_excel"),
         ("匹配覆盖状态", matching.get("coverage_status") or "not_requested"),
         ("匹配来源状态", json.dumps(source_status, ensure_ascii=False, sort_keys=True)),
         ("匹配错误", "\n".join(str(item) for item in matching.get("errors") or []) or "无"),
@@ -515,13 +515,13 @@ def _safe_file_part(value: Any) -> str:
 
 
 def _safe_excel_name(value: str) -> str:
-    name = Path(str(value or "SecFlow-project-SBOM.xlsx")).name
+    name = Path(str(value or "AegisAl-project-SBOM.xlsx")).name
     stem = _safe_file_part(Path(name).stem)
     return f"{stem}.xlsx"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the SecFlow SBOM Excel MCP server over stdio.")
+    parser = argparse.ArgumentParser(description="Run the AegisAl SBOM Excel MCP server over stdio.")
     parser.parse_args()
     sbom_excel_mcp.run(transport="stdio")
 

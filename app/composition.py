@@ -1,4 +1,4 @@
-"""Application composition built on the SecFlow plugin runtime.
+"""Application composition built on the AegisAl plugin runtime.
 
 This is the Python equivalent of the DeepSeek Harness composition tree: the
 host owns one managed root, while Agent, Skill, and MCP packages contribute
@@ -58,13 +58,13 @@ class SecFlowRuntime:
     def boot(self) -> "SecFlowRuntime":
         with self._lock:
             if self._closed:
-                raise RuntimeError("SecFlow plugin runtime is closed")
+                raise RuntimeError("AegisAl plugin runtime is closed")
             if self._booted:
                 return self
             self.manager.discover(
                 PluginManifest(
                     plugin_id=MCP_PLUGIN_ID,
-                    version="1.3.3",
+                    version="1.3.4",
                     trust=TrustLevel.BUILTIN,
                     config={
                         "local_transport": "stdio",
@@ -81,7 +81,7 @@ class SecFlowRuntime:
             self.manager.discover(
                 PluginManifest(
                     plugin_id=BUILTIN_SKILLS_PLUGIN,
-                    version="1.3.3",
+                    version="1.3.4",
                     trust=TrustLevel.BUILTIN,
                     config={
                         "root": "app/resources/skills",
@@ -93,7 +93,7 @@ class SecFlowRuntime:
             self.manager.discover(
                 PluginManifest(
                     plugin_id=BUILTIN_AGENTS_PLUGIN,
-                    version="1.3.3",
+                    version="1.3.4",
                     trust=TrustLevel.BUILTIN,
                     dependencies=(
                         PluginDependency(BUILTIN_SKILLS_PLUGIN, ">=1.3,<2"),

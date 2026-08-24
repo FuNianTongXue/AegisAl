@@ -31,9 +31,9 @@ class WordReportOutput(BaseModel):
 
 
 report_word_mcp = FastMCP(
-    "SecFlow Word MCP",
+    "AegisAl Word MCP",
     instructions=(
-        "Render verified SecFlow report JSON into a real DOCX using the standard_business_brief "
+        "Render verified AegisAl report JSON into a real DOCX using the standard_business_brief "
         "preset and memo_masthead header. Preserve headings, real lists, explicit table geometry, "
         "evidence line breaks, remediation, structured diagram summaries, and audit hashes."
     ),
@@ -42,7 +42,7 @@ report_word_mcp = FastMCP(
 
 @report_word_mcp.tool(
     name="render_word_report",
-    description="Render verified SecFlow report JSON as a Microsoft Word DOCX artifact.",
+    description="Render verified AegisAl report JSON as a Microsoft Word DOCX artifact.",
     structured_output=True,
 )
 def render_word_report(
@@ -63,7 +63,7 @@ def render_word_report(
     artifacts = [
         stage_output_artifact(
             output_dir,
-            file_name="SecFlow-security-report.docx",
+            file_name="AegisAl-security-report.docx",
             payload=payload,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
@@ -154,24 +154,24 @@ def _build_docx(document: dict[str, Any], mermaid: dict[str, Any]) -> bytes:
             styles[name], heading_font, east_asia_heading_font, size, RGBColor, qn,
             color=color, bold=True, before=before, after=after, keep_with_next=True,
         )
-    if "SecFlow Code" not in styles:
-        code_style = styles.add_style("SecFlow Code", WD_STYLE_TYPE.PARAGRAPH)
+    if "AegisAl Code" not in styles:
+        code_style = styles.add_style("AegisAl Code", WD_STYLE_TYPE.PARAGRAPH)
     else:
-        code_style = styles["SecFlow Code"]
+        code_style = styles["AegisAl Code"]
     _configure_style(code_style, code_font, east_asia_font, 8, RGBColor, qn, color="DCE6FF", after=0)
 
     header = section.header.paragraphs[0]
     header.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    header_run = header.add_run("SECFLOW  /  安全扫描报告" if chinese_report else "SECFLOW  /  SECURITY SCAN REPORT")
+    header_run = header.add_run("神盾  /  安全扫描报告" if chinese_report else "AEGISAI  /  SECURITY SCAN REPORT")
     _set_run_font(header_run, body_font, east_asia_font, qn, size=8, color=RGBColor(98, 112, 137), bold=True)
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    footer_run = footer.add_run("SecFlow  |  ")
+    footer_run = footer.add_run("AegisAl  |  ")
     _set_run_font(footer_run, body_font, east_asia_font, qn, size=8, color=RGBColor(114, 128, 150))
     _append_page_field(footer, OxmlElement, qn)
 
     title = output.add_paragraph(style="Title")
-    title.add_run(str(report.get("project_name") or "SecFlow"))
+    title.add_run(str(report.get("project_name") or "AegisAl"))
     subtitle = output.add_paragraph(style="Subtitle")
     subtitle.add_run(str(report.get("title") or "安全扫描报告"))
     generated_at = _report_china_time(document.get("generated_at") or "-")
@@ -227,10 +227,10 @@ def _build_docx(document: dict[str, Any], mermaid: dict[str, Any]) -> bytes:
             )
 
     core = output.core_properties
-    core.title = str(report.get("title") or "SecFlow 安全扫描报告")
-    core.author = "SecFlow"
+    core.title = str(report.get("title") or "神盾安全扫描报告")
+    core.author = "AegisAl"
     core.subject = "Verified security scan report"
-    core.keywords = "SecFlow, security, scan, report, MCP"
+    core.keywords = "AegisAl, security, scan, report, MCP"
     _apply_document_run_fonts(
         output,
         qn,
@@ -577,7 +577,7 @@ def _add_code_block(
     cell = table.cell(0, 0)
     _shade_cell(cell, OxmlElement, qn, "111936")
     paragraph = cell.paragraphs[0]
-    paragraph.style = styles["SecFlow Code"]
+    paragraph.style = styles["AegisAl Code"]
     for offset, line in enumerate(lines):
         if offset:
             paragraph.add_run().add_break()
@@ -666,7 +666,7 @@ def _apply_document_run_fonts(
     for container in containers:
         for paragraph in paragraphs(container):
             style_name = str(getattr(paragraph.style, "name", "") or "")
-            if style_name == "SecFlow Code":
+            if style_name == "AegisAl Code":
                 latin = code_font
             elif style_name in {"Title", "Subtitle", "Heading 1", "Heading 2", "Heading 3"}:
                 latin = heading_font

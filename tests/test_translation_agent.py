@@ -7,7 +7,11 @@ import pytest
 
 from app.agent.translation_agent import TranslationAgent, TranslationAgentResult
 from app.agent.assistant_service import translate_assistant_answer
-from app.agent.translation_policy import translation_audit_is_publishable
+from app.agent.translation_policy import (
+    partial_catalog_translation_attestation_is_publishable,
+    partial_catalog_translation_is_publishable,
+    translation_audit_is_publishable,
+)
 from app.langgraph.assistant_graph import KnowledgeSecurityGraph
 from app.langgraph.multi_agent_graph import AssistantMultiAgentSupervisor
 
@@ -402,6 +406,214 @@ def _partial_translation_result() -> TranslationAgentResult:
             "output_sha256": "b" * 64,
         },
     )
+
+
+def _verified_partial_translation_result(payload: dict) -> TranslationAgentResult:
+    return TranslationAgentResult(
+        payload=payload,
+        audit={
+            "server": "AegisAl Translation MCP",
+            "tool": "translate_json_payload",
+            "transport": "stdio",
+            "status": "partial",
+            "translation_status": "fallback",
+            "target_language": "zh-Hans",
+            "candidate_fields": 407,
+            "translated_fields": 135,
+            "unresolved_fields": 198,
+            "batch_count": 253,
+            "model_used": False,
+            "offline_model_used": True,
+            "offline": True,
+            "network_used": False,
+            "requires_api_key": False,
+            "provider_calls": 0,
+            "billable_tokens": 0,
+            "token_usage": 0,
+            "resource_verified": True,
+            "offline_contract_valid": True,
+            "runtime_contract_valid": True,
+            "input_sha256": "a" * 64,
+            "output_sha256": "b" * 64,
+        },
+    )
+
+
+def _partial_catalog_records(count: int = 200, ready: int = 23) -> list[dict]:
+    return [
+        {
+            "id": f"CVE-2026-{80_000 + index}",
+            "title": "已核验漏洞标题" if index < ready else "Verified vulnerability title",
+            "summary": "已核验中文漏洞描述。" if index < ready else "Verified English vulnerability detail.",
+            "content_language": "zh-Hans" if index < ready else "en",
+            "translation_status": "translated" if index < ready else "pending",
+            "severity": "HIGH",
+        }
+        for index in range(count)
+    ]
+
+
+def test_assistant_graph_publishes_contract_valid_partial_without_dropping_catalog_records() -> None:
+    records = _partial_catalog_records()
+    source = {
+        "mode": "component_vulnerability_catalog",
+        "summary": "已核验组件漏洞目录。",
+        "fields": {"漏洞数量": "200"},
+        "records": records,
+        "total": 200,
+        "chart_data": {"severity_ring": [{"id": "high", "value": 200}]},
+        "trace": [{"node": "catalog", "message": "已核验 200 条记录。"}],
+    }
+    partial_payload = {
+        **source,
+        "summary": "组件漏洞目录已完成部分离线翻译。",
+        # Reproduce a defensive edge case where a partial translation payload
+        # returns fewer rows than the already verified catalog projection.
+        "records": records[:23],
+    }
+    state = {
+        "answer": source,
+        "response_language": "zh-Hans",
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "trace": list(source["trace"]),
+    }
+    with patch(
+        "app.langgraph.assistant_graph.translation_agent.translate_json",
+        return_value=_verified_partial_translation_result(partial_payload),
+    ):
+        result = KnowledgeSecurityGraph._translate_answer(object(), state)
+
+    assert result["answer"]["summary"] == "组件漏洞目录已完成部分离线翻译。"
+    assert len(result["answer"]["records"]) == 200
+    assert result["answer"]["records"][0]["title"] == "已核验漏洞标题"
+    assert result["answer"]["records"][23] == {
+        "id": "CVE-2026-80023",
+        "severity": "HIGH",
+        "title": "中文标题暂不可用",
+        "summary": "中文翻译暂不可用，请稍后重试。",
+        "content_language": "zh-Hans",
+        "translation_status": "pending",
+    }
+    assert result["answer"]["translation"]["status"] == "partial"
+    assert result["answer"]["translation"]["translation_status"] == "fallback"
+    assert result["answer"]["translation"]["publication_status"] == "partial"
+    assert result["answer"]["translation"]["ready_records"] == 23
+    assert result["answer"]["translation"]["pending_records"] == 177
+    assert result["answer"]["translation"]["render_stage"] == "sanitized-partial-catalog"
+    assert partial_catalog_translation_is_publishable(result["answer"], "zh-Hans")
+    serialized = json.dumps(result["answer"], ensure_ascii=False, sort_keys=True)
+    assert "Verified vulnerability title" not in serialized
+    assert "Verified English vulnerability detail" not in serialized
+    assert "title_original" not in serialized
+    assert "summary_original" not in serialized
+    assert "离线译文暂不可用" not in result["answer"]["summary"]
+
+
+def test_unlocalized_partial_catalog_runs_main_translation_then_bypasses_outer_agent() -> None:
+    records = _partial_catalog_records()
+    outcome = {
+        "status": "interrupted",
+        "thread_id": "component-catalog-partial",
+        "response_language": "zh-Hans",
+        "interrupt": {
+            "kind": "component_excel_generation_confirmation",
+            "thread_id": "component-catalog-partial",
+            "question": "组件漏洞清单已查询完成，是否生成 Excel？",
+        },
+        "summary": "已核验组件漏洞目录，共 200 条漏洞。",
+        "fields": {"漏洞数量": "200"},
+        "records": records,
+        "total": 200,
+        "chart_data": {},
+        "artifacts": [],
+        "catalog_translation": {
+            "status": "partial",
+            "target_language": "zh-Hans",
+            "storage_stage": "before-persist",
+            "record_count": 200,
+            "ready_records": 23,
+            "pending_records": 177,
+        },
+        "trace": [],
+    }
+    graph = KnowledgeSecurityGraph()
+    state = {
+        "intent": "component_vulnerability_catalog",
+        "question": "本月组件漏洞清单",
+        "top_k": 5,
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "response_language": "zh-Hans",
+        "trace": [],
+    }
+    with (
+        patch.object(graph._component_catalog_subgraph, "start", return_value=outcome),
+        patch(
+            "app.langgraph.assistant_graph.translation_agent.translate_json",
+            return_value=_verified_partial_translation_result(
+                {
+                    **outcome,
+                    "mode": "component_vulnerability_catalog",
+                    "summary": "组件漏洞目录已完成部分离线翻译。",
+                    "records": records[:23],
+                }
+            ),
+        ) as translate,
+    ):
+        result = graph._run_component_catalog_subgraph(state)
+        if not graph._can_use_catalog_translation(result):
+            graph._translate_answer(result)
+
+    answer = result["answer"]
+    translate.assert_called_once()
+    assert len(answer["records"]) == 200
+    assert answer["translation"]["status"] == "partial"
+    assert answer["translation"]["translation_status"] == "fallback"
+    assert answer["translation"]["ready_records"] == 23
+    assert answer["translation"]["pending_records"] == 177
+    assert partial_catalog_translation_is_publishable(answer, "zh-Hans")
+    assert not partial_catalog_translation_attestation_is_publishable(answer, "zh-Hans")
+    assert all(record["content_language"] == "zh-Hans" for record in answer["records"])
+    assert "Verified English vulnerability detail" not in repr(answer)
+
+    supervisor_state = {"answer": answer, "response_language": "zh-Hans"}
+    assert AssistantMultiAgentSupervisor._answer_uses_stored_translation(supervisor_state)
+
+
+def test_assistant_graph_clears_catalog_records_when_translation_is_unavailable() -> None:
+    source = {
+        "mode": "component_vulnerability_catalog",
+        "summary": "已核验组件漏洞目录。",
+        "fields": {"漏洞数量": "1"},
+        "records": _partial_catalog_records(count=1, ready=0),
+        "trace": [],
+    }
+    unavailable = _verified_partial_translation_result(source)
+    unavailable.audit.update(
+        {
+            "status": "failed",
+            "translation_status": "unavailable",
+        }
+    )
+    state = {
+        "answer": source,
+        "response_language": "zh-Hans",
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "trace": [],
+    }
+
+    with patch(
+        "app.langgraph.assistant_graph.translation_agent.translate_json",
+        return_value=unavailable,
+    ):
+        result = KnowledgeSecurityGraph._translate_answer(object(), state)
+
+    assert result["answer"]["records"] == []
+    assert result["answer"]["summary"] == "离线译文暂不可用，请稍后重试。"
+    assert result["answer"]["translation"]["translation_status"] == "unavailable"
+    assert result["answer"]["translation"]["publication_status"] == "blocked"
 
 
 def test_assistant_graph_does_not_publish_partial_translation_payload() -> None:

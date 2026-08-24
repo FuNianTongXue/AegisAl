@@ -45,9 +45,9 @@ class MermaidReportOutput(BaseModel):
 
 
 report_mermaid_mcp = FastMCP(
-    "SecFlow Mermaid MCP",
+    "AegisAl Mermaid MCP",
     instructions=(
-        "Build deterministic Mermaid diagrams only from verified SecFlow scan JSON and report-chart "
+        "Build deterministic Mermaid diagrams only from verified AegisAl scan JSON and report-chart "
         "data. Do not add findings, links, severities, or relationships that are absent from the input."
     ),
 )
@@ -55,7 +55,7 @@ report_mermaid_mcp = FastMCP(
 
 @report_mermaid_mcp.tool(
     name="build_report_mermaid",
-    description="Build auditable Mermaid flow and severity diagrams for a SecFlow scan report.",
+    description="Build auditable Mermaid flow and severity diagrams for an AegisAl scan report.",
     structured_output=True,
 )
 def build_report_mermaid(

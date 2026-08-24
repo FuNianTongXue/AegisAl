@@ -24,9 +24,9 @@ class SarifReportOutput(BaseModel):
 
 
 report_sarif_mcp = FastMCP(
-    "SecFlow SARIF MCP",
+    "AegisAl SARIF MCP",
     instructions=(
-        "Convert verified SecFlow scan-result JSON into SARIF 2.1.0. Preserve every supplied taint "
+        "Convert verified AegisAl scan-result JSON into SARIF 2.1.0. Preserve every supplied taint "
         "path node in codeFlows/threadFlows/locations, including order, role, file, line, label, and "
         "snippet. Never invent intermediate taint steps."
     ),
@@ -79,7 +79,7 @@ def build_scan_sarif(report_json: dict[str, Any]) -> SarifReportOutput:
         if locations:
             result["codeFlows"] = [
                 {
-                    "message": {"text": "SecFlow taint path"},
+                    "message": {"text": "AegisAl taint path"},
                     "threadFlows": [
                         {
                             "id": f"taint-{finding_index + 1}",
@@ -98,7 +98,7 @@ def build_scan_sarif(report_json: dict[str, Any]) -> SarifReportOutput:
             {
                 "tool": {
                     "driver": {
-                        "name": "SecFlow",
+                        "name": "AegisAl",
                         "informationUri": "https://github.com/FuNianTongXue/secflow-knowledge-security-assistant",
                         "semanticVersion": "1.0.0",
                         "rules": list(rules.values()),
@@ -106,7 +106,7 @@ def build_scan_sarif(report_json: dict[str, Any]) -> SarifReportOutput:
                 },
                 "automationDetails": {
                     "id": f"secflow/{input_sha256[:16] or 'scan'}",
-                    "description": {"text": "Verified SecFlow code scan"},
+                    "description": {"text": "Verified AegisAl code scan"},
                 },
                 "results": results,
                 "properties": {
@@ -288,7 +288,7 @@ def _sarif_level(severity: str) -> str:
 
 def _rule_name(rule_id: str) -> str:
     clean = "".join(character if character.isalnum() else " " for character in rule_id)
-    return "".join(part.capitalize() for part in clean.split())[:120] or "SecFlowFinding"
+    return "".join(part.capitalize() for part in clean.split())[:120] or "AegisAlFinding"
 
 
 def _positive_int(value: Any) -> int | None:

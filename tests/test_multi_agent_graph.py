@@ -6,14 +6,21 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from app.langgraph.multi_agent_graph import AssistantMultiAgentSupervisor
-from app.agent.translation_policy import issue_stored_translation_attestation
+from app.agent.translation_policy import (
+    host_localization_attestation_is_publishable,
+    issue_host_localization_attestation,
+    issue_stored_translation_attestation,
+    partial_catalog_translation_is_publishable,
+    partial_catalog_translation_status,
+)
 from app.memory import LongTermMemoryService
 
 
 class FakeRuntimeGraph:
-    def __init__(self, *, stored_translation: bool = False) -> None:
+    def __init__(self, *, stored_translation: bool = False, host_localization: bool = False) -> None:
         self.calls: list[dict] = []
         self.stored_translation = stored_translation
+        self.host_localization = host_localization
 
     def invoke(self, question, top_k, **kwargs):
         self.calls.append({"question": question, "top_k": top_k, **kwargs})
@@ -31,6 +38,13 @@ class FakeRuntimeGraph:
                 target_language="zh-Hans",
                 record_count=1,
                 source="test-catalog",
+            )
+        elif self.host_localization:
+            answer["mode"] = "component_vulnerability_catalog"
+            answer["translation"] = issue_host_localization_attestation(
+                answer,
+                target_language="zh-Hans",
+                source="component-catalog-preview",
             )
         return answer
 
@@ -172,6 +186,112 @@ class MultiAgentSupervisorTests(unittest.TestCase):
             ["intelligence_agent", "result_aggregator_agent"],
         )
         self.assertEqual(answer["translation"]["translation_status"], "stored")
+
+    def test_host_localized_catalog_preview_bypasses_outer_translation_agent(self) -> None:
+        graph = FakeRuntimeGraph(host_localization=True)
+        answer = self.invoke(intent="component_vulnerability_catalog", graph=graph)
+
+        orchestration = answer["orchestration"]
+        self.assertNotIn("translation_agent", orchestration["visited_agents"])
+        self.assertEqual(
+            [item["target_agent"] for item in orchestration["handoffs"]],
+            ["component_agent", "result_aggregator_agent"],
+        )
+        self.assertEqual(answer["translation"]["translation_status"], "host-localized")
+
+    def test_sanitized_partial_catalog_bypasses_outer_translation_agent(self) -> None:
+        records = [
+            {
+                "id": "CVE-2026-8101",
+                "severity": "HIGH",
+                "title": "已翻译漏洞标题",
+                "summary": "已翻译漏洞描述。",
+                "content_language": "zh-Hans",
+                "translation_status": "translated",
+            },
+            {
+                "id": "CVE-2026-8102",
+                "severity": "MEDIUM",
+                "title": "中文标题暂不可用",
+                "summary": "中文翻译暂不可用，请稍后重试。",
+                "content_language": "zh-Hans",
+                "translation_status": "pending",
+            },
+        ]
+        audit = {
+            "status": "partial",
+            "translation_status": "fallback",
+            "target_language": "zh-Hans",
+            "candidate_fields": 4,
+            "translated_fields": 2,
+            "unresolved_fields": 2,
+            "offline_contract_valid": True,
+            "runtime_contract_valid": True,
+            "transport": "stdio",
+            "offline": True,
+            "network_used": False,
+            "requires_api_key": False,
+            "model_used": False,
+            "provider_calls": 0,
+            "billable_tokens": 0,
+            "token_usage": 0,
+        }
+        answer = {
+            "mode": "component_vulnerability_catalog",
+            "summary": "组件漏洞目录已完成部分离线翻译。",
+            "fields": {"漏洞数量": "2"},
+            "records": records,
+            "trace": [],
+        }
+        answer["translation"] = partial_catalog_translation_status(
+            audit,
+            target_language="zh-Hans",
+            record_count=2,
+            ready_records=1,
+        )
+        supervisor = AssistantMultiAgentSupervisor.__new__(AssistantMultiAgentSupervisor)
+        supervisor._result_aggregator_agent = Mock()
+        supervisor._result_aggregator_agent.aggregate.side_effect = lambda value: dict(value)
+        state = {
+            "answer": answer,
+            "response_language": "zh-Hans",
+            "current_agent": "component_agent",
+            "visited_agents": ["component_agent"],
+            "handoffs": [],
+            "trace": [],
+        }
+
+        result = supervisor._result_aggregator(state)
+
+        aggregated = result["answer"]
+        self.assertTrue(partial_catalog_translation_is_publishable(aggregated, "zh-Hans"))
+        self.assertTrue(AssistantMultiAgentSupervisor._answer_uses_stored_translation(result))
+        self.assertNotIn(
+            "translation_agent",
+            [item["target_agent"] for item in result["handoffs"]],
+        )
+        self.assertEqual(len(aggregated["records"]), 2)
+        self.assertEqual(aggregated["translation"]["publication_status"], "partial")
+
+    def test_user_table_edits_do_not_invalidate_the_original_translation_proof(self) -> None:
+        answer = {
+            "mode": "component_vulnerability_catalog",
+            "summary": "已返回翻译后的漏洞记录。",
+            "tables": [{"id": "translated-findings", "rows": [{"id": "CVE-1", "title": "原译文"}]}],
+        }
+        answer["translation"] = issue_host_localization_attestation(
+            answer,
+            target_language="zh-Hans",
+            source="component-catalog-preview",
+        )
+        answer["session_id"] = "translated-session"
+        answer["exchange_id"] = "msg-42"
+        answer["structured_data_edits"] = [{
+            "id": "translated-findings",
+            "rows": [{"id": "CVE-1", "title": "用户修订译文"}],
+        }]
+
+        self.assertTrue(host_localization_attestation_is_publishable(answer, "zh-Hans"))
 
     def test_report_agent_forces_report_subgraph_intent(self) -> None:
         graph = FakeRuntimeGraph()

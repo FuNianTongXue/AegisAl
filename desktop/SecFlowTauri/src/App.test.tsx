@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -71,7 +71,7 @@ describe("App navigation theme", () => {
     expect(screen.queryByRole("button", { name: "运行状态" })).not.toBeInTheDocument();
   });
 
-  it("shows execution progress only in the inspector and restores it after navigation", () => {
+  it("shows execution progress in the main thinking trace and keeps the inspector focused on runtime status", () => {
     vi.spyOn(api, "dashboard").mockResolvedValue({ records: [], stats: {}, catalog_status: "ready" });
     useAppStore.setState({
       turns: [{
@@ -85,11 +85,16 @@ describe("App navigation theme", () => {
     });
 
     const { container } = render(<App />);
-    expect(screen.queryByRole("button", { name: /思考过程/ })).not.toBeInTheDocument();
-    expect(screen.queryByText("正在规划报告任务")).not.toBeInTheDocument();
+    const executionSummary = screen.getByRole("button", { name: /正在思考 Supervisor 规划报告任务/ });
+    expect(executionSummary).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(executionSummary);
+    expect(screen.getByRole("list", { name: "执行过程" })).toBeInTheDocument();
+    expect(screen.getByText("正在规划报告任务")).toBeInTheDocument();
 
     act(() => useAppStore.getState().set({ view: "assistant", inspectorOpen: true }));
     expect(screen.getByText("正在规划报告任务")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "执行过程" })).toBeInTheDocument();
+    expect(within(container.querySelector(".inspector-panel") as HTMLElement).queryByRole("list", { name: "执行过程" })).not.toBeInTheDocument();
 
     act(() => {
       useAppStore.getState().updateTurn("assistant-running", {
@@ -98,16 +103,16 @@ describe("App navigation theme", () => {
         result: { answer: "分析完成", orchestration: { agentic: true } },
       });
     });
-    expect(screen.queryByRole("button", { name: /思考过程/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "执行过程" })).toBeInTheDocument();
     expect(screen.getByText("规划完成")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "漏洞情报" }));
     expect(container.querySelector(".assistant-workspace")).toHaveAttribute("aria-hidden", "true");
-    expect(screen.queryByText("规划完成")).not.toBeInTheDocument();
 
     act(() => useAppStore.getState().set({ view: "assistant", inspectorOpen: true }));
     expect(container.querySelector(".assistant-workspace")).toHaveAttribute("aria-hidden", "false");
-    expect(screen.queryByRole("button", { name: /思考过程/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "执行过程" })).toBeInTheDocument();
+    expect(within(container.querySelector(".inspector-panel") as HTMLElement).queryByRole("list", { name: "执行过程" })).not.toBeInTheDocument();
     expect(screen.getByText("规划完成")).toBeInTheDocument();
   });
 
@@ -163,12 +168,66 @@ describe("App navigation theme", () => {
     fireEvent.click(screen.getByText("恢复动作任务"));
 
     expect((await screen.findAllByText("已完成")).length).toBeGreaterThan(0);
-    expect(screen.queryByText("查询动作已恢复")).not.toBeInTheDocument();
+    expect(screen.getByText("查询动作已恢复")).toBeInTheDocument();
     act(() => useAppStore.getState().set({ inspectorOpen: true }));
     expect(screen.getByText("查询动作已恢复")).toBeInTheDocument();
     const restored = useAppStore.getState().turns.find((turn) => turn.role === "assistant");
     expect(restored?.result?.answer).toBe("已完成");
     expect(restored?.trace?.[0]?.tool_name).toBe("query_component_vulnerability_catalog");
+  });
+
+  it("keeps completed thinking traces collapsed when switching historical conversations", async () => {
+    const conversations = [
+      {
+        id: "conversation-first",
+        session_id: "session-first",
+        title: "第一段历史任务",
+        updated_at: "2026-08-06T08:00:00Z",
+      },
+      {
+        id: "conversation-second",
+        session_id: "session-second",
+        title: "第二段历史任务",
+        updated_at: "2026-08-06T09:00:00Z",
+      },
+    ];
+    useAppStore.setState({ conversations });
+    vi.spyOn(api, "conversation").mockImplementation(async (sessionId) => {
+      const first = sessionId === "session-first";
+      const conversation = first ? conversations[0] : conversations[1];
+      return {
+        ...conversation,
+        exchanges: [{
+          id: "shared-exchange-id",
+          question: first ? "打开第一段历史" : "打开第二段历史",
+          answer: first ? "第一段历史回答" : "第二段历史回答",
+          answer_payload: {
+            answer: first ? "第一段历史回答" : "第二段历史回答",
+            trace: [{
+              node: first ? "first_history_step" : "second_history_step",
+              status: "completed",
+              message: first ? "第一段历史执行完成" : "第二段历史执行完成",
+            }],
+          },
+        }],
+      };
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByText("第一段历史任务"));
+
+    const firstThinking = await screen.findByRole("button", { name: /思考完成/ });
+    expect(firstThinking).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("第一段历史执行完成").closest(".thinking-state-body")).toHaveAttribute("aria-hidden", "true");
+    fireEvent.click(firstThinking);
+    expect(firstThinking).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByText("第二段历史任务"));
+
+    expect(await screen.findByText("第二段历史回答")).toBeInTheDocument();
+    const secondThinking = screen.getByRole("button", { name: /思考完成/ });
+    expect(secondThinking).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("第二段历史执行完成").closest(".thinking-state-body")).toHaveAttribute("aria-hidden", "true");
   });
 
   it("updates the document language when the persisted locale changes", () => {
@@ -191,7 +250,7 @@ describe("App navigation theme", () => {
     useAppStore.setState({ initialSetupRequired: true, bootstrapReady: true });
     const { container } = render(<App />);
 
-    expect(screen.getByRole("heading", { name: "欢迎使用安全智脑" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "欢迎使用神盾" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "配置个人信息" })).toBeInTheDocument();
     expect(container.querySelector(".app-shell")).not.toBeInTheDocument();
   });

@@ -68,7 +68,7 @@ def _stored_translation_audit(
     traditional: bool = False,
 ) -> dict:
     simplified_agent = {
-        "server": "SecFlow Translation MCP",
+        "server": "AegisAl Translation MCP",
         "tool": "translate_json_payload",
         "transport": "stdio",
         "agent_status": "completed",
@@ -169,6 +169,22 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         )
         self.assertEqual(scheduler.kwargs["args"][2], 12.0)
 
+    def test_scheduler_does_not_start_full_translation_backfill_by_default(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("app.intelligence.Thread") as thread_type,
+            patch.object(self.service._catalog, "encryption_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "metrics_migration_pending", return_value=False),
+            patch.object(self.service._catalog, "translation_migration_pending", return_value=True),
+            patch.object(self.service._catalog, "metadata", return_value="true"),
+        ):
+            os.environ.pop("SECFLOW_ENABLE_FULL_TRANSLATION_BACKFILL", None)
+            self.service.start_batch_scheduler()
+
+        thread_names = [call.kwargs.get("name") for call in thread_type.call_args_list]
+        self.assertNotIn("secflow-catalog-encryption-migration", thread_names)
+        self.assertIn("secflow-vulnerability-translation-priority", thread_names)
+
     def test_tauri_data_directory_reuses_more_complete_legacy_catalog(self) -> None:
         current_dir = Path(self.temp_dir.name) / "tauri"
         legacy_dir = Path(self.temp_dir.name) / "legacy"
@@ -212,7 +228,7 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual([source["name"] for source in sources], ["NVD 漏洞数据库", "GitHub 安全公告", "OSV 开源漏洞库"])
         self.assertTrue(all("咨询" not in source["name"] for source in sources))
 
-    def test_public_projection_hides_unverified_partial_chinese_translation(self) -> None:
+    def test_public_projection_uses_source_facts_while_translation_is_pending(self) -> None:
         record = {
             "id": "CVE-2026-76008",
             "title_original": "Remote URI parameter parsing vulnerability",
@@ -231,9 +247,11 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         public = _public_records([record], "zh-Hans")[0]
 
         self.assertEqual(public["id"], "CVE-2026-76008")
-        self.assertEqual(public["title"], "")
-        self.assertEqual(public["summary"], "")
-        self.assertEqual(public["content_language"], "unknown")
+        self.assertEqual(public["title"], record["title_original"])
+        self.assertEqual(public["summary"], record["summary_original"])
+        self.assertEqual(public["title_original"], record["title_original"])
+        self.assertEqual(public["summary_original"], record["summary_original"])
+        self.assertEqual(public["content_language"], "en")
         self.assertEqual(public["translation_status"], "pending")
         self.assertNotIn("title_zh", public)
         self.assertNotIn("summary_zh", public)
@@ -364,8 +382,99 @@ class RealtimeIntelligenceTests(unittest.TestCase):
         self.assertEqual(dashboard["translation_progress"], 50)
         self.assertEqual(dashboard["translation_status"], "partial")
         self.assertEqual(dashboard["recent_records"][0]["summary"], "遠程攻擊者可繞過驗證。")
-        self.assertEqual(dashboard["recent_records"][1]["summary"], "")
+        self.assertEqual(
+            dashboard["recent_records"][1]["summary"],
+            "A remote attacker can trigger a parsing issue.",
+        )
         self.assertEqual(dashboard["recent_records"][1]["translation_status"], "pending")
+
+    def test_dashboard_does_not_translate_or_requery_within_cache_window(self) -> None:
+        self.service._catalog.upsert(
+            [
+                {
+                    "id": "CVE-2026-76020",
+                    "title": "Remote parsing vulnerability",
+                    "summary": "A remote attacker can trigger a parsing issue.",
+                    "severity": "HIGH",
+                    "aliases": ["CVE-2026-76020"],
+                    "components": [],
+                    "references": ["https://example.test/CVE-2026-76020"],
+                    "published_at": "2026-08-20T00:00:00+00:00",
+                    "updated_at": "2026-08-21T00:00:00+00:00",
+                }
+            ],
+            translate=False,
+        )
+
+        with (
+            patch("app.intelligence.translate_records_for_storage", side_effect=AssertionError("must not translate")),
+            patch.object(self.service._catalog, "snapshot", wraps=self.service._catalog.snapshot) as snapshot,
+        ):
+            first = self.service.dashboard(response_language="zh-Hans")
+            second = self.service.dashboard(response_language="zh-Hans")
+
+        self.assertEqual(snapshot.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first["recent_records"][0]["title"], "Remote parsing vulnerability")
+        self.assertEqual(first["recent_records"][0]["translation_status"], "pending")
+
+    def test_dashboard_queries_use_recent_and_update_day_indexes(self) -> None:
+        with self.service._catalog._connect() as connection:  # noqa: SLF001 - verify the catalog query plan.
+            recent_plan = " ".join(
+                str(row["detail"])
+                for row in connection.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT record_json FROM vulnerabilities INDEXED BY idx_vulnerabilities_recent
+                    WHERE severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')
+                    ORDER BY record_date DESC, updated_at DESC LIMIT 5
+                    """
+                ).fetchall()
+            )
+            trend_plan = " ".join(
+                str(row["detail"])
+                for row in connection.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT substr(updated_at, 1, 10), COUNT(*) FROM vulnerabilities
+                    WHERE substr(updated_at, 1, 10) >= ? AND substr(updated_at, 1, 10) <= ?
+                    GROUP BY substr(updated_at, 1, 10)
+                    """,
+                    ("2026-08-01", "2026-08-22"),
+                ).fetchall()
+            )
+
+        self.assertIn("idx_vulnerabilities_recent", recent_plan)
+        self.assertIn("idx_vulnerabilities_update_day", trend_plan)
+
+    def test_exact_identifier_query_returns_source_facts_without_synchronous_translation(self) -> None:
+        self.service._catalog.upsert(
+            [
+                {
+                    "id": "CVE-2026-76021",
+                    "title": "Remote validation vulnerability",
+                    "summary": "A remote attacker can bypass validation.",
+                    "severity": "HIGH",
+                    "cvss_score": 7.5,
+                    "aliases": ["CVE-2026-76021"],
+                    "components": [{"name": "demo", "ecosystem": "npm", "affected": ["< 2.0.0"], "fixed": ["2.0.0"]}],
+                    "references": ["https://example.test/CVE-2026-76021"],
+                    "published_at": "2026-08-20T00:00:00+00:00",
+                    "updated_at": "2026-08-21T00:00:00+00:00",
+                }
+            ],
+            translate=False,
+        )
+
+        with (
+            patch("app.intelligence.translate_records_for_storage", side_effect=AssertionError("must not translate")),
+            patch.object(self.service, "_query_source", side_effect=AssertionError("must not call upstream")),
+        ):
+            result = self.service.query("CVE-2026-76021", response_language="zh-Hans")
+
+        self.assertEqual(result["persistence"], "local-catalog")
+        self.assertEqual(result["records"][0]["title"], "Remote validation vulnerability")
+        self.assertEqual(result["records"][0]["translation_status"], "pending")
 
     def test_multi_source_query_persists_catalog_record_for_translation_reuse(self) -> None:
         nvd = {

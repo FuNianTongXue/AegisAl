@@ -39,7 +39,7 @@ def fetch_model(target: Path) -> Path:
         archive = Path(temp_dir) / "translate-en_zh-1_9.argosmodel"
         request = urllib.request.Request(
             ARCHIVE_URL,
-            headers={"User-Agent": "SecFlow-translation-model-fetch/1.0"},
+        headers={"User-Agent": "AegisAl-translation-model-fetch/1.0"},
         )
         with urllib.request.urlopen(request, timeout=120) as response, archive.open("wb") as output:
             while chunk := response.read(1024 * 1024):
@@ -84,7 +84,7 @@ def main() -> int:
         / "model.bin"
     )
     parser = argparse.ArgumentParser(
-        description="Fetch the pinned SecFlow offline translation model.",
+        description="Fetch the pinned AegisAl offline translation model.",
     )
     parser.add_argument("--target", type=Path, default=default_target)
     args = parser.parse_args()

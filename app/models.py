@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any, Literal
 
@@ -38,6 +39,7 @@ class AskRequest(BaseModel):
     user_id: str = Field(default="default", min_length=1, max_length=120)
     session_id: str = Field(default="default", min_length=1, max_length=120)
     response_language: str = Field(default="zh-Hans", max_length=24)
+    emoji_mode: Literal["off", "moderate", "active"] = "moderate"
     intent_hint: Literal[
         "component_vulnerability_catalog",
         "recent_high_vulnerability_lookup",
@@ -146,6 +148,43 @@ class AssistantConversationArchiveRequest(BaseModel):
     archived: bool
 
 
+class AssistantDataTableEditColumn(BaseModel):
+    key: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=240)
+    kind: Literal["date", "link", "number", "status", "tags", "text"] | None = None
+    editable: bool | None = None
+
+
+class AssistantDataTableEdit(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    type: str = Field(default="records-table", max_length=80)
+    title: str | None = Field(default=None, max_length=500)
+    caption: str | None = Field(default=None, max_length=500)
+    columns: list[AssistantDataTableEditColumn] = Field(min_length=1, max_length=64)
+    rows: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+    total: int | None = Field(default=None, ge=0)
+    edited: bool = True
+
+    @field_validator("rows")
+    @classmethod
+    def validate_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if any(len(row) > 64 for row in rows):
+            raise ValueError("每条记录最多包含 64 个字段")
+        return rows
+
+
+class AssistantStructuredDataEditRequest(BaseModel):
+    tables: list[AssistantDataTableEdit] = Field(min_length=1, max_length=12)
+
+    @field_validator("tables")
+    @classmethod
+    def validate_payload_size(cls, tables: list[AssistantDataTableEdit]) -> list[AssistantDataTableEdit]:
+        encoded = json.dumps([table.model_dump(mode="json") for table in tables], ensure_ascii=False)
+        if len(encoded.encode("utf-8")) > 1_000_000:
+            raise ValueError("记录表修改内容不能超过 1 MB")
+        return tables
+
+
 class IntelligenceQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     limit: int = Field(default=10, ge=1, le=50)
@@ -220,6 +259,7 @@ class AppPreferenceSettingsUpdate(BaseModel):
     language: SupportedLanguage = "zh-Hans"
     dark_mode: bool = False
     font_size: Literal["small", "default", "large"] = "default"
+    emoji_mode: Literal["off", "moderate", "active"] = "moderate"
     launch_at_login: bool = False
     auto_check_updates: bool = True
 
@@ -309,7 +349,8 @@ class LLMConfigRequest(BaseModel):
     catalog_provider: str | None = Field(default=None, min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=120)
     endpoint: str | None = Field(default=None, max_length=300)
-    api_key: str | None = Field(default=None, max_length=300)
+    api_key: str | None = Field(default=None, max_length=8192)
+    clear_api_key: bool = False
     enabled: bool = True
     max_tokens: int = Field(default=1800, ge=128, le=8192)
     temperature: float = Field(default=0.25, ge=0, le=2)
@@ -319,12 +360,21 @@ class LLMConfigRequest(BaseModel):
     reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     disable_response_storage: bool | None = None
 
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def normalize_optional_reasoning_effort(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
+
 
 class LLMModelsRequest(BaseModel):
     provider: Literal["openai", "claude", "deepseek", "custom"]
     catalog_provider: str | None = Field(default=None, min_length=1, max_length=80)
     endpoint: str | None = Field(default=None, max_length=300)
-    api_key: str | None = Field(default=None, max_length=300)
+    api_key: str | None = Field(default=None, max_length=8192)
+    clear_api_key: bool = False
     timeout_ms: int = Field(default=30000, ge=1000, le=180000)
 
 

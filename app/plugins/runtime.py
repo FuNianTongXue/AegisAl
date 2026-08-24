@@ -1,4 +1,4 @@
-"""SecFlow's process-local plugin composition and lifecycle runtime."""
+"""AegisAl's process-local plugin composition and lifecycle runtime."""
 
 from __future__ import annotations
 

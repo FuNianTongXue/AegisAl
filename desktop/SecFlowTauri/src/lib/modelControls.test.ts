@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { configForProvider, modelOptionsFor, selectedProviderId } from "./modelControls";
+import { configForProvider, modelOptionsFor, normalizedReasoningEffort, reasoningOptionsFor, selectedProviderId } from "./modelControls";
 
 describe("model provider controls", () => {
   it("maps the Kimi UI choice to a backend-safe Moonshot catalog", () => {
@@ -55,5 +55,27 @@ describe("model provider controls", () => {
       endpoint: "https://gateway.example/v1",
       model: "enterprise-reasoner",
     });
+  });
+
+  it("normalizes historical blank or unsupported reasoning values for the selected model", () => {
+    const openai = {
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-5.6-sol",
+      wire_api: "responses" as const,
+    };
+    const deepseek = {
+      provider: "deepseek",
+      endpoint: "https://api.deepseek.com/v1",
+      model: "deepseek-chat",
+      wire_api: "chat" as const,
+    };
+
+    expect(normalizedReasoningEffort(openai, "")).toBe("medium");
+    expect(normalizedReasoningEffort(deepseek, "max")).toBe("none");
+    expect(reasoningOptionsFor({
+      ...openai,
+      reasoning_options: [{ value: "invalid" as never }, { value: "high" }],
+    })).toEqual([{ value: "high" }]);
   });
 });

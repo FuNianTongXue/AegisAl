@@ -5,6 +5,7 @@ import { waitForBackendReady } from "../hooks/useBackend";
 import { api } from "../lib/api";
 import { restartLocalBackend } from "../lib/backendRecovery";
 import type { TrialStatus } from "../types";
+import { BRAND_NAME_ZH, brandDisplayText } from "../branding";
 
 export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
   const trialBuild = import.meta.env.VITE_SECFLOW_TRIAL_BUILD === "1";
@@ -37,7 +38,7 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
           // transient connection failure as a damaged trial authorization.
           retryTimer = window.setTimeout(() => {
             void restartLocalBackend()
-              .catch((restartError) => console.error("SecFlow automatic backend restart failed", restartError))
+              .catch((restartError) => console.error("AegisAl automatic backend restart failed", restartError))
               .finally(() => setRetrySequence((value) => value + 1));
           }, 5_000);
         }
@@ -87,7 +88,7 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
     setStatus(null);
     setChecking(true);
     void restartLocalBackend()
-      .catch((error) => console.error("SecFlow local backend restart failed", error))
+      .catch((error) => console.error("AegisAl local backend restart failed", error))
       .finally(() => setRetrySequence((value) => value + 1));
   };
 
@@ -130,8 +131,8 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
           tabIndex={-1}
         >
           <span><ShieldAlert size={24} /></span>
-          <h2 id="trial-license-title">安全智脑试用版不可用</h2>
-          <p id="trial-license-description">{status?.message || loadError || "无法验证本机试用授权。"}</p>
+          <h2 id="trial-license-title">{BRAND_NAME_ZH}试用版不可用</h2>
+          <p id="trial-license-description">{brandDisplayText(status?.message || loadError) || "无法验证本机试用授权。"}</p>
           <small id="trial-license-guidance">应用和用户数据未被修改。请安装正式授权版本或联系管理员。</small>
         </div>
       </div>

@@ -2,6 +2,7 @@ import type {
   AgentTask,
   AgentTaskEvent,
   ApiEnvelope,
+  AssistantDataTable,
   AskResult,
   ConversationDetail,
   ConversationSummary,
@@ -23,6 +24,7 @@ import type {
   VulnerabilityTranslationStatus,
   WorkspaceActionResult,
 } from "../types";
+import { normalizedReasoningEffort } from "./modelControls";
 
 const defaultBaseUrl = import.meta.env.DEV ? window.location.origin : "http://127.0.0.1:18781";
 
@@ -37,6 +39,8 @@ export class ApiError extends Error {
 
 export class SecFlowApi {
   readonly baseUrl: string;
+  private readonly dashboardCache = new Map<string, { expiresAt: number; value: DashboardSnapshot }>();
+  private readonly dashboardInFlight = new Map<string, Promise<DashboardSnapshot>>();
 
   constructor(baseUrl = import.meta.env.VITE_SECFLOW_SERVER_URL || defaultBaseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -75,6 +79,31 @@ export class SecFlowApi {
     const response = await this.raw(path, { ...init, headers }, query);
     const payload = (await response.json()) as ApiEnvelope<T> | T;
     return "data" in (payload as ApiEnvelope<T>) ? (payload as ApiEnvelope<T>).data : (payload as T);
+  }
+
+  private async requestWithTimeout<T>(
+    path: string,
+    timeoutMs: number,
+    init: RequestInit = {},
+    query?: Record<string, string | number | boolean | undefined>,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const externalSignal = init.signal;
+    const forwardAbort = () => controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) forwardAbort();
+    else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
+    const timer = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try {
+      return await this.request<T>(path, { ...init, signal: controller.signal }, query);
+    } catch (reason) {
+      if (controller.signal.aborted && !externalSignal?.aborted) {
+        throw new ApiError("请求超时，请重试。");
+      }
+      throw reason;
+    } finally {
+      window.clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", forwardAbort);
+    }
   }
 
   health() {
@@ -250,6 +279,19 @@ export class SecFlowApi {
     );
   }
 
+  updateConversationTableEdits(
+    sessionId: string,
+    exchangeId: string,
+    userId: string,
+    tables: AssistantDataTable[],
+  ) {
+    return this.request<{ exchange_id: string; tables: AssistantDataTable[] }>(
+      `/api/assistant/conversations/${encodeURIComponent(sessionId)}/exchanges/${encodeURIComponent(exchangeId)}/table-edits`,
+      { method: "PATCH", body: JSON.stringify({ tables }) },
+      { user_id: userId },
+    );
+  }
+
   archiveConversation(sessionId: string, userId: string, archived: boolean) {
     return this.request<ConversationSummary>(
       `/api/assistant/conversations/${encodeURIComponent(sessionId)}/archive`,
@@ -274,21 +316,41 @@ export class SecFlowApi {
     );
   }
 
-  async dashboard(responseLanguage = "zh-Hans") {
-    return normalizeDashboard(
-      await this.request<Record<string, unknown>>("/api/dashboard", {}, { response_language: responseLanguage }),
-      responseLanguage,
-    );
+  async dashboard(responseLanguage = "zh-Hans", refresh = false) {
+    const cacheKey = responseLanguage;
+    const cached = this.dashboardCache.get(cacheKey);
+    if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
+    const active = this.dashboardInFlight.get(cacheKey);
+    if (!refresh && active) return active;
+    const request = this.requestWithTimeout<Record<string, unknown>>(
+      "/api/dashboard",
+      8_000,
+      {},
+      { response_language: responseLanguage, refresh: refresh || undefined },
+    ).then((value) => {
+      const normalized = normalizeDashboard(value, responseLanguage);
+      this.dashboardCache.set(cacheKey, { expiresAt: Date.now() + 30_000, value: normalized });
+      return normalized;
+    });
+    if (!refresh) {
+      this.dashboardInFlight.set(cacheKey, request);
+      const clearInFlight = () => {
+        if (this.dashboardInFlight.get(cacheKey) === request) this.dashboardInFlight.delete(cacheKey);
+      };
+      void request.then(clearInFlight, clearInFlight);
+    }
+    return request;
   }
 
   intelligenceSources() {
     return this.request<IntelligenceSource[]>("/api/intelligence/sources");
   }
 
-  async vulnerabilities(responseLanguage = "zh-Hans", query = "") {
-    const result = await this.request<VulnerabilityRecord[] | { records?: VulnerabilityRecord[] }>(
+  async vulnerabilities(responseLanguage = "zh-Hans", query = "", signal?: AbortSignal) {
+    const result = await this.requestWithTimeout<VulnerabilityRecord[] | { records?: VulnerabilityRecord[] }>(
       "/api/vulnerabilities",
-      {},
+      10_000,
+      { signal },
       { response_language: responseLanguage, query: query.trim() || undefined },
     );
     const records = Array.isArray(result) ? result : result.records || [];
@@ -310,8 +372,10 @@ export class SecFlowApi {
     return this.url(`/api/information/images/${encodeURIComponent(itemId)}`).toString();
   }
 
-  informationSourceImageUrl(sourceId: string) {
-    return this.url(`/api/information/source-images/${encodeURIComponent(sourceId)}`).toString();
+  informationSourceImageUrl(sourceId: string, version = "") {
+    const url = this.url(`/api/information/source-images/${encodeURIComponent(sourceId)}`);
+    if (version) url.searchParams.set("v", version);
+    return url.toString();
   }
 
   async refreshInformation(responseLanguage = "zh-Hans") {
@@ -501,6 +565,7 @@ function normalizeSettings(value: SettingsSnapshot): SettingsSnapshot {
       language: value.preferences?.language || "zh-Hans",
       dark_mode: Boolean(value.preferences?.dark_mode),
       font_size: value.preferences?.font_size || "default",
+      emoji_mode: value.preferences?.emoji_mode || "moderate",
       launch_at_login: Boolean(value.preferences?.launch_at_login),
       auto_check_updates: value.preferences?.auto_check_updates !== false,
     },
@@ -513,6 +578,7 @@ function normalizeLlmConfig(value: LlmConfig): LlmConfig {
     endpoint: value.endpoint || "",
     max_tokens: Number(value.max_tokens || 1800),
     timeout_ms: Number(value.timeout_ms || 60000),
+    reasoning_effort: normalizedReasoningEffort(value, value.reasoning_effort),
     api_key_configured: Boolean(value.api_key_configured || value.has_api_key || value.configured),
   };
 }
@@ -524,13 +590,14 @@ function llmConfigPayload(config: LlmConfig) {
     model: config.model,
     endpoint: config.endpoint || undefined,
     api_key: config.api_key || undefined,
+    clear_api_key: config.clear_api_key || undefined,
     enabled: config.enabled !== false,
     max_tokens: config.max_tokens,
     temperature: config.temperature ?? 0.25,
     top_p: config.top_p ?? 0.9,
     timeout_ms: config.timeout_ms,
     wire_api: config.wire_api,
-    reasoning_effort: config.reasoning_effort,
+    reasoning_effort: normalizedReasoningEffort(config, config.reasoning_effort),
     disable_response_storage: config.disable_response_storage,
   };
 }
@@ -541,6 +608,7 @@ function llmCatalogPayload(config: Partial<LlmConfig>) {
     catalog_provider: config.catalog_provider || undefined,
     endpoint: config.endpoint || undefined,
     api_key: config.api_key || undefined,
+    clear_api_key: config.clear_api_key || undefined,
     timeout_ms: config.timeout_ms || 30000,
   };
 }
@@ -645,8 +713,17 @@ function normalizeVulnerability(value: VulnerabilityRecord, requestedLanguage = 
   const normalizedStatus = inferTranslationStatus(translationStatus, contentLanguage, language);
   const publishable = language === "en"
     || (contentLanguage === language && ["translated", "passthrough"].includes(normalizedStatus));
-  const localizedTitle = publishable ? candidateTitle : "";
-  const localizedSummary = publishable ? candidateSummary : "";
+  const originalTitle = language === "en"
+    ? firstText(raw.title_original, raw.title)
+    : firstText(raw.title_original);
+  const originalSummary = language === "en" ? firstText(
+    raw.summary_original,
+    raw.description_original,
+    raw.summary,
+    raw.description,
+  ) : firstText(raw.summary_original, raw.description_original);
+  const localizedTitle = publishable ? candidateTitle : originalTitle;
+  const localizedSummary = publishable ? candidateSummary : originalSummary;
   return {
     ...value,
     id: String(raw.id || "UNKNOWN"),

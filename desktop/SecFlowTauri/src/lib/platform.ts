@@ -87,13 +87,14 @@ export async function saveBinaryArtifact(fileName: string, content: Blob) {
     anchor.download = fileName;
     anchor.click();
     URL.revokeObjectURL(url);
-    return;
+    return true;
   }
   const { save } = await import("@tauri-apps/plugin-dialog");
   const destination = await save({ defaultPath: fileName });
-  if (!destination) return;
+  if (!destination) return false;
   const { writeFile } = await import("@tauri-apps/plugin-fs");
   await writeFile(destination, new Uint8Array(await content.arrayBuffer()));
+  return true;
 }
 
 export async function saveBinaryArtifacts(items: Array<{ fileName: string; content: Blob }>) {

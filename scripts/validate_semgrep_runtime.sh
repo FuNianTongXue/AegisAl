@@ -30,12 +30,59 @@ for path in root.rglob("*"):
         raise SystemExit(1)
 PY
 
-VERSION="$($CLI --version 2>/dev/null)" || fail "CLI cannot start"
-printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || fail "unexpected version response"
-
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/secflow-semgrep-validate.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
-mkdir -p "$TMP_ROOT/src"
+mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/tmp" "$TMP_ROOT/poison-bin" "$TMP_ROOT/src"
+for COMMAND_NAME in semgrep pysemgrep semgrep-core; do
+    cat > "$TMP_ROOT/poison-bin/$COMMAND_NAME" <<'SH'
+#!/bin/sh
+echo "Packaged Semgrep attempted to execute an external CLI: $0" >&2
+exit 97
+SH
+    chmod 755 "$TMP_ROOT/poison-bin/$COMMAND_NAME"
+done
+
+CLI_GUARD=()
+if [ -x /usr/bin/sandbox-exec ]; then
+    cat > "$TMP_ROOT/no-homebrew.sb" <<'SB'
+(version 1)
+(allow default)
+(deny file-read* (subpath "/opt/homebrew"))
+(deny process-exec (subpath "/opt/homebrew"))
+SB
+    CLI_GUARD=(/usr/bin/sandbox-exec -f "$TMP_ROOT/no-homebrew.sb")
+fi
+
+run_cli() {
+    env -i \
+        PATH="$TMP_ROOT/poison-bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        HOME="$TMP_ROOT/home" \
+        TMPDIR="$TMP_ROOT/tmp" \
+        LANG="en_US.UTF-8" \
+        SEMGREP_SETTINGS_FILE="$TMP_ROOT/home/settings.yml" \
+        SEMGREP_SEND_METRICS="off" \
+        SEMGREP_ENABLE_VERSION_CHECK="0" \
+        PYINSTALLER_RESET_ENVIRONMENT="1" \
+        "${CLI_GUARD[@]}" \
+        "$CLI" "$@"
+}
+
+EXPECTED_VERSION="$($PYTHON_BIN - "$RUNTIME_PATH" <<'PY'
+from importlib.metadata import PathDistribution
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]) / "_internal"
+metadata_dirs = sorted(root.glob("semgrep-*.dist-info"))
+if len(metadata_dirs) != 1:
+    raise SystemExit(f"expected one bundled Semgrep distribution, found {len(metadata_dirs)}")
+print(PathDistribution(metadata_dirs[0]).version)
+PY
+)" || fail "cannot read bundled Semgrep version metadata"
+VERSION="$(run_cli --version 2>/dev/null)" || fail "isolated CLI cannot start"
+printf '%s\n' "$VERSION" | grep -Fx "$EXPECTED_VERSION" >/dev/null || \
+    fail "CLI version '$VERSION' does not match bundled version '$EXPECTED_VERSION'"
+
 cat > "$TMP_ROOT/src/Demo.java" <<'JAVA'
 import javax.servlet.http.HttpServletRequest;
 class Demo {
@@ -76,7 +123,7 @@ contract Demo { address owner; function run() external { require(tx.origin == ow
 SOLIDITY
 fi
 
-SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 "$CLI" scan \
+run_cli scan \
     --config "$RULES_PATH" \
     --json-output "$TMP_ROOT/results.json" \
     --dataflow-traces \
@@ -86,12 +133,18 @@ SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 "$CLI" scan \
     --project-root "$TMP_ROOT/src" \
     "$TMP_ROOT/src" >/dev/null 2>&1 || fail "multi-language validation scan failed"
 
-"$PYTHON_BIN" - "$TMP_ROOT/results.json" "$RULES_PATH" <<'PY' || fail "AST/CFG/DFG rules did not return the expected findings"
+"$PYTHON_BIN" - "$TMP_ROOT/results.json" "$RULES_PATH" "$EXPECTED_VERSION" <<'PY' || fail "AST/CFG/DFG rules did not return the expected findings"
 import json
 from pathlib import Path
 import sys
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if payload.get("version") != sys.argv[3]:
+    print(
+        f"Scan used Semgrep {payload.get('version')!r}, expected bundled {sys.argv[3]!r}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 rules = {str(item.get("check_id") or "") for item in payload.get("results") or []}
 expected = {"secflow.java.command-injection"}
 if Path(sys.argv[2]).is_dir():
