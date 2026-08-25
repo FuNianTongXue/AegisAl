@@ -1,3 +1,7 @@
+> **扫码进群交流**
+>
+> ![微信群二维码](docs/assets/wechat-group-qr.jpg)
+
 # AegisAl
 
 <p align="center">
