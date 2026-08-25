@@ -311,9 +311,13 @@ fn wait_for_trial_backend(port: &str, token: &str, duration_hours: &str) -> Resu
                 {
                     return Err("Bundled backend identity verification failed".to_string());
                 }
-                let trial = local_backend_json(port, "/api/trial/status")?;
-                verify_trial_backend_status(&trial, duration_hours)?;
-                return Ok(());
+                match local_backend_json(port, "/api/trial/status") {
+                    Ok(trial) => {
+                        verify_trial_backend_status(&trial, duration_hours)?;
+                        return Ok(());
+                    }
+                    Err(error) => last_error = error,
+                }
             }
             Err(error) => last_error = error,
         }
@@ -331,7 +335,7 @@ fn local_backend_json(port: u16, path: &str) -> Result<serde_json::Value, String
     )
     .map_err(|error| error.to_string())?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(7)))
         .map_err(|error| error.to_string())?;
     write!(
         stream,
@@ -364,11 +368,15 @@ fn verify_trial_backend_status(
         .get("data")
         .ok_or_else(|| "Bundled backend trial response is missing data".to_string())?;
     let enabled = data.get("enabled").and_then(serde_json::Value::as_bool) == Some(true);
-    let usable = data.get("usable").and_then(serde_json::Value::as_bool) == Some(true);
     let duration = data
         .get("durationHours")
         .and_then(serde_json::Value::as_u64);
-    if enabled && usable && duration == Some(duration_hours) {
+    let state = data.get("state").and_then(serde_json::Value::as_str);
+    let known_state = matches!(
+        state,
+        Some("active" | "expired" | "tampered" | "clock_rollback")
+    );
+    if enabled && known_state && duration == Some(duration_hours) {
         Ok(())
     } else {
         Err("Bundled backend trial policy verification failed".to_string())
@@ -745,17 +753,25 @@ mod tests {
 
     #[test]
     fn trial_backend_status_requires_the_compiled_duration() {
-        let valid = serde_json::json!({
-            "data": {"enabled": true, "usable": true, "durationHours": 336}
+        let active = serde_json::json!({
+            "data": {"enabled": true, "usable": true, "state": "active", "durationHours": 336}
+        });
+        let expired = serde_json::json!({
+            "data": {"enabled": true, "usable": false, "state": "expired", "durationHours": 336}
+        });
+        let tampered = serde_json::json!({
+            "data": {"enabled": true, "usable": false, "state": "tampered", "durationHours": 336}
         });
         let disabled = serde_json::json!({
-            "data": {"enabled": false, "usable": true, "durationHours": 336}
+            "data": {"enabled": false, "usable": true, "state": "disabled", "durationHours": 336}
         });
         let wrong_duration = serde_json::json!({
-            "data": {"enabled": true, "usable": true, "durationHours": 1}
+            "data": {"enabled": true, "usable": true, "state": "active", "durationHours": 1}
         });
 
-        verify_trial_backend_status(&valid, 336).unwrap();
+        verify_trial_backend_status(&active, 336).unwrap();
+        verify_trial_backend_status(&expired, 336).unwrap();
+        verify_trial_backend_status(&tampered, 336).unwrap();
         assert!(verify_trial_backend_status(&disabled, 336).is_err());
         assert!(verify_trial_backend_status(&wrong_duration, 336).is_err());
     }
