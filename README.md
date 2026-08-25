@@ -14,7 +14,7 @@
 
 源码版本 `v1.3.4` 支持以下桌面构建目标：
 
-> **版本说明：** 本次 macOS 14 天试用客户端是 `1.3.4` 的实际二进制构建，二进制源码提交为 `02fa7e259a3817a866e5595640d058320232025a`，构建时工作树为干净状态。
+> **版本说明：** 本次 macOS 14 天试用客户端是 `1.3.4` 的实际二进制构建，二进制源码提交为 `6e849b92b5b483ff416179115519082c33cc39e4`，构建时工作树为干净状态。
 
 | 平台 | 架构 | 构建入口 |
 | --- | --- | --- |
@@ -34,10 +34,12 @@
 - 修复模型锁定、第三方 API Key、本机密钥恢复和解密失败覆盖状态问题。
 - 大项目扫描采用 5000 文件或 64 MiB 分批，不再按项目总容量拒绝几十 GB 的工作区。
 - 问答与项目扫描结果的状态头像统一使用 AegisAl Logo。
+- Mermaid 与 DOMPurify 已升级到修复版本，生产前端依赖审计未发现已知漏洞。
+- 修复 Intel 构建中原生运行库提示写入 MCP 标准输出、干扰 JSON-RPC 消息解析的问题。
 
 完整变更、试用包边界与校验值见 [v1.3.4 发布说明](docs/RELEASE_NOTES_v1.3.4.md)。
 
-本次发布验证基线：前端 27 个测试文件、200 项测试通过；试用授权与打包版本 11 项 Python 测试通过；TypeScript 检查、Vite 生产构建以及 ARM64/Intel Rust 检查通过。
+本次发布验证基线：前端 27 个测试文件、200 项测试通过；MCP 与翻译链路 71 项测试及 16 项子测试通过；试用授权与打包版本 12 项测试通过；生产前端依赖审计未发现已知漏洞；TypeScript 检查、Vite 生产构建以及 ARM64/Intel Rust 检查通过。
 
 ## 14 天试用版
 
@@ -45,8 +47,8 @@
 
 | 平台 | 客户端构建 | 安装包 | SHA-256 |
 | --- | --- | --- | --- |
-| macOS Apple Silicon (`arm64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-ARM64-Trial-14Days.dmg` | `d7baa80fba3b6eb2d35c732f615a74e87dd55585e4feb862c594baf1cffcccf6` |
-| macOS Intel (`x86_64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-x86_64-Trial-14Days.dmg` | `e1b5ce87c23ff8f44bf615660b3126f3442f077b7b980de37656693e9bb03bb6` |
+| macOS Apple Silicon (`arm64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-ARM64-Trial-14Days.dmg` | `6ae341e9dcbc4a2a1d302f38131055ad8d4a1bf0bce18731b794ea6da77fd674` |
+| macOS Intel (`x86_64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-x86_64-Trial-14Days.dmg` | `01a9a28fb26e9640cfac8c89e4849ee5a6225297631755ba318dc2ac8c4b0b66` |
 
 安装包及对应校验文件见 [v1.3.4 macOS 14 天试用客户端 Release](https://github.com/FuNianTongXue/AegisAl/releases/tag/v1.3.4-trial-14days)。
 

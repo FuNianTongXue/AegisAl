@@ -6,7 +6,7 @@
 
 - 源码、API 文档、架构文档、产品文档和试用客户端版本：`1.3.4`。
 - GitHub Release 提供 Apple Silicon `arm64` 和 Intel `x86_64` 两个 14 天试用 DMG。
-- 两个试用包均由提交 `02fa7e259a3817a866e5595640d058320232025a` 的干净工作树构建，内置版本号为 `1.3.4`。
+- 两个试用包均由提交 `6e849b92b5b483ff416179115519082c33cc39e4` 的干净工作树构建，内置版本号为 `1.3.4`。
 - 不公开上传正式版安装包。
 
 ## 后续发布调整
@@ -28,6 +28,7 @@
 - 修复大型项目被固定总容量上限阻断的问题，扫描改为最多 5000 文件或 64 MiB 一批。
 - 修复旧应用副本和旧构建 bundle 可能继续显示“安全智脑”启动页的问题。
 - 修复问答与扫描结果左侧状态头像仍使用通用盾牌图标的问题，统一为 AegisAl Logo。
+- 修复 Intel 构建中原生运行库提示写入 MCP 标准输出、造成 JSON-RPC 消息解析失败的问题。
 
 ## 新增与优化
 
@@ -39,13 +40,14 @@
 - 报告支持 Markdown、HTML、Word、PDF、Excel、SARIF 与整包下载。
 - 正式版与 14 天试用版使用独立 Bundle ID、端口、数据和授权状态。
 - 试用版启动时校验内置 sidecar 身份、试用时长与发布溯源信息，校验失败时关闭启动。
+- Mermaid 升级至 `11.17.0`，DOMPurify 升级至 `3.4.13`；生产前端依赖审计未发现已知漏洞。
 
 ## 14 天试用包
 
 | 平台 | 客户端构建 | 文件 | SHA-256 |
 | --- | --- | --- | --- |
-| macOS Apple Silicon (`arm64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-ARM64-Trial-14Days.dmg` | `d7baa80fba3b6eb2d35c732f615a74e87dd55585e4feb862c594baf1cffcccf6` |
-| macOS Intel (`x86_64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-x86_64-Trial-14Days.dmg` | `e1b5ce87c23ff8f44bf615660b3126f3442f077b7b980de37656693e9bb03bb6` |
+| macOS Apple Silicon (`arm64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-ARM64-Trial-14Days.dmg` | `6ae341e9dcbc4a2a1d302f38131055ad8d4a1bf0bce18731b794ea6da77fd674` |
+| macOS Intel (`x86_64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-x86_64-Trial-14Days.dmg` | `01a9a28fb26e9640cfac8c89e4849ee5a6225297631755ba318dc2ac8c4b0b66` |
 
 两个包均为 ad-hoc 签名，未进行 Apple 公证。首次成功启动后连续可用 336 小时。安装包和对应 `.sha256` 文件见 [v1.3.4 macOS 14 天试用客户端 Release](https://github.com/FuNianTongXue/AegisAl/releases/tag/v1.3.4-trial-14days)。
 
@@ -64,7 +66,9 @@
 ## 验证
 
 - 前端：27 个测试文件、200 项测试通过；TypeScript 检查和 Vite 生产构建通过。
-- 后端：试用授权与打包版本 11 项 Python 测试通过。
+- MCP 与翻译：71 项测试及 16 项子测试通过。
+- 试用授权与打包版本：12 项测试通过。
+- 依赖安全：生产前端依赖审计未发现已知漏洞。
 - 桌面端：ARM64 与 Intel Rust 检查通过，打包脚本语法校验通过。
 - 包完整性：两个 DMG 均通过 SHA-256 与 `hdiutil verify`。
 - 架构：Intel 包内 221 个 Mach-O 均为 x86_64；Apple Silicon 包内 338 个 Mach-O 均为 arm64。
