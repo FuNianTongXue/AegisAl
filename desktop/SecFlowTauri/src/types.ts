@@ -10,6 +10,7 @@ export interface HealthSnapshot {
   ok: boolean;
   service: string;
   contract_version: string;
+  startup_token?: string;
   task_execution: {
     mode: string;
     configured_workers: number;

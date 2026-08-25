@@ -208,6 +208,7 @@ def health():
         "service": "aegisal",
         "contract_version": MACOS_API_CONTRACT_VERSION,
         "author": "ShenSiQi",
+        "startup_token": os.getenv("SECFLOW_BACKEND_STARTUP_TOKEN", ""),
         "task_execution": task_agent_service.execution_status(),
     }
 

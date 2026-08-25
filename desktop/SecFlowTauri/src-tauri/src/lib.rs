@@ -1,12 +1,13 @@
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
@@ -182,6 +183,9 @@ fn start_backend(app: &AppHandle) -> Result<(), String> {
     let parent_pid = std::process::id().to_string();
     let backend_port = option_env!("SECFLOW_BACKEND_PORT").unwrap_or("18781");
     let trial_build = is_trial_build();
+    let startup_token = trial_build
+        .then(generate_backend_startup_token)
+        .transpose()?;
     if trial_build {
         ensure_backend_port_available(backend_port)?;
     }
@@ -213,7 +217,11 @@ fn start_backend(app: &AppHandle) -> Result<(), String> {
             .env("SECFLOW_TRIAL_ENABLED", "1")
             .env("SECFLOW_TRIAL_DURATION_HOURS", trial_duration)
             .env("SECFLOW_APP_RELEASE_CHANNEL", release_channel)
-            .env("SECFLOW_KEYCHAIN_SERVICE", keychain_service);
+            .env("SECFLOW_KEYCHAIN_SERVICE", keychain_service)
+            .env(
+                "SECFLOW_BACKEND_STARTUP_TOKEN",
+                startup_token.as_deref().unwrap_or_default(),
+            );
     }
     let (mut receiver, child) = command.spawn().map_err(|error| error.to_string())?;
     let child_pid = child.pid();
@@ -251,6 +259,15 @@ fn start_backend(app: &AppHandle) -> Result<(), String> {
             }
         }
     });
+    if let Some(token) = startup_token {
+        let duration = option_env!("SECFLOW_TRIAL_DURATION_HOURS").unwrap_or("168");
+        if let Err(error) = wait_for_trial_backend(backend_port, &token, duration) {
+            if let Some(child) = app.state::<BackendProcess>().0.lock().unwrap().take() {
+                let _ = child.kill();
+            }
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -265,6 +282,97 @@ fn ensure_backend_port_available(port: &str) -> Result<(), String> {
     TcpListener::bind(("127.0.0.1", port))
         .map(drop)
         .map_err(|error| format!("Bundled backend port {port} is unavailable: {error}"))
+}
+
+fn generate_backend_startup_token() -> Result<String, String> {
+    let mut token = [0_u8; 32];
+    getrandom::fill(&mut token)
+        .map_err(|error| format!("Unable to create backend startup token: {error}"))?;
+    Ok(token.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn wait_for_trial_backend(port: &str, token: &str, duration_hours: &str) -> Result<(), String> {
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| format!("Invalid bundled backend port: {port}"))?;
+    let duration_hours = duration_hours
+        .parse::<u64>()
+        .map_err(|_| format!("Invalid bundled trial duration: {duration_hours}"))?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut last_error = "backend did not answer".to_string();
+
+    while Instant::now() < deadline {
+        match local_backend_json(port, "/health") {
+            Ok(health) => {
+                if health
+                    .get("startup_token")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(token)
+                {
+                    return Err("Bundled backend identity verification failed".to_string());
+                }
+                let trial = local_backend_json(port, "/api/trial/status")?;
+                verify_trial_backend_status(&trial, duration_hours)?;
+                return Ok(());
+            }
+            Err(error) => last_error = error,
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("Bundled backend startup timed out: {last_error}"))
+}
+
+fn local_backend_json(port: u16, path: &str) -> Result<serde_json::Value, String> {
+    let mut stream = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}")
+            .parse()
+            .map_err(|error| format!("Invalid bundled backend address: {error}"))?,
+        Duration::from_millis(500),
+    )
+    .map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| error.to_string())?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| error.to_string())?;
+    let response = String::from_utf8(response).map_err(|error| error.to_string())?;
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Bundled backend returned an invalid HTTP response".to_string())?;
+    if !headers
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains(" 200 "))
+    {
+        return Err("Bundled backend returned a non-success response".to_string());
+    }
+    serde_json::from_str(body).map_err(|error| error.to_string())
+}
+
+fn verify_trial_backend_status(
+    payload: &serde_json::Value,
+    duration_hours: u64,
+) -> Result<(), String> {
+    let data = payload
+        .get("data")
+        .ok_or_else(|| "Bundled backend trial response is missing data".to_string())?;
+    let enabled = data.get("enabled").and_then(serde_json::Value::as_bool) == Some(true);
+    let usable = data.get("usable").and_then(serde_json::Value::as_bool) == Some(true);
+    let duration = data
+        .get("durationHours")
+        .and_then(serde_json::Value::as_u64);
+    if enabled && usable && duration == Some(duration_hours) {
+        Ok(())
+    } else {
+        Err("Bundled backend trial policy verification failed".to_string())
+    }
 }
 
 fn append_backend_log(path: Option<&Path>, line: &str) {
@@ -623,5 +731,32 @@ mod tests {
         drop(listener);
 
         ensure_backend_port_available(&port).unwrap();
+    }
+
+    #[test]
+    fn backend_startup_tokens_are_random_hex_values() {
+        let first = generate_backend_startup_token().unwrap();
+        let second = generate_backend_startup_token().unwrap();
+
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|value| value.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn trial_backend_status_requires_the_compiled_duration() {
+        let valid = serde_json::json!({
+            "data": {"enabled": true, "usable": true, "durationHours": 336}
+        });
+        let disabled = serde_json::json!({
+            "data": {"enabled": false, "usable": true, "durationHours": 336}
+        });
+        let wrong_duration = serde_json::json!({
+            "data": {"enabled": true, "usable": true, "durationHours": 1}
+        });
+
+        verify_trial_backend_status(&valid, 336).unwrap();
+        assert!(verify_trial_backend_status(&disabled, 336).is_err());
+        assert!(verify_trial_backend_status(&wrong_duration, 336).is_err());
     }
 }

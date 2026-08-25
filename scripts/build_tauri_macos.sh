@@ -13,6 +13,7 @@ TRIAL_BUILD="${SECFLOW_TAURI_TRIAL_BUILD:-0}"
 TRIAL_DURATION_HOURS="${SECFLOW_TRIAL_DURATION_HOURS:-168}"
 TRIAL_KEYCHAIN_SERVICE="${SECFLOW_TRIAL_KEYCHAIN_SERVICE:-ai.secflow.security-agent.trial7days}"
 RELEASE_CHANNEL="${SECFLOW_APP_RELEASE_CHANNEL:-$([ "$TRIAL_BUILD" = "1" ] && printf '7天试用版' || printf '正式版')}"
+REQUIRE_CLEAN_SOURCE="${SECFLOW_REQUIRE_CLEAN_SOURCE:-0}"
 TAURI_CONFIG="${SECFLOW_TAURI_CONFIG:-}"
 BACKEND_BUILD_DIR="$BUILD_ROOT/backend"
 SEMGREP_BUILD_DIR="$BUILD_ROOT/semgrep"
@@ -67,8 +68,43 @@ rm -rf "$BUILD_ROOT" "$RESOURCES_DIR" "$BUNDLE_DIR"
 mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
     "$RESOURCES_DIR/semgrep" "$RESOURCES_DIR/semgrep-rules" "$RESOURCES_DIR/licenses"
 
-SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)"
-SOURCE_DIRTY_SHA256="$(git -C "$ROOT_DIR" diff --binary --no-ext-diff 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+    if [ "$REQUIRE_CLEAN_SOURCE" = "1" ] && [ -n "$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)" ]; then
+        echo "A release build requires a clean Git worktree." >&2
+        exit 1
+    fi
+    SOURCE_DIRTY_SHA256="$($PYTHON_BIN - "$ROOT_DIR" <<'PY'
+import hashlib
+import os
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+digest.update(subprocess.check_output(
+    ["git", "-C", str(root), "diff", "--binary", "--no-ext-diff", "HEAD"]
+))
+untracked = subprocess.check_output(
+    ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"]
+)
+for raw_path in filter(None, untracked.split(b"\0")):
+    path = root / os.fsdecode(raw_path)
+    content = os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()
+    digest.update(b"\0untracked\0")
+    digest.update(len(raw_path).to_bytes(8, "big"))
+    digest.update(raw_path)
+    digest.update(len(content).to_bytes(8, "big"))
+    digest.update(content)
+print(digest.hexdigest())
+PY
+)"
+else
+    [ "$REQUIRE_CLEAN_SOURCE" != "1" ] || { echo "A release build requires a Git worktree." >&2; exit 1; }
+    SOURCE_REVISION="unknown"
+    SOURCE_DIRTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+fi
 "$PYTHON_BIN" - \
     "$EDITION_MANIFEST" \
     "$TRIAL_BUILD" \

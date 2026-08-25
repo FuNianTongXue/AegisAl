@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,8 @@ class PackagedEdition:
     backend_port: int
     trial_duration_hours: int | None = None
     keychain_service: str = ""
+    source_revision: str = ""
+    source_dirty_sha256: str = ""
 
     @property
     def trial_enabled(self) -> bool:
@@ -115,6 +118,8 @@ def _edition_from_payload(payload: Any) -> PackagedEdition:
     app_version = str(payload.get("app_version") or "").strip()
     release_channel = str(payload.get("release_channel") or "").strip()
     keychain_service = str(payload.get("keychain_service") or "").strip()
+    source_revision = str(payload.get("source_revision") or "").strip()
+    source_dirty_sha256 = str(payload.get("source_dirty_sha256") or "").strip().lower()
     try:
         backend_port = int(payload.get("backend_port") or 0)
     except (TypeError, ValueError) as exc:
@@ -123,6 +128,10 @@ def _edition_from_payload(payload: Any) -> PackagedEdition:
         raise PackagedEditionError("Packaged AegisAl edition fields are incomplete")
     if not 1024 <= backend_port <= 65535:
         raise PackagedEditionError("Packaged AegisAl backend port is invalid")
+    if not source_revision or len(source_revision) > 128:
+        raise PackagedEditionError("Packaged AegisAl source revision is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", source_dirty_sha256) is None:
+        raise PackagedEditionError("Packaged AegisAl source state hash is invalid")
 
     duration: int | None = None
     if edition == "trial":
@@ -140,4 +149,6 @@ def _edition_from_payload(payload: Any) -> PackagedEdition:
         backend_port=backend_port,
         trial_duration_hours=duration,
         keychain_service=keychain_service,
+        source_revision=source_revision,
+        source_dirty_sha256=source_dirty_sha256,
     )

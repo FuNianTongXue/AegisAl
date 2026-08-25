@@ -145,7 +145,10 @@ class TrialManagerTests(unittest.TestCase):
                 self.assertEqual(blocked.status_code, 403)
                 self.assertEqual(blocked.json()["data"]["trial"]["state"], "expired")
                 self.assertEqual(client.get("/api/trial/status").status_code, 200)
-                self.assertEqual(client.get("/health").status_code, 200)
+                with patch.dict(os.environ, {"SECFLOW_BACKEND_STARTUP_TOKEN": "startup-proof"}):
+                    health = client.get("/health")
+                self.assertEqual(health.status_code, 200)
+                self.assertEqual(health.json()["startup_token"], "startup-proof")
 
 
 if __name__ == "__main__":
