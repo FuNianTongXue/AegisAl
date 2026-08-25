@@ -54,7 +54,7 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
 
   const blockerKind = trialBuild && !status && loadError
     ? "service"
-    : trialBuild && status && !status.usable
+    : trialBuild && status && (!status.enabled || !status.usable)
       ? "license"
       : null;
 
@@ -119,7 +119,7 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
       </div>
     );
   }
-  if (!status.usable) {
+  if (!status.enabled || !status.usable) {
     return (
       <div className="trial-blocker" ref={blocker}>
         <div
@@ -139,11 +139,17 @@ export function TrialGuard({ hideActive = false }: { hideActive?: boolean }) {
     );
   }
   if (hideActive) return null;
+  const duration = trialDurationLabel(status.durationHours);
   return (
-    <div className="trial-status-chip" role="status" aria-label="七天试用状态">
-      <Clock3 size={14} />7 天试用 · {remainingLabel(status.secondsRemaining)}
+    <div className="trial-status-chip" role="status" aria-label={`${duration}试用状态`}>
+      <Clock3 size={14} />{duration}试用 · {remainingLabel(status.secondsRemaining)}
     </div>
   );
+}
+
+function trialDurationLabel(hours: number | null | undefined) {
+  const safe = Math.max(1, Math.floor(Number(hours || 0)));
+  return safe % 24 === 0 ? `${safe / 24} 天` : `${safe} 小时`;
 }
 
 function remainingLabel(seconds: number | null | undefined) {

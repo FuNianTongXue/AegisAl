@@ -186,7 +186,7 @@ class MCPServerDefinition:
 
 
 _BUILTIN_TOOL_SCHEMA_HASHES: dict[tuple[str, str], tuple[str, str]] = {
-    ("code-scan", "scan_language"): ("04dd3d437bbc09c9e325a85fbc0123fc8a46f9d37aadae6dd770108c6304c119", "7dc4fdf886b3f2eefce5f9d5c1047788cd60917f1028ac3e72e9ec813f96136f"),
+    ("code-scan", "scan_language"): ("04dd3d437bbc09c9e325a85fbc0123fc8a46f9d37aadae6dd770108c6304c119", "d1a31ec6d0d39153366b7f5a5b1961fde0ea2fc257f10a14f88af570934b56f4"),
     ("code-scan", "get_scan_capabilities"): ("40929fc0f8856e6104ce66e0e26ed88a6e709644fb250126bff3356a2e2bbd8b", "418f98cc9a6438af4cd4ba9f0e4517350d7c3ae9e36647e8ce91b2523630a56a"),
     ("component-detail", "build_component_vulnerability_detail"): ("81cb10e7b01a5c5dddf6516bfab5342d64812000c9e971a347da5fabb4c97c06", "3db84fbfa6a1e5f4bd75f0242810248820662c503a428a05aa3a8b5064b48a1e"),
     ("excel", "export_component_vulnerabilities"): ("c9d08c39520d707baad5206eb07646ae91a8fc69c9f10c20e8b6f7da8870833f", "bd7ca4bdd6892f1493b19f0f55e0a0db7f5e533921a164c96a4a47dee5f53966"),

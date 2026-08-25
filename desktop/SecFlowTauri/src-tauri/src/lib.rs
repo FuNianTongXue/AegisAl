@@ -1,6 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
+    net::TcpListener,
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -136,7 +137,7 @@ pub fn run() {
 
 #[tauri::command]
 fn restart_backend(app: AppHandle) -> Result<(), String> {
-    if std::env::var("SECFLOW_SERVER_URL").is_ok() {
+    if !is_trial_build() && std::env::var("SECFLOW_SERVER_URL").is_ok() {
         return Ok(());
     }
     if let Some(child) = app.state::<BackendProcess>().0.lock().unwrap().take() {
@@ -147,7 +148,7 @@ fn restart_backend(app: AppHandle) -> Result<(), String> {
 }
 
 fn start_backend(app: &AppHandle) -> Result<(), String> {
-    if std::env::var("SECFLOW_SERVER_URL").is_ok()
+    if (!is_trial_build() && std::env::var("SECFLOW_SERVER_URL").is_ok())
         || app.state::<BackendProcess>().0.lock().unwrap().is_some()
     {
         return Ok(());
@@ -180,7 +181,10 @@ fn start_backend(app: &AppHandle) -> Result<(), String> {
 
     let parent_pid = std::process::id().to_string();
     let backend_port = option_env!("SECFLOW_BACKEND_PORT").unwrap_or("18781");
-    let trial_build = option_env!("SECFLOW_TAURI_TRIAL_BUILD") == Some("1");
+    let trial_build = is_trial_build();
+    if trial_build {
+        ensure_backend_port_available(backend_port)?;
+    }
     let mut command = app
         .shell()
         .command(backend_executable)
@@ -201,14 +205,15 @@ fn start_backend(app: &AppHandle) -> Result<(), String> {
         .env("SECFLOW_BACKGROUND_STARTUP_DELAY_SECONDS", "12")
         .env("PYTHONUNBUFFERED", "1");
     if trial_build {
+        let trial_duration = option_env!("SECFLOW_TRIAL_DURATION_HOURS").unwrap_or("168");
+        let release_channel = option_env!("SECFLOW_APP_RELEASE_CHANNEL").unwrap_or("7天试用版");
+        let keychain_service = option_env!("SECFLOW_TRIAL_KEYCHAIN_SERVICE")
+            .unwrap_or("ai.secflow.security-agent.trial7days");
         command = command
             .env("SECFLOW_TRIAL_ENABLED", "1")
-            .env("SECFLOW_TRIAL_DURATION_HOURS", "168")
-            .env("SECFLOW_APP_RELEASE_CHANNEL", "7天试用版")
-            .env(
-                "SECFLOW_KEYCHAIN_SERVICE",
-                "ai.secflow.security-agent.trial7days",
-            );
+            .env("SECFLOW_TRIAL_DURATION_HOURS", trial_duration)
+            .env("SECFLOW_APP_RELEASE_CHANNEL", release_channel)
+            .env("SECFLOW_KEYCHAIN_SERVICE", keychain_service);
     }
     let (mut receiver, child) = command.spawn().map_err(|error| error.to_string())?;
     let child_pid = child.pid();
@@ -247,6 +252,19 @@ fn start_backend(app: &AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+fn is_trial_build() -> bool {
+    option_env!("SECFLOW_TAURI_TRIAL_BUILD") == Some("1")
+}
+
+fn ensure_backend_port_available(port: &str) -> Result<(), String> {
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| format!("Invalid bundled backend port: {port}"))?;
+    TcpListener::bind(("127.0.0.1", port))
+        .map(drop)
+        .map_err(|error| format!("Bundled backend port {port} is unavailable: {error}"))
 }
 
 fn append_backend_log(path: Option<&Path>, line: &str) {
@@ -586,5 +604,24 @@ mod tests {
 
         assert_eq!(left.x, -1512);
         assert_eq!(right.x, 2184);
+    }
+
+    #[test]
+    fn backend_port_check_rejects_an_occupied_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+
+        let error = ensure_backend_port_available(&port).unwrap_err();
+
+        assert!(error.contains(&format!("port {port} is unavailable")));
+    }
+
+    #[test]
+    fn backend_port_check_accepts_an_available_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        drop(listener);
+
+        ensure_backend_port_available(&port).unwrap();
     }
 }

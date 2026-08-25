@@ -45,6 +45,39 @@ describe("TrialGuard", () => {
     expect(await screen.findByText("7 天试用 · 剩余 6 天")).toBeInTheDocument();
   });
 
+  it("uses the backend duration for an active fourteen-day trial", async () => {
+    vi.spyOn(api, "trialStatus").mockResolvedValue({
+      enabled: true,
+      usable: true,
+      state: "active",
+      durationHours: 336,
+      secondsRemaining: 13 * 86400,
+      message: "14 天试用版可用。",
+    });
+
+    render(<TrialGuard />);
+
+    expect(await screen.findByText("14 天试用 · 剩余 13 天")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveAccessibleName("14 天试用状态");
+  });
+
+  it("fails closed when a trial client reaches a non-trial backend", async () => {
+    vi.spyOn(api, "trialStatus").mockResolvedValue({
+      enabled: false,
+      usable: true,
+      state: "disabled",
+      durationHours: 336,
+      secondsRemaining: null,
+      message: "当前版本未启用限时试用。",
+    });
+
+    render(<TrialGuard />);
+
+    expect(await screen.findByRole("alertdialog", { name: "神盾试用版不可用" })).toHaveTextContent(
+      "当前版本未启用限时试用",
+    );
+  });
+
   it("fails closed without destroying local data when authorization is invalid", async () => {
     vi.spyOn(api, "trialStatus").mockResolvedValue({
       enabled: true,

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "神盾 14 天试用版",
+  "identifier": "ai.secflow.security-agent.trial14days",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "神盾 14 天试用版",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "decorations": true,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay"
+      }
+    ]
+  },
+  "bundle": {
+    "shortDescription": "AegisAl 14 天试用版",
+    "longDescription": "AegisAl 神盾十四天限时试用客户端"
+  }
+}

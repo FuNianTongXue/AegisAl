@@ -12,7 +12,7 @@
   "app": {
     "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob: http://127.0.0.1:18781 http://127.0.0.1:18783; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:18781 http://127.0.0.1:18783; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob: http://127.0.0.1:18781 http://127.0.0.1:18783 http://127.0.0.1:18784; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:18781 http://127.0.0.1:18783 http://127.0.0.1:18784; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
     },
     "windows": [
       {

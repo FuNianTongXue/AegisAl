@@ -10,6 +10,9 @@ TARGET_TRIPLE="${SECFLOW_TAURI_TARGET:-aarch64-apple-darwin}"
 BUILD_ROOT="${SECFLOW_TAURI_BUILD_ROOT:-${TMPDIR:-/tmp}/secflow-tauri-macos-build}"
 BACKEND_PORT="${SECFLOW_TAURI_BACKEND_PORT:-18781}"
 TRIAL_BUILD="${SECFLOW_TAURI_TRIAL_BUILD:-0}"
+TRIAL_DURATION_HOURS="${SECFLOW_TRIAL_DURATION_HOURS:-168}"
+TRIAL_KEYCHAIN_SERVICE="${SECFLOW_TRIAL_KEYCHAIN_SERVICE:-ai.secflow.security-agent.trial7days}"
+RELEASE_CHANNEL="${SECFLOW_APP_RELEASE_CHANNEL:-$([ "$TRIAL_BUILD" = "1" ] && printf '7天试用版' || printf '正式版')}"
 TAURI_CONFIG="${SECFLOW_TAURI_CONFIG:-}"
 BACKEND_BUILD_DIR="$BUILD_ROOT/backend"
 SEMGREP_BUILD_DIR="$BUILD_ROOT/semgrep"
@@ -19,6 +22,16 @@ BACKEND_RUNTIME_DIR="$RESOURCES_DIR/backend"
 BACKEND_EXECUTABLE="$BACKEND_RUNTIME_DIR/secflow-backend"
 TRANSLATION_MODEL_DIR="$ROOT_DIR/app/resources/translation-models/opus-mt-en-zh-1.9"
 BUNDLE_DIR="$TAURI_SOURCE_DIR/target/$TARGET_TRIPLE/release/bundle"
+EDITION_MANIFEST="$BUILD_ROOT/aegisal-edition.json"
+EDITION_RUNTIME_HOOK="$BUILD_ROOT/aegisal_edition_runtime_hook.py"
+APP_VERSION="$($PYTHON_BIN - "$TAURI_DIR/package.json" <<'PY'
+import json
+import pathlib
+import sys
+
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
+PY
+)"
 
 case "$MACOS_ARCH:$TARGET_TRIPLE" in
     arm64:aarch64-apple-darwin|x86_64:x86_64-apple-darwin) ;;
@@ -54,12 +67,68 @@ rm -rf "$BUILD_ROOT" "$RESOURCES_DIR" "$BUNDLE_DIR"
 mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
     "$RESOURCES_DIR/semgrep" "$RESOURCES_DIR/semgrep-rules" "$RESOURCES_DIR/licenses"
 
+SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)"
+SOURCE_DIRTY_SHA256="$(git -C "$ROOT_DIR" diff --binary --no-ext-diff 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+"$PYTHON_BIN" - \
+    "$EDITION_MANIFEST" \
+    "$TRIAL_BUILD" \
+    "$APP_VERSION" \
+    "$RELEASE_CHANNEL" \
+    "$BACKEND_PORT" \
+    "$TRIAL_DURATION_HOURS" \
+    "$TRIAL_KEYCHAIN_SERVICE" \
+    "$SOURCE_REVISION" \
+    "$SOURCE_DIRTY_SHA256" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    output,
+    trial_build,
+    app_version,
+    release_channel,
+    backend_port,
+    duration_hours,
+    keychain_service,
+    source_revision,
+    source_dirty_sha256,
+) = sys.argv[1:]
+trial = trial_build == "1"
+payload = {
+    "schema_version": 1,
+    "edition": "trial" if trial else "formal",
+    "app_version": app_version,
+    "release_channel": release_channel,
+    "backend_port": int(backend_port),
+    "trial_duration_hours": int(duration_hours) if trial else None,
+    "keychain_service": keychain_service if trial else "ai.secflow.security-agent",
+    "source_revision": source_revision,
+    "source_dirty_sha256": source_dirty_sha256,
+}
+pathlib.Path(output).write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+runtime_hook = pathlib.Path(output).with_name("aegisal_edition_runtime_hook.py")
+runtime_hook.write_text(
+    "import sys\n"
+    "import types\n"
+    "_module = types.ModuleType('_aegisal_frozen_edition')\n"
+    f"_module.PAYLOAD = {payload!r}\n"
+    "sys.modules['_aegisal_frozen_edition'] = _module\n",
+    encoding="utf-8",
+)
+PY
+
 "$PYTHON_BIN" -m PyInstaller \
     --noconfirm \
     --clean \
     --onedir \
     --name secflow-backend \
     --paths "$ROOT_DIR" \
+    --runtime-hook "$EDITION_RUNTIME_HOOK" \
+    --add-data "$EDITION_MANIFEST:." \
     --add-data "$ROOT_DIR/app/resources:app/resources" \
     --collect-all reportlab \
     --collect-all docx \
@@ -94,6 +163,20 @@ mkdir -p "$BACKEND_BUILD_DIR" "$SEMGREP_BUILD_DIR" "$BACKEND_RUNTIME_DIR" \
 
 cp -R "$BACKEND_BUILD_DIR/dist/secflow-backend/." "$BACKEND_RUNTIME_DIR/"
 chmod 755 "$BACKEND_EXECUTABLE"
+BUNDLED_EDITION_MANIFEST="$(find "$BACKEND_RUNTIME_DIR" -name aegisal-edition.json -type f -print -quit)"
+[ -n "$BUNDLED_EDITION_MANIFEST" ] || { echo "Bundled edition metadata is missing from the backend." >&2; exit 1; }
+"$PYTHON_BIN" - "$BUNDLED_EDITION_MANIFEST" "$TRIAL_BUILD" "$TRIAL_DURATION_HOURS" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+trial = sys.argv[2] == "1"
+if payload.get("edition") != ("trial" if trial else "formal"):
+    raise SystemExit("Bundled edition does not match the requested build")
+if trial and int(payload.get("trial_duration_hours") or 0) != int(sys.argv[3]):
+    raise SystemExit("Bundled trial duration does not match the requested build")
+PY
 BUNDLED_TRANSLATION_MODEL_DIR="$(find "$BACKEND_RUNTIME_DIR" -path '*/app/resources/translation-models/opus-mt-en-zh-1.9' -type d -print -quit)"
 [ -n "$BUNDLED_TRANSLATION_MODEL_DIR" ] || { echo "Bundled offline translation model is missing from the backend." >&2; exit 1; }
 "$PYTHON_BIN" "$ROOT_DIR/scripts/validate_translation_model.py" "$BUNDLED_TRANSLATION_MODEL_DIR"
@@ -190,6 +273,9 @@ fi
 SECFLOW_BACKEND_SHA256="$BACKEND_SHA256" \
 SECFLOW_BACKEND_PORT="$BACKEND_PORT" \
 SECFLOW_TAURI_TRIAL_BUILD="$TRIAL_BUILD" \
+SECFLOW_TRIAL_DURATION_HOURS="$TRIAL_DURATION_HOURS" \
+SECFLOW_APP_RELEASE_CHANNEL="$RELEASE_CHANNEL" \
+SECFLOW_TRIAL_KEYCHAIN_SERVICE="$TRIAL_KEYCHAIN_SERVICE" \
 VITE_SECFLOW_SERVER_URL="http://127.0.0.1:$BACKEND_PORT" \
 VITE_SECFLOW_TRIAL_BUILD="$TRIAL_BUILD" \
 CARGO_HTTP_PROXY='' pnpm "${TAURI_BUILD_ARGS[@]}"

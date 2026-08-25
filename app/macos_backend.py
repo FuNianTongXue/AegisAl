@@ -7,8 +7,11 @@ import sys
 import threading
 import time
 
+from app.packaged_edition import apply_packaged_edition_defaults
+
 
 def main() -> None:
+    apply_packaged_edition_defaults()
     import uvicorn
 
     if "--task-worker" in sys.argv:
