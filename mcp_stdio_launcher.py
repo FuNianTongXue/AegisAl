@@ -14,13 +14,46 @@ Available server IDs:
 from __future__ import annotations
 
 import argparse
-import sys
+import ctypes
 import os
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 # Ensure the project root is on sys.path so `app.*` imports resolve
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+
+def _flush_native_streams() -> None:
+    if os.name != "posix":
+        return
+    try:
+        libc = ctypes.CDLL(None)
+        fflush = libc.fflush
+        fflush.argtypes = [ctypes.c_void_p]
+        fflush.restype = ctypes.c_int
+        fflush(None)
+    except (AttributeError, OSError):
+        pass
+
+
+@contextmanager
+def _native_stdout_to_stderr() -> Iterator[None]:
+    """Keep native-library startup notices out of the MCP JSON-RPC stream."""
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    stdout_fd = sys.stdout.fileno()
+    saved_stdout = os.dup(stdout_fd)
+    try:
+        os.dup2(sys.stderr.fileno(), stdout_fd)
+        yield
+    finally:
+        _flush_native_streams()
+        os.dup2(saved_stdout, stdout_fd)
+        os.close(saved_stdout)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -89,7 +122,12 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── translation ────────────────────────────────────────────────────
     if server_id == "translation":
+        from app.mcp.offline_translation import offline_translation_engine
+
+        with _native_stdout_to_stderr():
+            offline_translation_engine.warmup()
         from app.mcp.translation import translation_mcp
+
         translation_mcp.run(transport="stdio")
         return
 

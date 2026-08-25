@@ -164,6 +164,12 @@ class OfflineTranslationEngine:
         with self._lock:
             return self._info
 
+    def warmup(self) -> OfflineTranslationInfo:
+        """Load and verify the native engine before a stdio protocol starts."""
+
+        self._ensure_loaded()
+        return self.info
+
     def translate_batch(self, texts: Sequence[str], *, target_language: str) -> list[str]:
         target = normalize_target_language(target_language)
         clean = [str(text or "") for text in texts]

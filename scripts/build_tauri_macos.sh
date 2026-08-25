@@ -216,7 +216,14 @@ PY
 BUNDLED_TRANSLATION_MODEL_DIR="$(find "$BACKEND_RUNTIME_DIR" -path '*/app/resources/translation-models/opus-mt-en-zh-1.9' -type d -print -quit)"
 [ -n "$BUNDLED_TRANSLATION_MODEL_DIR" ] || { echo "Bundled offline translation model is missing from the backend." >&2; exit 1; }
 "$PYTHON_BIN" "$ROOT_DIR/scripts/validate_translation_model.py" "$BUNDLED_TRANSLATION_MODEL_DIR"
-"$PYTHON_BIN" "$ROOT_DIR/scripts/validate_packaged_translation_runtime.py" "$BACKEND_EXECUTABLE"
+TRANSLATION_VALIDATION_LOG="$BUILD_ROOT/packaged-translation-validation.log"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/validate_packaged_translation_runtime.py" "$BACKEND_EXECUTABLE" \
+    2>&1 | tee "$TRANSLATION_VALIDATION_LOG"
+if grep -Eq 'Failed to parse JSONRPC message|ValidationError for JSONRPCMessage' \
+    "$TRANSLATION_VALIDATION_LOG"; then
+    echo "Packaged Translation MCP polluted its JSON-RPC stdout stream." >&2
+    exit 1
+fi
 
 if [ "${SECFLOW_SKIP_SOCKET_VALIDATION:-0}" = "1" ]; then
     echo "Skipping packaged backend socket validation because SECFLOW_SKIP_SOCKET_VALIDATION=1."
