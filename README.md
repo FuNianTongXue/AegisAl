@@ -1,6 +1,11 @@
-> **扫码进群交流**
->
-> ![微信群二维码](docs/assets/wechat-group-qr.jpg)
+<p align="center">
+  <strong>扫码进群交流</strong>
+</p>
+<p align="center">
+  <a href="https://raw.githubusercontent.com/FuNianTongXue/AegisAl/main/docs/assets/pasted_file_kAnbFo_2d4303ca41a4432b784d01a22be1f3b5.jpg">
+    <img src="https://raw.githubusercontent.com/FuNianTongXue/AegisAl/main/docs/assets/pasted_file_kAnbFo_2d4303ca41a4432b784d01a22be1f3b5.jpg" width="420" alt="微信群二维码">
+  </a>
+</p>
 
 # AegisAl
 
