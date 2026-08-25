@@ -14,7 +14,7 @@
 
 源码版本 `v1.3.4` 支持以下桌面构建目标：
 
-> **版本说明：** 本仓库的源码和文档基线为 `1.3.4`。按本次发布要求没有重新编译客户端，因此 Release 中的两个 7 天试用 DMG 仍是经过签名、架构和完整性验证的 `1.3.3` 构建；安装包内版本号及实际可执行代码均以 `1.3.3` 为准，不能视为 `1.3.4` 源码的二进制构建。
+> **版本说明：** 本次 macOS 14 天试用客户端是 `1.3.4` 的实际二进制构建，二进制源码提交为 `02fa7e259a3817a866e5595640d058320232025a`，构建时工作树为干净状态。
 
 | 平台 | 架构 | 构建入口 |
 | --- | --- | --- |
@@ -37,18 +37,20 @@
 
 完整变更、试用包边界与校验值见 [v1.3.4 发布说明](docs/RELEASE_NOTES_v1.3.4.md)。
 
-本次源码验证基线：前端 27 个测试文件、198 项测试通过；后端 903 项测试和 65 个子测试通过；TypeScript 检查与 Vite 生产构建通过。
+本次发布验证基线：前端 27 个测试文件、200 项测试通过；试用授权与打包版本 11 项 Python 测试通过；TypeScript 检查、Vite 生产构建以及 ARM64/Intel Rust 检查通过。
 
-## 7 天试用版
+## 14 天试用版
 
-试用期从首次成功启动起连续计算 168 小时。两个安装包均为 ad-hoc 签名且未进行 Apple 公证；首次打开时可能需要在 macOS“隐私与安全性”中确认。Release 只提供试用版，不提供正式版安装包。
+试用期从首次成功启动起连续计算 336 小时。两个安装包均为 ad-hoc 签名且未进行 Apple 公证；首次打开时可能需要在 macOS“隐私与安全性”中确认。Release 只提供试用版，不提供正式版安装包。
 
 | 平台 | 客户端构建 | 安装包 | SHA-256 |
 | --- | --- | --- | --- |
-| macOS Apple Silicon (`arm64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-ARM64-7天试用版.dmg` | `bfc9e33b8d5fe40d741a18e0b246ee58ad0bb2248c28a86a9b8cd52309a34589` |
-| macOS Intel (`x86_64`) | `1.3.3` | `神盾-AegisAl-v1.3.3-macOS-x86_64-7天试用版.dmg` | `16ae1aedc0e2e0c9bb018ef670ce9b583c32885442d468551a405a9a02d53402` |
+| macOS Apple Silicon (`arm64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-ARM64-Trial-14Days.dmg` | `d7baa80fba3b6eb2d35c732f615a74e87dd55585e4feb862c594baf1cffcccf6` |
+| macOS Intel (`x86_64`) | `1.3.4` | `AegisAl-v1.3.4-macOS-x86_64-Trial-14Days.dmg` | `e1b5ce87c23ff8f44bf615660b3126f3442f077b7b980de37656693e9bb03bb6` |
 
-安装包及对应校验文件见 [v1.3.4 源码 / v1.3.3 试用客户端 Release](https://github.com/FuNianTongXue/AegisAl/releases/tag/v1.3.4-trial-7days)。
+安装包及对应校验文件见 [v1.3.4 macOS 14 天试用客户端 Release](https://github.com/FuNianTongXue/AegisAl/releases/tag/v1.3.4-trial-14days)。
+
+> **发布调整：** 这是 AegisAl 在 GitHub 的最后一次公开源码更新和公开试用版发布。后续产品更新不再开源，也不再同步至 GitHub；后续试用版仅在微信群发布。本仓库保留为 `v1.3.4` 历史公开快照。
 
 ## 功能演示
 
